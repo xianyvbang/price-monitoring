@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% set title = "通用设置" %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>通用设置</h1>
+    <p>配置查询节奏、默认预警阈值和 SMTP 邮件。</p>
+  </div>
+</section>
+
+{% if message %}<p class="notice">{{ message }}</p>{% endif %}
+
+<section class="grid two">
+  <form class="panel" method="post" action="/settings/general">
+    <h2>查询设置</h2>
+    <label>请求超时时间（秒）<input name="request_timeout" type="number" min="1" step="0.5" value="{{ settings.request_timeout }}" required></label>
+    <label>自动查询间隔（秒）<input name="query_interval" type="number" min="30" step="1" value="{{ settings.query_interval }}" required></label>
+    <label>全局默认低余额阈值<input name="default_threshold" type="number" min="0" step="0.01" value="{{ settings.default_threshold }}" required></label>
+    <button class="primary" type="submit">保存查询设置</button>
+  </form>
+
+  <form class="panel" method="post" action="/settings/smtp">
+    <h2>SMTP 邮件</h2>
+    <label>Host<input name="host" value="{{ smtp.host or '' }}"></label>
+    <label>Port<input name="port" type="number" min="1" value="{{ smtp.port if smtp.port is not none else '' }}"></label>
+    <label>Username<input name="username" value="{{ smtp.username or '' }}"></label>
+    <label>Password<input name="password" type="password" placeholder="{{ '已配置，留空不修改' if smtp.has_password else '' }}"></label>
+    <label>Sender<input name="sender" value="{{ smtp.sender or '' }}"></label>
+    <label>Receiver<input name="receiver" value="{{ smtp.receiver or '' }}"></label>
+    <label>
+      安全模式
+      <select name="security">
+        <option value="" {% if not smtp.security %}selected{% endif %}></option>
+        <option value="starttls" {% if smtp.security == "starttls" %}selected{% endif %}>STARTTLS</option>
+        <option value="ssl" {% if smtp.security == "ssl" %}selected{% endif %}>SSL</option>
+        <option value="none" {% if smtp.security == "none" %}selected{% endif %}>None</option>
+      </select>
+    </label>
+    <div class="button-row">
+      <button class="primary" type="submit">保存 SMTP</button>
+      <button type="submit" formaction="/settings/smtp/test">发送测试邮件</button>
+    </div>
+  </form>
+</section>
+{% endblock %}

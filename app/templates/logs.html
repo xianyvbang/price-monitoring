@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% set title = "日志" %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>日志</h1>
+    <p>显示最近 7 天的全部日志。</p>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>时间</th>
+          <th>级别</th>
+          <th>分类</th>
+          <th>内容</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for log in logs %}
+        <tr>
+          <td>{{ log.created_at }}</td>
+          <td><span class="log-level {{ log.level }}">{{ log.level }}</span></td>
+          <td>{{ log.category }}</td>
+          <td class="log-message">{{ log.message }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="4" class="empty">暂无日志</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

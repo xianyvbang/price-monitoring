@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% set title = "仪表盘" %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>余额仪表盘</h1>
+    <p>自动查询间隔 {{ settings.query_interval }} 秒，请求超时 {{ settings.request_timeout }} 秒。</p>
+  </div>
+  <form method="post" action="/query-all">
+    <button class="primary" type="submit">立即查询全部</button>
+  </form>
+</section>
+
+{% for platform, accounts in grouped.items() %}
+<section class="panel">
+  <div class="panel-title">
+    <h2>{{ platform }}</h2>
+    <span>{{ accounts|length }} 个账号</span>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>名称</th>
+          <th>状态</th>
+          <th>套餐</th>
+          <th>剩余</th>
+          {% if platform != "sub2Api" %}
+          <th>已用</th>
+          <th>总额</th>
+          {% endif %}
+          <th>阈值</th>
+          <th>最近查询</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for account in accounts %}
+        <tr>
+          <td>{{ account.name }}</td>
+          <td><span class="status {{ account.last_status }}">{{ account.last_status }}</span></td>
+          <td>{{ account.last_plan_name or "-" }}</td>
+          <td>{{ account.last_remaining if account.last_remaining is not none else "-" }} {{ account.last_unit or "" }}</td>
+          {% if platform != "sub2Api" %}
+          <td>{{ account.last_used if account.last_used is not none else "-" }}</td>
+          <td>{{ account.last_total if account.last_total is not none else "-" }}</td>
+          {% endif %}
+          <td>{{ account.threshold if account.threshold is not none else settings.default_threshold }}</td>
+          <td>{{ account.last_checked_at or "-" }}</td>
+          <td>
+            <form method="post" action="/accounts/{{ account.id }}/query">
+              <button type="submit">查询</button>
+            </form>
+          </td>
+        </tr>
+        {% if account.last_error %}
+        <tr class="detail-row">
+          <td colspan="{{ 7 if platform == 'sub2Api' else 9 }}">{{ account.last_error }}</td>
+        </tr>
+        {% endif %}
+        {% else %}
+        <tr><td colspan="{{ 7 if platform == 'sub2Api' else 9 }}" class="empty">暂无账号</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endfor %}
+{% endblock %}

@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+{% set title = "平台配置" %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>平台配置</h1>
+    <p>按平台新增或批量导入账号，名称相同会更新已有配置。</p>
+  </div>
+</section>
+
+{% if message %}<p class="notice">{{ message }}</p>{% endif %}
+
+<section class="grid two">
+  <form class="panel" method="post" action="/accounts" data-account-form>
+    <h2>新增账号</h2>
+    <label>
+      平台
+      <select name="platform" required data-platform-select>
+        <option value="newApi">newApi</option>
+        <option value="sub2Api">sub2Api</option>
+      </select>
+    </label>
+    <label>名称<input name="name" required></label>
+    <label>Base URL<input name="base_url" required></label>
+    <label data-platform-field="sub2Api">sub2Api apiKey<input name="api_key" type="password" autocomplete="off"></label>
+    <label data-platform-field="newApi">newApi accessToken<input name="access_token" type="password" autocomplete="off"></label>
+    <label data-platform-field="newApi">newApi userId<input name="user_id" autocomplete="off"></label>
+    <label>预警阈值<input name="threshold" type="number" min="0" step="0.01"></label>
+    <label class="check"><input name="is_enabled" type="checkbox" checked> 启用自动查询</label>
+    <button class="primary" type="submit">保存账号</button>
+  </form>
+
+  <form class="panel" method="post" action="/accounts/bulk" data-bulk-form>
+    <h2>批量导入</h2>
+    <label>
+      平台
+      <select name="platform" required data-platform-select>
+        <option value="newApi">newApi</option>
+        <option value="sub2Api">sub2Api</option>
+      </select>
+    </label>
+    <label>
+      内容
+      <textarea name="bulk_text" rows="12" data-bulk-textarea></textarea>
+    </label>
+    <button class="primary" type="submit">导入</button>
+  </form>
+</section>
+
+{% for platform, accounts in grouped.items() %}
+<section class="panel">
+  <div class="panel-title">
+    <h2>{{ platform }}</h2>
+    <span>{{ accounts|length }} 个账号</span>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>名称</th>
+          <th>Base URL</th>
+          <th>凭据</th>
+          <th>阈值</th>
+          <th>启用</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for account in accounts %}
+        <tr>
+          <td>{{ account.name }}</td>
+          <td>{{ account.base_url }}</td>
+          <td>
+            {% if platform == "sub2Api" %}apiKey: {{ "已配置" if account.has_api_key else "未配置" }}{% endif %}
+            {% if platform == "newApi" %}accessToken: {{ "已配置" if account.has_access_token else "未配置" }} / userId: {{ "已配置" if account.has_user_id else "未配置" }}{% endif %}
+          </td>
+          <td>{{ account.threshold if account.threshold is not none else settings.default_threshold }}</td>
+          <td>{{ "是" if account.is_enabled else "否" }}</td>
+          <td>
+            <form method="post" action="/accounts/{{ account.id }}/delete">
+              <button class="danger" type="submit">删除</button>
+            </form>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="empty">暂无账号</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endfor %}
+<script>
+  const bulkPlaceholders = {
+    newApi: "JSON 数组，或 CSV 行。newApi: name,baseUrl,accessToken,userId,threshold。",
+    sub2Api: "JSON 数组，或 CSV 行。sub2Api: name,baseUrl,apiKey,threshold。"
+  };
+
+  document.querySelectorAll("[data-account-form]").forEach((form) => {
+    const select = form.querySelector("[data-platform-select]");
+    const fields = form.querySelectorAll("[data-platform-field]");
+    const syncFields = () => {
+      fields.forEach((field) => {
+        const visible = field.dataset.platformField === select.value;
+        field.hidden = !visible;
+        field.querySelectorAll("input").forEach((input) => {
+          input.disabled = !visible;
+          if (!visible) {
+            input.value = "";
+          }
+        });
+      });
+    };
+    select.addEventListener("change", syncFields);
+    syncFields();
+  });
+
+  document.querySelectorAll("[data-bulk-form]").forEach((form) => {
+    const select = form.querySelector("[data-platform-select]");
+    const textarea = form.querySelector("[data-bulk-textarea]");
+    const syncPlaceholder = () => {
+      textarea.placeholder = bulkPlaceholders[select.value] || "";
+    };
+    select.addEventListener("change", () => {
+      textarea.value = "";
+      syncPlaceholder();
+    });
+    syncPlaceholder();
+  });
+</script>
+{% endblock %}

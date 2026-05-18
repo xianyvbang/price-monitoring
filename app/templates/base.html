@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ title or "余额监控" }}</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/">余额监控</a>
+      {% if user %}
+      <nav class="nav">
+        <a href="/">仪表盘</a>
+        <a href="/accounts">平台配置</a>
+        <a href="/settings">通用设置</a>
+        <a href="/logs">日志</a>
+        <form method="post" action="/logout">
+          <button class="link-button" type="submit">退出</button>
+        </form>
+      </nav>
+      {% endif %}
+    </header>
+    <main class="page">
+      {% block content %}{% endblock %}
+    </main>
+  </body>
+</html>

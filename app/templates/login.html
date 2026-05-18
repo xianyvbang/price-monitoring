@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% set title = "登录" %}
+{% block content %}
+<section class="login-shell">
+  <form class="panel login-panel" method="post" action="/login">
+    <h1>管理员登录</h1>
+    {% if error %}<p class="error">{{ error }}</p>{% endif %}
+    <label>
+      用户名
+      <input name="username" autocomplete="username" required>
+    </label>
+    <label>
+      密码
+      <input name="password" type="password" autocomplete="current-password" required>
+    </label>
+    <button class="primary" type="submit">登录</button>
+  </form>
+</section>
+{% endblock %}
