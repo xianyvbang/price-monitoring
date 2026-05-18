@@ -12,7 +12,8 @@
 
 <section class="grid two">
   <form class="panel" method="post" action="/accounts" data-account-form>
-    <h2>新增账号</h2>
+    <h2 data-form-title>新增账号</h2>
+    <input name="account_id" type="hidden" data-account-id>
     <label>
       平台
       <select name="platform" required data-platform-select>
@@ -27,7 +28,10 @@
     <label data-platform-field="newApi">newApi userId<input name="user_id" autocomplete="off"></label>
     <label>预警阈值<input name="threshold" type="number" min="0" step="0.01"></label>
     <label class="check"><input name="is_enabled" type="checkbox" checked> 启用自动查询</label>
-    <button class="primary" type="submit">保存账号</button>
+    <div class="button-row">
+      <button class="primary" type="submit" data-submit-label>保存账号</button>
+      <button type="button" data-cancel-edit hidden>取消编辑</button>
+    </div>
   </form>
 
   <form class="panel" method="post" action="/accounts/bulk" data-bulk-form>
@@ -77,9 +81,21 @@
           <td>{{ account.threshold if account.threshold is not none else settings.default_threshold }}</td>
           <td>{{ "是" if account.is_enabled else "否" }}</td>
           <td>
+            <div class="actions">
+            <button
+              type="button"
+              data-edit-account
+              data-id="{{ account.id }}"
+              data-platform="{{ platform }}"
+              data-name="{{ account.name }}"
+              data-base-url="{{ account.base_url }}"
+              data-threshold="{{ account.threshold if account.threshold is not none else '' }}"
+              data-is-enabled="{{ 'true' if account.is_enabled else 'false' }}"
+            >编辑</button>
             <form method="post" action="/accounts/{{ account.id }}/delete">
               <button class="danger" type="submit">删除</button>
             </form>
+            </div>
           </td>
         </tr>
         {% else %}
@@ -99,6 +115,10 @@
   document.querySelectorAll("[data-account-form]").forEach((form) => {
     const select = form.querySelector("[data-platform-select]");
     const fields = form.querySelectorAll("[data-platform-field]");
+    const title = form.querySelector("[data-form-title]");
+    const accountId = form.querySelector("[data-account-id]");
+    const submitLabel = form.querySelector("[data-submit-label]");
+    const cancelEdit = form.querySelector("[data-cancel-edit]");
     const syncFields = () => {
       fields.forEach((field) => {
         const visible = field.dataset.platformField === select.value;
@@ -113,6 +133,36 @@
     };
     select.addEventListener("change", syncFields);
     syncFields();
+
+    cancelEdit.addEventListener("click", () => {
+      form.reset();
+      accountId.value = "";
+      title.textContent = "新增账号";
+      submitLabel.textContent = "保存账号";
+      cancelEdit.hidden = true;
+      select.disabled = false;
+      syncFields();
+    });
+
+    document.querySelectorAll("[data-edit-account]").forEach((button) => {
+      button.addEventListener("click", () => {
+        accountId.value = button.dataset.id;
+        select.value = button.dataset.platform;
+        form.elements.name.value = button.dataset.name || "";
+        form.elements.base_url.value = button.dataset.baseUrl || "";
+        form.elements.threshold.value = button.dataset.threshold || "";
+        form.elements.is_enabled.checked = button.dataset.isEnabled === "true";
+        form.elements.api_key.value = "";
+        form.elements.access_token.value = "";
+        form.elements.user_id.value = "";
+        title.textContent = "编辑账号";
+        submitLabel.textContent = "保存修改";
+        cancelEdit.hidden = false;
+        select.disabled = false;
+        syncFields();
+        form.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    });
   });
 
   document.querySelectorAll("[data-bulk-form]").forEach((form) => {

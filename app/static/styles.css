@@ -172,7 +172,19 @@ button {
   padding: 8px 12px;
 }
 
-button:hover {
+.button-link {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid #cfd7e3;
+  border-radius: 6px;
+  color: var(--text);
+  display: inline-flex;
+  min-height: 36px;
+  padding: 8px 12px;
+}
+
+button:hover,
+.button-link:hover {
   border-color: #98a2b3;
 }
 
@@ -273,6 +285,11 @@ th {
   white-space: normal;
 }
 
+.low-balance {
+  color: var(--danger);
+  font-weight: 700;
+}
+
 .empty {
   color: var(--muted);
   text-align: center;
@@ -309,6 +326,16 @@ th {
   align-items: center;
   display: flex;
   gap: 10px;
+}
+
+.actions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.actions form {
+  margin: 0;
 }
 
 @media (max-width: 760px) {

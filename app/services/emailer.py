@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import smtplib
 from email.message import EmailMessage
+from email.utils import formataddr
 from typing import Any
 
 from app.security import decrypt_value
@@ -19,13 +20,14 @@ def send_email(settings: Any, secret_key: str, subject: str, body: str) -> None:
         raise EmailConfigError("SMTP 未配置完整")
 
     message = EmailMessage()
-    message["From"] = sender
+    sender_name = settings["sender_name"] if "sender_name" in settings.keys() else ""
+    message["From"] = formataddr((sender_name, sender)) if sender_name else sender
     message["To"] = receiver
     message["Subject"] = subject
     message.set_content(body)
 
-    port = int(settings["port"] or 587)
-    security = settings["security"] or "starttls"
+    port = int(settings["port"] or 465)
+    security = settings["security"] or "ssl"
     password = decrypt_value(settings["password_enc"], secret_key)
 
     if security == "ssl":

@@ -148,8 +148,13 @@ async def save_account_form(request: Request):
         return redirect
     form = await request.form()
     account_data = _account_from_form(form)
-    db.upsert_account(account_data)
-    db.add_log("info", "account", f"保存账号: {account_data['platform']} / {account_data['name']}")
+    account_id = _optional_int(form.get("account_id"))
+    if account_id:
+        db.update_account(account_id, account_data)
+        db.add_log("info", "account", f"编辑账号: {account_data['platform']} / {account_data['name']}")
+    else:
+        db.upsert_account(account_data)
+        db.add_log("info", "account", f"保存账号: {account_data['platform']} / {account_data['name']}")
     return RedirectResponse("/accounts", status_code=303)
 
 
@@ -255,6 +260,7 @@ async def save_smtp_settings_form(request: Request):
         str(form.get("username", "")),
         str(form.get("password", "")),
         str(form.get("sender", "")),
+        str(form.get("sender_name", "")),
         str(form.get("receiver", "")),
         str(form.get("security") or ""),
     )
@@ -267,6 +273,17 @@ async def test_smtp_form(request: Request):
     redirect = redirect_if_needed(request)
     if redirect:
         return redirect
+    form = await request.form()
+    db.update_smtp_settings(
+        str(form.get("host", "")),
+        _optional_int(form.get("port")),
+        str(form.get("username", "")),
+        str(form.get("password", "")),
+        str(form.get("sender", "")),
+        str(form.get("sender_name", "")),
+        str(form.get("receiver", "")),
+        str(form.get("security") or ""),
+    )
     message = "测试邮件已发送"
     try:
         send_email(db.get_smtp_settings(), db.secret_key, "余额监控测试邮件", "这是一封 SMTP 配置测试邮件。")
@@ -355,6 +372,7 @@ async def api_smtp_settings(request: Request):
         payload.get("username", ""),
         payload.get("password", ""),
         payload.get("sender", ""),
+        payload.get("sender_name", payload.get("senderName", "")),
         payload.get("receiver", ""),
         payload.get("security", ""),
     )

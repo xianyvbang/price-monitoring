@@ -26,13 +26,13 @@
     <label>Username<input name="username" value="{{ smtp.username or '' }}"></label>
     <label>Password<input name="password" type="password" placeholder="{{ '已配置，留空不修改' if smtp.has_password else '' }}"></label>
     <label>Sender<input name="sender" value="{{ smtp.sender or '' }}"></label>
+    <label>Sender Name<input name="sender_name" value="{{ smtp.sender_name or '' }}"></label>
     <label>Receiver<input name="receiver" value="{{ smtp.receiver or '' }}"></label>
     <label>
       安全模式
       <select name="security">
-        <option value="" {% if not smtp.security %}selected{% endif %}></option>
+        <option value="ssl" {% if smtp.security == "ssl" or not smtp.security %}selected{% endif %}>SSL</option>
         <option value="starttls" {% if smtp.security == "starttls" %}selected{% endif %}>STARTTLS</option>
-        <option value="ssl" {% if smtp.security == "ssl" %}selected{% endif %}>SSL</option>
         <option value="none" {% if smtp.security == "none" %}selected{% endif %}>None</option>
       </select>
     </label>

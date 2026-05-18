@@ -11,7 +11,7 @@ def test_alert_only_sends_on_state_change(tmp_path, monkeypatch):
     monkeypatch.setattr("app.services.alerts.send_email", fake_send)
     db = Database(str(tmp_path / "app.db"), "test-key")
     db.init()
-    db.update_smtp_settings("smtp.example", 587, "u", "p", "from@example.com", "to@example.com", "starttls")
+    db.update_smtp_settings("smtp.example", 587, "u", "p", "from@example.com", "monitor", "to@example.com", "starttls")
     account_id = db.upsert_account(
         {
             "platform": "sub2Api",

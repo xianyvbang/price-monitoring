@@ -55,6 +55,7 @@ class Database:
                     username TEXT,
                     password_enc TEXT,
                     sender TEXT,
+                    sender_name TEXT,
                     receiver TEXT,
                     security TEXT,
                     updated_at TEXT
@@ -140,6 +141,10 @@ class Database:
     @staticmethod
     def _migrate_smtp_nullable(conn: sqlite3.Connection) -> None:
         columns = conn.execute("PRAGMA table_info(smtp_settings)").fetchall()
+        column_names = {row["name"] for row in columns}
+        if "sender_name" not in column_names:
+            conn.execute("ALTER TABLE smtp_settings ADD COLUMN sender_name TEXT")
+            columns = conn.execute("PRAGMA table_info(smtp_settings)").fetchall()
         notnull = {row["name"]: row["notnull"] for row in columns}
         if notnull.get("port") == 0 and notnull.get("security") == 0:
             return
@@ -152,15 +157,16 @@ class Database:
                 username TEXT,
                 password_enc TEXT,
                 sender TEXT,
+                sender_name TEXT,
                 receiver TEXT,
                 security TEXT,
                 updated_at TEXT
             );
 
             INSERT INTO smtp_settings_new (
-                id, host, port, username, password_enc, sender, receiver, security, updated_at
+                id, host, port, username, password_enc, sender, sender_name, receiver, security, updated_at
             )
-            SELECT id, host, port, username, password_enc, sender, receiver, security, updated_at
+            SELECT id, host, port, username, password_enc, sender, sender_name, receiver, security, updated_at
             FROM smtp_settings;
 
             DROP TABLE smtp_settings;
@@ -205,6 +211,7 @@ class Database:
         username: str,
         password: str,
         sender: str,
+        sender_name: str,
         receiver: str,
         security: str,
     ) -> None:
@@ -218,11 +225,11 @@ class Database:
             conn.execute(
                 """
                 UPDATE smtp_settings
-                SET host = ?, port = ?, username = ?, password_enc = ?, sender = ?,
+                SET host = ?, port = ?, username = ?, password_enc = ?, sender = ?, sender_name = ?,
                     receiver = ?, security = ?, updated_at = ?
                 WHERE id = 1
                 """,
-                (host, port, username, password_enc, sender, receiver, security or None, utc_now()),
+                (host, port, username, password_enc, sender, sender_name, receiver, security or None, utc_now()),
             )
 
     def list_accounts(self, platform: Optional[str] = None) -> list[sqlite3.Row]:
@@ -242,8 +249,12 @@ class Database:
     def upsert_account(self, data: dict[str, Any]) -> int:
         now = utc_now()
         platform = data["platform"]
-        api_key_enc = encrypt_value(data.get("api_key"), self.secret_key)
-        access_token_enc = encrypt_value(data.get("access_token"), self.secret_key)
+        api_key = data.get("api_key")
+        access_token = data.get("access_token")
+        if platform == "newApi" and not access_token and api_key:
+            access_token = api_key
+        api_key_enc = encrypt_value(api_key, self.secret_key)
+        access_token_enc = encrypt_value(access_token, self.secret_key)
         user_id_enc = encrypt_value(data.get("user_id"), self.secret_key)
         threshold = _optional_float(data.get("threshold"))
         is_enabled = 1 if data.get("is_enabled", True) else 0
@@ -282,6 +293,47 @@ class Database:
                 (platform, data["name"]),
             ).fetchone()
             return int(row["id"])
+
+    def update_account(self, account_id: int, data: dict[str, Any]) -> int:
+        current = self.get_account(account_id)
+        if not current:
+            raise ValueError("账号不存在")
+        now = utc_now()
+        platform = data["platform"]
+        api_key = data.get("api_key")
+        access_token = data.get("access_token")
+        if platform == "newApi" and not access_token and api_key:
+            access_token = api_key
+        api_key_enc = encrypt_value(api_key, self.secret_key)
+        access_token_enc = encrypt_value(access_token, self.secret_key)
+        user_id_enc = encrypt_value(data.get("user_id"), self.secret_key)
+        threshold = _optional_float(data.get("threshold"))
+        is_enabled = 1 if data.get("is_enabled", True) else 0
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE accounts
+                SET platform = ?, name = ?, base_url = ?,
+                    api_key_enc = COALESCE(?, api_key_enc),
+                    access_token_enc = COALESCE(?, access_token_enc),
+                    user_id_enc = COALESCE(?, user_id_enc),
+                    threshold = ?, is_enabled = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    platform,
+                    data["name"],
+                    data["base_url"].rstrip("/"),
+                    api_key_enc,
+                    access_token_enc,
+                    user_id_enc,
+                    threshold,
+                    is_enabled,
+                    now,
+                    account_id,
+                ),
+            )
+        return account_id
 
     def delete_account(self, account_id: int) -> None:
         with self.connect() as conn:

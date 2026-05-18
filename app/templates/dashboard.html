@@ -30,6 +30,7 @@
           <th>总额</th>
           {% endif %}
           <th>阈值</th>
+          <th>低于阈值</th>
           <th>最近查询</th>
           <th>操作</th>
         </tr>
@@ -46,20 +47,26 @@
           <td>{{ account.last_total if account.last_total is not none else "-" }}</td>
           {% endif %}
           <td>{{ account.threshold if account.threshold is not none else settings.default_threshold }}</td>
+          {% set effective_threshold = account.threshold if account.threshold is not none else settings.default_threshold %}
+          {% set is_low = account.last_remaining is not none and account.last_remaining < effective_threshold %}
+          <td class="{{ 'low-balance' if is_low else '' }}">{{ "是" if is_low else "否" }}</td>
           <td>{{ account.last_checked_at or "-" }}</td>
           <td>
-            <form method="post" action="/accounts/{{ account.id }}/query">
-              <button type="submit">查询</button>
-            </form>
+            <div class="actions">
+              <a class="button-link" href="{{ account.base_url }}" target="_blank" rel="noopener noreferrer">打开</a>
+              <form method="post" action="/accounts/{{ account.id }}/query">
+                <button type="submit">查询</button>
+              </form>
+            </div>
           </td>
         </tr>
         {% if account.last_error %}
         <tr class="detail-row">
-          <td colspan="{{ 7 if platform == 'sub2Api' else 9 }}">{{ account.last_error }}</td>
+          <td colspan="{{ 8 if platform == 'sub2Api' else 10 }}">{{ account.last_error }}</td>
         </tr>
         {% endif %}
         {% else %}
-        <tr><td colspan="{{ 7 if platform == 'sub2Api' else 9 }}" class="empty">暂无账号</td></tr>
+        <tr><td colspan="{{ 8 if platform == 'sub2Api' else 10 }}" class="empty">暂无账号</td></tr>
         {% endfor %}
       </tbody>
     </table>
