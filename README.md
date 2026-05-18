@@ -12,6 +12,8 @@ docker compose up -d --build
 
 访问 `http://localhost:8000`，默认账号来自 `.env`。
 
+首次创建 SQLite 数据库时，系统会写入一组默认账号骨架；这些默认账号只包含平台、名称和 Base URL，不包含 API Key、accessToken、SMTP 授权码或其他密钥。
+
 ## 本地开发
 
 ```bash

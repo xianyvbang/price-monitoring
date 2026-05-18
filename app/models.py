@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Optional
 
+from app.defaults import DEFAULT_ACCOUNTS
 from app.security import encrypt_value, hash_password
 
 
@@ -123,6 +124,7 @@ class Database:
                 """,
                 (utc_now(),),
             )
+            self._seed_default_accounts(conn)
         self.cleanup_logs()
 
     def ensure_admin(self, username: str, password: str) -> None:
@@ -137,6 +139,23 @@ class Database:
     @staticmethod
     def _set_default(conn: sqlite3.Connection, key: str, value: str) -> None:
         conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, value))
+
+    @staticmethod
+    def _seed_default_accounts(conn: sqlite3.Connection) -> None:
+        count = conn.execute("SELECT COUNT(*) AS count FROM accounts").fetchone()["count"]
+        if count:
+            return
+        now = utc_now()
+        for account in DEFAULT_ACCOUNTS:
+            conn.execute(
+                """
+                INSERT INTO accounts (
+                    platform, name, base_url, threshold, is_enabled, created_at, updated_at
+                )
+                VALUES (?, ?, ?, NULL, 1, ?, ?)
+                """,
+                (account["platform"], account["name"], account["base_url"], now, now),
+            )
 
     @staticmethod
     def _migrate_smtp_nullable(conn: sqlite3.Connection) -> None:

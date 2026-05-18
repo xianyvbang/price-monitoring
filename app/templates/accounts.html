@@ -11,9 +11,23 @@
 {% if message %}<p class="notice">{{ message }}</p>{% endif %}
 
 <section class="grid two">
-  <form class="panel" method="post" action="/accounts" data-account-form>
-    <h2 data-form-title>新增账号</h2>
-    <input name="account_id" type="hidden" data-account-id>
+  <form
+    class="panel"
+    method="post"
+    action="/accounts"
+    data-account-form
+    {% if edit_account %}
+    data-initial-edit="true"
+    data-initial-id="{{ edit_account.id }}"
+    data-initial-platform="{{ edit_account.platform }}"
+    data-initial-name="{{ edit_account.name }}"
+    data-initial-base-url="{{ edit_account.base_url }}"
+    data-initial-threshold="{{ edit_account.threshold if edit_account.threshold is not none else '' }}"
+    data-initial-is-enabled="{{ 'true' if edit_account.is_enabled else 'false' }}"
+    {% endif %}
+  >
+    <h2 data-form-title>{{ "编辑账号" if edit_account else "新增账号" }}</h2>
+    <input name="account_id" type="hidden" data-account-id value="{{ edit_account.id if edit_account else '' }}">
     <label>
       平台
       <select name="platform" required data-platform-select>
@@ -82,19 +96,19 @@
           <td>{{ "是" if account.is_enabled else "否" }}</td>
           <td>
             <div class="actions">
-            <button
-              type="button"
-              data-edit-account
-              data-id="{{ account.id }}"
-              data-platform="{{ platform }}"
-              data-name="{{ account.name }}"
-              data-base-url="{{ account.base_url }}"
-              data-threshold="{{ account.threshold if account.threshold is not none else '' }}"
-              data-is-enabled="{{ 'true' if account.is_enabled else 'false' }}"
-            >编辑</button>
-            <form method="post" action="/accounts/{{ account.id }}/delete">
-              <button class="danger" type="submit">删除</button>
-            </form>
+              <button
+                type="button"
+                data-edit-account
+                data-id="{{ account.id }}"
+                data-platform="{{ platform }}"
+                data-name="{{ account.name }}"
+                data-base-url="{{ account.base_url }}"
+                data-threshold="{{ account.threshold if account.threshold is not none else '' }}"
+                data-is-enabled="{{ 'true' if account.is_enabled else 'false' }}"
+              >编辑</button>
+              <form method="post" action="/accounts/{{ account.id }}/delete">
+                <button class="danger" type="submit">删除</button>
+              </form>
             </div>
           </td>
         </tr>
@@ -131,6 +145,22 @@
         });
       });
     };
+    const enterEditMode = (account) => {
+      accountId.value = account.id || "";
+      select.value = account.platform || "newApi";
+      form.elements.name.value = account.name || "";
+      form.elements.base_url.value = account.baseUrl || "";
+      form.elements.threshold.value = account.threshold || "";
+      form.elements.is_enabled.checked = account.isEnabled === "true";
+      form.elements.api_key.value = "";
+      form.elements.access_token.value = "";
+      form.elements.user_id.value = "";
+      title.textContent = "编辑账号";
+      submitLabel.textContent = "保存修改";
+      cancelEdit.hidden = false;
+      select.disabled = false;
+      syncFields();
+    };
     select.addEventListener("change", syncFields);
     syncFields();
 
@@ -146,23 +176,22 @@
 
     document.querySelectorAll("[data-edit-account]").forEach((button) => {
       button.addEventListener("click", () => {
-        accountId.value = button.dataset.id;
-        select.value = button.dataset.platform;
-        form.elements.name.value = button.dataset.name || "";
-        form.elements.base_url.value = button.dataset.baseUrl || "";
-        form.elements.threshold.value = button.dataset.threshold || "";
-        form.elements.is_enabled.checked = button.dataset.isEnabled === "true";
-        form.elements.api_key.value = "";
-        form.elements.access_token.value = "";
-        form.elements.user_id.value = "";
-        title.textContent = "编辑账号";
-        submitLabel.textContent = "保存修改";
-        cancelEdit.hidden = false;
-        select.disabled = false;
-        syncFields();
+        enterEditMode(button.dataset);
         form.scrollIntoView({ behavior: "smooth", block: "start" });
       });
     });
+
+    if (form.dataset.initialEdit === "true") {
+      enterEditMode({
+        id: form.dataset.initialId,
+        platform: form.dataset.initialPlatform,
+        name: form.dataset.initialName,
+        baseUrl: form.dataset.initialBaseUrl,
+        threshold: form.dataset.initialThreshold,
+        isEnabled: form.dataset.initialIsEnabled
+      });
+      form.scrollIntoView({ behavior: "auto", block: "start" });
+    }
   });
 
   document.querySelectorAll("[data-bulk-form]").forEach((form) => {

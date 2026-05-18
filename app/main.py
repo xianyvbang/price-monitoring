@@ -84,6 +84,15 @@ def grouped_accounts() -> dict[str, list[dict[str, Any]]]:
     return grouped
 
 
+def public_edit_account(account_id: int | None) -> dict[str, Any] | None:
+    if not account_id:
+        return None
+    row = db.get_account(account_id)
+    if not row:
+        return None
+    return public_account(row)
+
+
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
     redirect = redirect_if_needed(request)
@@ -135,9 +144,16 @@ async def accounts_page(request: Request):
     redirect = redirect_if_needed(request)
     if redirect:
         return redirect
+    edit_id = _optional_int(request.query_params.get("edit_id"))
     return templates.TemplateResponse(
         "accounts.html",
-        template_context(request, grouped=grouped_accounts(), settings=db.get_general_settings(), message=None),
+        template_context(
+            request,
+            grouped=grouped_accounts(),
+            settings=db.get_general_settings(),
+            message=None,
+            edit_account=public_edit_account(edit_id),
+        ),
     )
 
 
@@ -175,6 +191,7 @@ async def bulk_accounts_form(request: Request):
             grouped=grouped_accounts(),
             settings=db.get_general_settings(),
             message=f"已导入或更新 {imported} 个账号",
+            edit_account=None,
         ),
     )
 
