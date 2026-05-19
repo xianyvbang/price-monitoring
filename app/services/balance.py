@@ -146,20 +146,12 @@ async def _query_sub2api_group(account: Any, secret_key: str, timeout: float, lo
 
 
 async def query_newapi(account: Any, secret_key: str, timeout: float, log: LogCallback | None = None) -> dict[str, Any]:
-    access_token = decrypt_value(account["access_token_enc"], secret_key)
-    user_id = decrypt_value(account["user_id_enc"], secret_key)
-    if not access_token:
-        return normalize_result({"is_valid": False, "invalid_message": "缺少 accessToken"})
-    if not user_id:
-        return normalize_result({"is_valid": False, "invalid_message": "缺少 userId"})
+    headers_result = _newapi_auth_headers(account, secret_key)
+    if "invalid_message" in headers_result:
+        return normalize_result(headers_result)
     url = f"{account['base_url'].rstrip('/')}/api/user/self"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {access_token}",
-        "New-Api-User": user_id,
-    }
     async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await _logged_get(client, url, headers, log, account)
+        response = await _logged_get(client, url, headers_result, log, account)
         response.raise_for_status()
         payload = response.json()
     if payload.get("success") and payload.get("data"):
@@ -183,6 +175,55 @@ async def query_newapi(account: Any, secret_key: str, timeout: float, log: LogCa
     )
 
 
+async def query_newapi_group_options(account: Any, secret_key: str, timeout: float, log: LogCallback | None = None) -> dict[str, Any]:
+    try:
+        headers_result = _newapi_auth_headers(account, secret_key)
+        if isinstance(headers_result, dict) and "invalid_message" in headers_result:
+            return normalize_result(headers_result)
+        base_url = account["base_url"].rstrip("/")
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await _logged_get(client, f"{base_url}/api/user/self/groups", headers_result, log, account)
+            response.raise_for_status()
+            payload = response.json()
+        if isinstance(payload, dict) and payload.get("success") is False:
+            return normalize_result({"is_valid": False, "invalid_message": payload.get("message") or "获取分组失败"})
+        groups = _extract_newapi_user_groups(payload)
+        selected_group_id = decrypt_value(_account_value(account, "key_id_enc"), secret_key)
+        return {
+            "is_valid": True,
+            "groups": groups,
+            "selected_group_id": selected_group_id,
+            "selectedGroupId": selected_group_id,
+            "extra": _compact_json({"groups": groups, "selected_group_id": selected_group_id}),
+        }
+    except httpx.TimeoutException:
+        return normalize_result({"is_valid": False, "invalid_message": "请求超时"})
+    except httpx.HTTPError as exc:
+        return normalize_result({"is_valid": False, "invalid_message": f"请求失败: {exc}"})
+    except Exception as exc:
+        return normalize_result({"is_valid": False, "invalid_message": f"查询异常: {exc}"})
+
+
+async def query_newapi_group(account: Any, secret_key: str, timeout: float, log: LogCallback | None = None) -> dict[str, Any]:
+    try:
+        selected_group_id = decrypt_value(_account_value(account, "key_id_enc"), secret_key)
+        if not selected_group_id:
+            return normalize_result({"is_valid": False, "invalid_message": "请先重新获取分组并选择当前使用的分组"})
+        options = await query_newapi_group_options(account, secret_key, timeout, log)
+        if not options.get("is_valid"):
+            return options
+        groups = options.get("groups") if isinstance(options.get("groups"), list) else []
+        summary = _build_current_group_rate_summary(selected_group_id, None, None, groups, {})
+        raw_json = _compact_json(summary)
+        return normalize_result({"is_valid": True, "plan_name": summary["title"], "extra": raw_json})
+    except httpx.TimeoutException:
+        return normalize_result({"is_valid": False, "invalid_message": "请求超时"})
+    except httpx.HTTPError as exc:
+        return normalize_result({"is_valid": False, "invalid_message": f"请求失败: {exc}"})
+    except Exception as exc:
+        return normalize_result({"is_valid": False, "invalid_message": f"查询异常: {exc}"})
+
+
 def _optional_number(value: Any) -> Optional[float]:
     if value is None or value == "":
         return None
@@ -199,6 +240,20 @@ def _account_value(account: Any, key: str) -> Any:
         return account[key]
     except (KeyError, IndexError):
         return None
+
+
+def _newapi_auth_headers(account: Any, secret_key: str) -> dict[str, Any]:
+    access_token = decrypt_value(_account_value(account, "access_token_enc"), secret_key)
+    user_id = decrypt_value(_account_value(account, "user_id_enc"), secret_key)
+    if not access_token:
+        return {"is_valid": False, "invalid_message": "缺少 accessToken"}
+    if not user_id:
+        return {"is_valid": False, "invalid_message": "缺少 userId"}
+    return {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {access_token}",
+        "New-Api-User": user_id,
+    }
 
 
 async def _logged_get(
@@ -527,6 +582,70 @@ def _extract_group_rates(payload: Any) -> dict[str, float]:
     return rates
 
 
+def _extract_newapi_user_groups(payload: Any) -> list[dict[str, Any]]:
+    data = _unwrap_response_data(payload)
+    if isinstance(data, dict):
+        items = data.get("user_group") or data.get("userGroup") or data.get("groups") or data.get("items") or data.get("list")
+        if not isinstance(items, list):
+            items = [
+                {"id": key, "name": key, **value}
+                for key, value in data.items()
+                if isinstance(value, dict)
+            ]
+    else:
+        items = data
+    if not isinstance(items, list):
+        return []
+    groups = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        group_id = item.get("id")
+        if group_id is None:
+            group_id = item.get("name") or item.get("group") or item.get("group_name") or item.get("groupName")
+        if group_id is None or group_id == "":
+            continue
+        display_name = (
+            item.get("desc")
+            or item.get("description")
+            or item.get("name")
+            or item.get("group_name")
+            or item.get("groupName")
+            or item.get("group")
+            or str(group_id)
+        )
+        default_rate = _optional_number(
+            item.get("default_rate_multiplier")
+            if item.get("default_rate_multiplier") is not None
+            else item.get("rate")
+            if item.get("rate") is not None
+            else item.get("ratio")
+            if item.get("ratio") is not None
+            else item.get("rate_multiplier")
+            if item.get("rate_multiplier") is not None
+            else item.get("rateMultiplier")
+        )
+        user_rate = _optional_number(item.get("user_rate_multiplier"))
+        effective_rate = _optional_number(item.get("effective_rate_multiplier"))
+        if effective_rate is None:
+            effective_rate = user_rate if user_rate is not None else default_rate
+        if user_rate is None:
+            user_rate = effective_rate
+        groups.append(
+            {
+                "id": str(group_id),
+                "name": display_name,
+                "plan_name": display_name,
+                "platform": "newApi",
+                "status": item.get("status"),
+                "default_rate_multiplier": default_rate,
+                "user_rate_multiplier": user_rate,
+                "effective_rate_multiplier": effective_rate,
+            }
+        )
+    return groups
+
+
 def _extract_api_key_group_id(payload: Any, api_key: str) -> Optional[str]:
     keys = _extract_api_keys(payload)
     if len(keys) == 1:
@@ -648,8 +767,15 @@ def _find_active_group(active_plan_name: Optional[str], groups: list[dict[str, A
 def _summarize_group(group: dict[str, Any], rates: dict[str, float]) -> dict[str, Any]:
     group_id = group.get("id")
     group_key = str(group_id)
-    default_rate = _optional_number(group.get("rate_multiplier"))
+    default_rate = _optional_number(group.get("default_rate_multiplier"))
+    if default_rate is None:
+        default_rate = _optional_number(group.get("rate_multiplier"))
     user_rate = rates.get(group_key)
+    if user_rate is None:
+        user_rate = _optional_number(group.get("user_rate_multiplier"))
+    effective_rate = _optional_number(group.get("effective_rate_multiplier"))
+    if effective_rate is None:
+        effective_rate = user_rate if user_rate is not None else default_rate
     return {
         "id": group_id,
         "name": group.get("name"),
@@ -658,5 +784,5 @@ def _summarize_group(group: dict[str, Any], rates: dict[str, float]) -> dict[str
         "status": group.get("status"),
         "default_rate_multiplier": default_rate,
         "user_rate_multiplier": user_rate,
-        "effective_rate_multiplier": user_rate if user_rate is not None else default_rate,
+        "effective_rate_multiplier": effective_rate,
     }

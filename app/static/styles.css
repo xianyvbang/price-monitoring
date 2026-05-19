@@ -288,6 +288,12 @@ th {
   padding: 3px 8px;
 }
 
+.change-status-actions {
+  align-items: center;
+  display: inline-flex;
+  gap: 8px;
+}
+
 .change-status.changed {
   background: #fef3f2;
   color: var(--danger);
@@ -297,6 +303,13 @@ th {
 .change-status.unchanged {
   background: #f2f4f7;
   color: #475467;
+}
+
+.change-status-reset {
+  display: inline-flex;
+  font-size: 12px;
+  min-height: 26px;
+  padding: 4px 8px;
 }
 
 .log-message {
@@ -395,6 +408,51 @@ dialog {
 
 .json-dialog {
   padding: 18px;
+}
+
+.dialog-shell {
+  margin: 0;
+  padding: 18px;
+}
+
+.dialog-head {
+  align-items: flex-start;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.group-option-list {
+  display: grid;
+  gap: 10px;
+  max-height: 60vh;
+  overflow: auto;
+}
+
+.group-option {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 54px;
+  text-align: left;
+  width: 100%;
+}
+
+.group-option span {
+  display: grid;
+  gap: 4px;
+}
+
+.group-option small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.group-option.selected {
+  border-color: var(--primary);
+  box-shadow: inset 0 0 0 1px var(--primary);
 }
 
 pre {

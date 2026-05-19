@@ -19,6 +19,20 @@ def _sub2api_account(name: str, enabled: bool = True, credentials: bool = True) 
     return data
 
 
+def _newapi_account(name: str, enabled: bool = True, selected_group: bool = True) -> dict:
+    data = {
+        "platform": "newApi",
+        "name": name,
+        "base_url": "https://new.example",
+        "access_token": "token",
+        "user_id": "1",
+        "is_enabled": enabled,
+    }
+    if selected_group:
+        data["key_id"] = "pro"
+    return data
+
+
 def _group_result(plan_name: str, rate: float) -> dict:
     extra = json.dumps(
         {
@@ -48,7 +62,12 @@ async def test_query_group_rate_records_baseline_and_emails_only_on_change(tmp_p
     db = Database(str(tmp_path / "app.db"), "test-key")
     db.init()
     account_id = db.upsert_account(_sub2api_account("sub"))
-    results = [_group_result("Basic", 0.8), _group_result("Basic", 0.8), _group_result("Basic", 1.1)]
+    results = [
+        _group_result("Basic", 0.8),
+        _group_result("Basic", 0.8),
+        _group_result("Basic", 1.1),
+        _group_result("Basic", 1.1),
+    ]
     sent = []
 
     async def fake_query(account, secret_key, timeout, log):
@@ -63,6 +82,7 @@ async def test_query_group_rate_records_baseline_and_emails_only_on_change(tmp_p
     first = await query_group_rate_for_account(db, account_id, notify=True)
     same = await query_group_rate_for_account(db, account_id, notify=True)
     changed = await query_group_rate_for_account(db, account_id, notify=True)
+    sticky = await query_group_rate_for_account(db, account_id, notify=True)
 
     records = db.list_group_rate_records(account_id)
     account = db.get_account(account_id)
@@ -73,6 +93,8 @@ async def test_query_group_rate_records_baseline_and_emails_only_on_change(tmp_p
     assert same["group_rate_record"]["inserted"] is False
     assert changed["group_rate_record"]["changed"] is True
     assert changed["group_rate_changed"] is True
+    assert sticky["group_rate_record"]["changed"] is False
+    assert sticky["group_rate_changed"] is True
     assert len(records) == 2
     assert records[0]["rate_multiplier"] == 1.1
     assert account["last_extra"] == changed["extra"]
@@ -115,3 +137,34 @@ async def test_query_all_group_rates_only_queries_enabled_sub2api_with_credentia
     assert called == [enabled_id]
     assert len(db.list_group_rate_records(enabled_id)) == 1
     assert any("自动查组跳过: 缺少 apiKey/email/password" in log["message"] for log in logs)
+
+
+@pytest.mark.asyncio
+async def test_query_all_group_rates_queries_selected_newapi_group(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+    sub_id = db.upsert_account(_sub2api_account("sub"))
+    new_id = db.upsert_account(_newapi_account("new"))
+    db.upsert_account(_newapi_account("new-missing-group", selected_group=False))
+    called_sub = []
+    called_new = []
+
+    async def fake_sub_query(account, secret_key, timeout, log):
+        called_sub.append(account["id"])
+        return _group_result("Basic", 0.8)
+
+    async def fake_new_query(account, secret_key, timeout, log):
+        called_new.append(account["id"])
+        return _group_result("Pro", 0.7)
+
+    monkeypatch.setattr("app.services.scheduler.query_sub2api_group", fake_sub_query)
+    monkeypatch.setattr("app.services.scheduler.query_newapi_group", fake_new_query)
+
+    results = await query_all_group_rates(db, notify=False)
+    logs = db.list_logs()
+
+    assert [result["is_valid"] for result in results] == [True, True]
+    assert called_sub == [sub_id]
+    assert called_new == [new_id]
+    assert len(db.list_group_rate_records(new_id)) == 1
+    assert any("自动查组跳过: 缺少 accessToken/userId/已选分组" in log["message"] for log in logs)

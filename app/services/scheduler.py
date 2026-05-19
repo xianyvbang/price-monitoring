@@ -6,7 +6,7 @@ from contextlib import suppress
 from app.models import Database
 from app.models import utc_now
 from app.services.alerts import handle_alert_state
-from app.services.balance import query_account, query_sub2api_group
+from app.services.balance import query_account, query_newapi_group, query_sub2api_group
 from app.services.emailer import build_group_rate_change_email, send_email
 
 
@@ -95,18 +95,25 @@ async def query_group_rate_for_account(db: Database, account_id: int, notify: bo
     if not account:
         db.add_log("error", "query", f"查询失败，账号不存在: {account_id}")
         return {"is_valid": False, "invalid_message": "账号不存在"}
-    if account["platform"] != "sub2Api":
-        db.add_log("error", "query", f"查询失败，非 sub2Api 账号: {account_id}")
-        return {"is_valid": False, "invalid_message": "仅支持 sub2Api"}
+    if account["platform"] not in {"sub2Api", "newApi"}:
+        db.add_log("error", "query", f"查询失败，不支持查组的账号: {account_id}")
+        return {"is_valid": False, "invalid_message": "仅支持 sub2Api 或 newApi"}
     settings = db.get_general_settings()
-    result = await query_sub2api_group(account, db.secret_key, settings["request_timeout"], db.add_log)
+    if account["platform"] == "sub2Api":
+        result = await query_sub2api_group(account, db.secret_key, settings["request_timeout"], db.add_log)
+    else:
+        result = await query_newapi_group(account, db.secret_key, settings["request_timeout"], db.add_log)
     if result.get("is_valid"):
         db.update_account_group_result(account_id, result)
         checked_at = utc_now()
         record_result = db.record_group_rate_if_changed(account_id, _group_summary_from_result(result), checked_at)
         result["group_rate_record"] = record_result
-        result["group_rate_changed"] = record_result["changed"]
-        db.update_account_group_rate_change_status(account_id, record_result["changed"])
+        group_rate_changed = bool(account["last_group_rate_changed"])
+        if record_result["changed"]:
+            group_rate_changed = True
+            db.update_account_group_rate_change_status(account_id, True)
+        result["group_rate_changed"] = group_rate_changed
+        result["groupRateChanged"] = group_rate_changed
         if notify and record_result["changed"]:
             try:
                 smtp = db.get_smtp_settings()
@@ -136,11 +143,16 @@ async def query_group_rate_for_account(db: Database, account_id: int, notify: bo
 
 async def query_all_group_rates(db: Database, notify: bool = True) -> list[dict]:
     results = []
-    for account in db.list_accounts("sub2Api"):
+    for account in db.list_accounts():
         if not account["is_enabled"]:
             continue
-        if not account["api_key_enc"] or not account["email_enc"] or not account["password_enc"]:
+        if account["platform"] == "sub2Api" and (not account["api_key_enc"] or not account["email_enc"] or not account["password_enc"]):
             db.add_log("warning", "query", f"{account['platform']} / {account['name']} 自动查组跳过: 缺少 apiKey/email/password")
+            continue
+        if account["platform"] == "newApi" and (not account["access_token_enc"] or not account["user_id_enc"] or not account["key_id_enc"]):
+            db.add_log("warning", "query", f"{account['platform']} / {account['name']} 自动查组跳过: 缺少 accessToken/userId/已选分组")
+            continue
+        if account["platform"] not in {"sub2Api", "newApi"}:
             continue
         results.append(await query_group_rate_for_account(db, account["id"], notify=notify))
     return results

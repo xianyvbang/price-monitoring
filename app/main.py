@@ -15,8 +15,9 @@ from app.config import get_config
 from app.models import Database, format_china_time, row_to_dict
 from app.security import decrypt_value
 from app.security import verify_password
+from app.services.balance import query_newapi_group_options
 from app.services.emailer import send_email
-from app.services.scheduler import BalanceScheduler, query_all_accounts, query_one_account, query_sub2api_group_for_account
+from app.services.scheduler import BalanceScheduler, query_all_accounts, query_group_rate_for_account, query_one_account, query_sub2api_group_for_account
 
 config = get_config()
 db = Database(config.database_path, config.app_secret_key)
@@ -206,7 +207,9 @@ async def _body_iterator(body: bytes):
 
 def public_account(row: Any) -> dict[str, Any]:
     data = row_to_dict(row)
-    data["has_key_id"] = bool(data.pop("key_id_enc", None))
+    key_id_enc = data.pop("key_id_enc", None)
+    data["has_key_id"] = bool(key_id_enc)
+    data["selected_group_id"] = decrypt_value(key_id_enc, config.app_secret_key) if data["platform"] == "newApi" and key_id_enc else None
     data["has_api_key"] = bool(data.pop("api_key_enc", None))
     data["has_email"] = bool(data.pop("email_enc", None))
     data["has_password"] = bool(data.pop("password_enc", None))
@@ -239,6 +242,8 @@ def group_rates_from_extra(extra: Any) -> list[dict[str, Any]]:
             continue
         rate = group.get("user_rate_multiplier")
         if rate is None:
+            rate = group.get("effective_rate_multiplier")
+        if rate is None:
             rate = group.get("default_rate_multiplier")
         group_rates.append(
             {
@@ -267,6 +272,7 @@ def public_edit_account(account_id: int | None) -> dict[str, Any] | None:
         data["key_id"] = decrypt_value(row["key_id_enc"], config.app_secret_key) or ""
         data["email"] = decrypt_value(row["email_enc"], config.app_secret_key) or ""
     if row["platform"] == "newApi":
+        data["key_id"] = decrypt_value(row["key_id_enc"], config.app_secret_key) or ""
         data["user_id"] = decrypt_value(row["user_id_enc"], config.app_secret_key) or ""
     return data
 
@@ -574,12 +580,42 @@ async def api_group_rates(request: Request, account_id: int):
     }
 
 
+@app.post("/api/accounts/{account_id}/group-rate-change-status")
+async def api_group_rate_change_status(request: Request, account_id: int):
+    require_user(request)
+    account = db.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    payload = await request.json()
+    changed = False
+    if isinstance(payload, dict):
+        if "changed" in payload:
+            changed = bool(payload.get("changed"))
+        elif "group_rate_changed" in payload:
+            changed = bool(payload.get("group_rate_changed"))
+        elif "groupRateChanged" in payload:
+            changed = bool(payload.get("groupRateChanged"))
+    db.update_account_group_rate_change_status(account_id, changed)
+    updated = db.get_account(account_id)
+    db.add_log("info", "account", f"{account['platform']} / {account['name']} 分组倍率状态: {'变化' if changed else '未变化'}")
+    return {"ok": True, "account": public_account(updated)}
+
+
 @app.post("/api/accounts")
 async def api_create_account(request: Request):
     require_user(request)
     payload = await request.json()
     account_id = db.upsert_account(_account_from_payload(payload))
     db.add_log("info", "account", f"API 保存账号: {payload.get('platform')} / {payload.get('name')}")
+    return {"id": account_id, "ok": True}
+
+
+@app.put("/api/accounts/{account_id}")
+async def api_update_account(request: Request, account_id: int):
+    require_user(request)
+    payload = await request.json()
+    db.update_account(account_id, _account_from_payload(payload))
+    db.add_log("info", "account", f"API 更新账号: {payload.get('platform')} / {payload.get('name')}")
     return {"id": account_id, "ok": True}
 
 
@@ -611,7 +647,40 @@ async def api_query_account(request: Request, account_id: int):
 async def api_query_account_group(request: Request, account_id: int):
     require_user(request)
     db.add_log("info", "query", f"API 手动组查询账号: {account_id}")
-    return await query_sub2api_group_for_account(db, account_id)
+    return await query_group_rate_for_account(db, account_id)
+
+
+@app.get("/api/accounts/{account_id}/newapi-groups")
+async def api_newapi_groups(request: Request, account_id: int):
+    require_user(request)
+    account = db.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    if account["platform"] != "newApi":
+        raise HTTPException(status_code=400, detail="仅支持 newApi")
+    settings = db.get_general_settings()
+    result = await query_newapi_group_options(account, db.secret_key, settings["request_timeout"], db.add_log)
+    if not result.get("is_valid"):
+        return JSONResponse(result, status_code=400)
+    return result
+
+
+@app.post("/api/accounts/{account_id}/selected-group")
+async def api_select_account_group(request: Request, account_id: int):
+    require_user(request)
+    account = db.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    if account["platform"] != "newApi":
+        raise HTTPException(status_code=400, detail="仅支持 newApi")
+    payload = await request.json()
+    group_id = str(payload.get("group_id") or payload.get("groupId") or "").strip()
+    if not group_id:
+        raise HTTPException(status_code=400, detail="请选择分组")
+    db.update_account_selected_group(account_id, group_id)
+    updated = db.get_account(account_id)
+    db.add_log("info", "account", f"newApi / {account['name']} 选择分组: {group_id}")
+    return {"ok": True, "account": public_account(updated)}
 
 
 @app.post("/api/query-all")

@@ -27,7 +27,7 @@
           <th>状态</th>
           <th>套餐</th>
           <th>分组倍率</th>
-          {% if platform == "sub2Api" %}
+          {% if platform in ["sub2Api", "newApi"] %}
           <th>倍率变化</th>
           {% endif %}
           <th>剩余</th>
@@ -59,11 +59,20 @@
             -
             {% endif %}
           </td>
-          {% if platform == "sub2Api" %}
+          {% if platform in ["sub2Api", "newApi"] %}
           <td data-group-rate-change>
-            <span class="change-status {{ 'changed' if account.last_group_rate_changed else 'unchanged' }}">
-              {{ "变化" if account.last_group_rate_changed else "未变化" }}
-            </span>
+            <div class="change-status-actions">
+              <span class="change-status {{ 'changed' if account.last_group_rate_changed else 'unchanged' }}">
+                {{ "变化" if account.last_group_rate_changed else "未变化" }}
+              </span>
+              <button
+                type="button"
+                class="change-status-reset"
+                data-group-rate-reset
+                data-account-id="{{ account.id }}"
+                {% if not account.last_group_rate_changed %}hidden{% endif %}
+              >重置</button>
+            </div>
           </td>
           {% endif %}
           <td data-account-remaining>{{ account.last_remaining if account.last_remaining is not none else "-" }} {{ account.last_unit or "" }}</td>
@@ -83,8 +92,13 @@
               <a class="button-link" href="{{ account.recharge_url }}" target="_blank" rel="noopener noreferrer">充值</a>
               {% endif %}
               <button type="button" data-account-query data-account-id="{{ account.id }}">查询</button>
-              {% if platform == "sub2Api" %}
+              {% if platform in ["sub2Api", "newApi"] %}
               <button type="button" data-group-query data-account-id="{{ account.id }}">查组</button>
+              {% endif %}
+              {% if platform == "newApi" %}
+              <button type="button" data-newapi-groups data-account-id="{{ account.id }}">重新获取分组</button>
+              {% endif %}
+              {% if platform in ["sub2Api", "newApi"] %}
               <a class="button-link" href="/accounts/{{ account.id }}/group-rates">分组变化</a>
               {% endif %}
               <a class="button-link" href="/accounts?edit_id={{ account.id }}">修改</a>
@@ -93,17 +107,29 @@
         </tr>
         {% if account.last_error %}
         <tr class="detail-row">
-          <td colspan="{{ 11 if platform == 'sub2Api' else 12 }}">{{ account.last_error }}</td>
+          <td colspan="{{ 11 if platform == 'sub2Api' else 13 if platform == 'newApi' else 12 }}">{{ account.last_error }}</td>
         </tr>
         {% endif %}
         {% else %}
-        <tr><td colspan="{{ 11 if platform == 'sub2Api' else 12 }}" class="empty">暂无账号</td></tr>
+        <tr><td colspan="{{ 11 if platform == 'sub2Api' else 13 if platform == 'newApi' else 12 }}" class="empty">暂无账号</td></tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
 </section>
 {% endfor %}
+<dialog data-group-picker>
+  <form method="dialog" class="dialog-shell">
+    <div class="dialog-head">
+      <div>
+        <h2 data-group-picker-title>选择分组</h2>
+        <p data-group-picker-message></p>
+      </div>
+      <button type="button" data-group-picker-close>关闭</button>
+    </div>
+    <div class="group-option-list" data-group-picker-options></div>
+  </form>
+</dialog>
 <script>
   const formatValue = (value, fallback = "-") => value === null || value === undefined || value === "" ? fallback : value;
   const formatChinaTime = (value) => {
@@ -141,7 +167,7 @@
       const groups = Array.isArray(extra.groups) ? extra.groups : extra.group ? [extra.group] : [];
       return groups.map((group) => ({
         planName: group.plan_name || group.planName || group.name || group.id || "-",
-        rateMultiplier: group.user_rate_multiplier ?? group.default_rate_multiplier
+        rateMultiplier: group.effective_rate_multiplier ?? group.user_rate_multiplier ?? group.default_rate_multiplier
       }));
     } catch (error) {
       return [];
@@ -162,6 +188,24 @@
       return `<span class="group-rate-item">${escapeHtml(group.planName)}: ${escapeHtml(group.rateMultiplier)}</span>`;
     }).join("")}</div>`;
   };
+  const setGroupRateChangeCell = (button, changed) => {
+    const row = button.closest("[data-account-row]");
+    if (!row) {
+      return;
+    }
+    const changeStatus = row.querySelector("[data-group-rate-change] .change-status");
+    if (changeStatus) {
+      changeStatus.textContent = changed ? "变化" : "未变化";
+      changeStatus.className = `change-status ${changed ? "changed" : "unchanged"}`;
+    }
+    const resetButton = row.querySelector("[data-group-rate-reset]");
+    if (resetButton) {
+      resetButton.hidden = !changed;
+    }
+  };
+  const resetGroupRateChangeCell = (button) => {
+    setGroupRateChangeCell(button, false);
+  };
   const updateGroupRatesCell = (button, result) => {
     const row = button.closest("[data-account-row]");
     if (!row) {
@@ -171,12 +215,75 @@
     if (groupRates) {
       groupRates.innerHTML = renderGroupRates(groupRatesFromResult(result));
     }
-    const changeStatus = row.querySelector("[data-group-rate-change] .change-status");
-    if (changeStatus) {
-      const changed = Boolean(result.group_rate_changed || result.groupRateChanged || result.group_rate_record?.changed);
-      changeStatus.textContent = changed ? "变化" : "未变化";
-      changeStatus.className = `change-status ${changed ? "changed" : "unchanged"}`;
+    const changed = Boolean(result.group_rate_changed || result.groupRateChanged || result.group_rate_record?.changed);
+    setGroupRateChangeCell(button, changed);
+  };
+  const groupPicker = document.querySelector("[data-group-picker]");
+  const groupPickerTitle = document.querySelector("[data-group-picker-title]");
+  const groupPickerMessage = document.querySelector("[data-group-picker-message]");
+  const groupPickerOptions = document.querySelector("[data-group-picker-options]");
+  document.querySelector("[data-group-picker-close]")?.addEventListener("click", () => {
+    groupPicker?.close();
+  });
+  const chooseNewapiGroup = async (accountId, groupId) => {
+    const response = await fetch(`/api/accounts/${accountId}/selected-group`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({group_id: groupId})
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      throw new Error(result.detail || "保存分组失败");
     }
+    return result;
+  };
+  const showGroupPicker = (accountId, groups, selectedGroupId, sourceButton) => {
+    if (!groupPicker || !groupPickerOptions) {
+      return;
+    }
+    groupPickerTitle.textContent = "选择 newApi 分组";
+    groupPickerMessage.textContent = groups.length ? "选择后会替换当前使用的分组，后续查组只监测这个分组。" : "没有获取到可用分组。";
+    groupPickerOptions.innerHTML = "";
+    groups.forEach((group) => {
+      const option = document.createElement("button");
+      option.type = "button";
+      option.className = "group-option";
+      const groupId = String(group.id ?? group.name ?? "");
+      option.innerHTML = `
+        <span>
+          <strong>${escapeHtml(group.plan_name || group.planName || group.name || groupId || "-")}</strong>
+          <small>ID: ${escapeHtml(groupId || "-")}</small>
+        </span>
+        <span>倍率 ${escapeHtml(group.effective_rate_multiplier ?? group.user_rate_multiplier ?? group.default_rate_multiplier ?? "-")}</span>
+      `;
+      if (selectedGroupId !== null && selectedGroupId !== undefined && groupId === String(selectedGroupId)) {
+        option.classList.add("selected");
+      }
+      option.addEventListener("click", async () => {
+        option.disabled = true;
+        try {
+          await chooseNewapiGroup(accountId, groupId);
+          groupPicker.close();
+          if (sourceButton) {
+            sourceButton.title = `当前分组: ${groupId}`;
+            resetGroupRateChangeCell(sourceButton);
+          }
+        } catch (error) {
+          option.disabled = false;
+          groupPickerMessage.textContent = error.message || "保存分组失败";
+        }
+      });
+      groupPickerOptions.appendChild(option);
+    });
+    groupPicker.showModal();
+  };
+  const fetchNewapiGroups = async (button) => {
+    const response = await fetch(`/api/accounts/${button.dataset.accountId}/newapi-groups`);
+    const result = await response.json();
+    if (!response.ok) {
+      throw new Error(result.detail || result.invalid_message || "获取分组失败");
+    }
+    return result;
   };
   const updateBalanceRow = (target, result) => {
     const row = target instanceof Element ? target.closest("[data-account-row]") : document.querySelector(`[data-account-row="${target}"]`);
@@ -264,6 +371,54 @@
     (button) => `/api/accounts/${button.dataset.accountId}/group-query`,
     updateGroupRatesCell
   );
+  document.querySelectorAll("[data-group-rate-reset]").forEach((button) => {
+    const originalText = button.textContent;
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      button.textContent = "重置中";
+      try {
+        const response = await fetch(`/api/accounts/${button.dataset.accountId}/group-rate-change-status`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({changed: false})
+        });
+        const result = await response.json();
+        if (!response.ok) {
+          throw new Error(result.detail || "重置失败");
+        }
+        resetGroupRateChangeCell(button);
+      } catch (error) {
+        button.textContent = "失败";
+        button.title = error.message || "重置失败";
+      } finally {
+        setTimeout(() => {
+          button.disabled = false;
+          button.textContent = originalText;
+          button.title = "";
+        }, 1200);
+      }
+    });
+  });
+  document.querySelectorAll("[data-newapi-groups]").forEach((button) => {
+    const originalText = button.textContent;
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      button.textContent = "获取中";
+      try {
+        const result = await fetchNewapiGroups(button);
+        showGroupPicker(button.dataset.accountId, result.groups || [], result.selected_group_id ?? result.selectedGroupId, button);
+        button.textContent = "已获取";
+      } catch (error) {
+        button.textContent = "失败";
+        button.title = error.message || "获取分组失败";
+      } finally {
+        setTimeout(() => {
+          button.disabled = false;
+          button.textContent = originalText;
+        }, 1200);
+      }
+    });
+  });
   const refreshStatus = document.querySelector("[data-refresh-status]");
   const queryAllButton = document.querySelector("[data-query-all]");
   const refreshInterval = Math.max(30, Number.parseInt(refreshStatus?.dataset.refreshInterval || "30", 10));

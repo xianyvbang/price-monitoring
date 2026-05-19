@@ -100,6 +100,28 @@ def test_group_rate_change_status_defaults_and_updates(tmp_path):
     assert db.get_account(account_id)["last_group_rate_changed"] == 1
 
 
+def test_selected_group_can_be_replaced(tmp_path):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+    account_id = db.upsert_account(
+        {
+            "platform": "newApi",
+            "name": "new-group",
+            "base_url": "https://example.com",
+            "access_token": "token",
+            "user_id": "1",
+            "key_id": "default",
+        }
+    )
+    db.update_account_group_rate_change_status(account_id, True)
+
+    db.update_account_selected_group(account_id, "pro")
+
+    account = db.get_account(account_id)
+    assert decrypt_value(account["key_id_enc"], "test-key") == "pro"
+    assert account["last_group_rate_changed"] == 0
+
+
 def test_group_result_only_updates_extra(tmp_path):
     db = Database(str(tmp_path / "app.db"), "test-key")
     db.init()
@@ -232,6 +254,36 @@ def test_group_rate_records_only_insert_on_change(tmp_path):
     assert changed_result["current_rate"] == 1.1
     assert len(records) == 2
     assert records[0]["rate_multiplier"] == 1.1
+
+
+def test_group_rate_records_new_plan_is_new_baseline_not_change(tmp_path):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+    account_id = db.upsert_account(
+        {
+            "platform": "newApi",
+            "name": "new-login",
+            "base_url": "https://example.com",
+            "access_token": "token",
+            "user_id": "1",
+            "key_id": "basic",
+        }
+    )
+
+    first = db.record_group_rate_if_changed(
+        account_id,
+        {"group": {"plan_name": "Basic", "effective_rate_multiplier": 0.8}, "raw_json": "{}"},
+        "2026-05-19T00:00:00+00:00",
+    )
+    replaced = db.record_group_rate_if_changed(
+        account_id,
+        {"group": {"plan_name": "Pro", "effective_rate_multiplier": 1.2}, "raw_json": "{}"},
+        "2026-05-19T00:01:00+00:00",
+    )
+
+    assert first["changed"] is False
+    assert replaced["inserted"] is True
+    assert replaced["changed"] is False
 
 
 def test_group_rate_records_skip_unrecognized_empty_summary(tmp_path):

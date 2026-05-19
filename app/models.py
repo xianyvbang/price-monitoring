@@ -545,6 +545,17 @@ class Database:
                 ),
             )
 
+    def update_account_selected_group(self, account_id: int, group_id: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE accounts
+                SET key_id_enc = ?, last_group_rate_changed = 0, updated_at = ?
+                WHERE id = ?
+                """,
+                (encrypt_value(group_id, self.secret_key), utc_now(), account_id),
+            )
+
     def update_account_group_rate_change_status(self, account_id: int, changed: bool) -> None:
         with self.connect() as conn:
             conn.execute(
@@ -597,8 +608,10 @@ class Database:
                 (account_id,),
             ).fetchone()
             previous_rate = previous["rate_multiplier"] if previous else None
-            changed = previous is not None and previous_rate != current_rate
-            inserted = previous is None or previous_rate != current_rate
+            previous_plan_name = previous["plan_name"] if previous else None
+            same_plan = previous_plan_name == str(plan_name)
+            changed = previous is not None and same_plan and previous_rate != current_rate
+            inserted = previous is None or previous_rate != current_rate or not same_plan
             record = previous
             if inserted:
                 cursor = conn.execute(

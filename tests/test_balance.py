@@ -2,7 +2,7 @@ import pytest
 import httpx
 
 from app.services.balance import _SUB2API_TOKEN_CACHE
-from app.services.balance import normalize_result, query_newapi, query_sub2api, query_sub2api_group
+from app.services.balance import normalize_result, query_newapi, query_newapi_group, query_newapi_group_options, query_sub2api, query_sub2api_group
 from app.models import Database
 from app.security import encrypt_value
 
@@ -391,6 +391,72 @@ async def test_newapi_converts_quota(monkeypatch):
     assert result["used"] == 1
     assert result["total"] == 3
     assert DummyClient.last_request["headers"]["New-Api-User"] == "42"
+
+
+@pytest.mark.asyncio
+async def test_newapi_group_options_fetches_current_user_groups(monkeypatch):
+    monkeypatch.setattr("app.services.balance.httpx.AsyncClient", DummyClient)
+    DummyClient.payload = {
+        "success": True,
+        "data": {
+            "user_group": [
+                {"id": "default", "name": "默认分组", "rate": 1},
+                {"id": "pro", "desc": "专业分组", "ratio": 0.8},
+            ]
+        },
+    }
+    DummyClient.get_payloads = None
+    DummyClient.requests = []
+    account = {
+        "platform": "newApi",
+        "name": "new",
+        "base_url": "https://new.example",
+        "key_id_enc": encrypt_value("pro", "test-key"),
+        "access_token_enc": encrypt_value("token", "test-key"),
+        "user_id_enc": encrypt_value("42", "test-key"),
+    }
+
+    result = await query_newapi_group_options(account, "test-key", 3)
+
+    assert result["is_valid"] is True
+    assert result["selected_group_id"] == "pro"
+    assert result["groups"][1]["id"] == "pro"
+    assert result["groups"][1]["plan_name"] == "专业分组"
+    assert result["groups"][1]["effective_rate_multiplier"] == 0.8
+    assert DummyClient.last_request["url"] == "https://new.example/api/user/self/groups"
+    assert DummyClient.last_request["headers"]["Authorization"] == "Bearer token"
+    assert DummyClient.last_request["headers"]["New-Api-User"] == "42"
+
+
+@pytest.mark.asyncio
+async def test_newapi_group_query_uses_selected_group(monkeypatch):
+    monkeypatch.setattr("app.services.balance.httpx.AsyncClient", DummyClient)
+    DummyClient.payload = {
+        "success": True,
+        "data": {
+            "user_group": [
+                {"id": "default", "name": "默认分组", "rate": 1},
+                {"id": "pro", "name": "专业分组", "rate": 0.75},
+            ]
+        },
+    }
+    DummyClient.get_payloads = None
+    DummyClient.requests = []
+    account = {
+        "platform": "newApi",
+        "name": "new",
+        "base_url": "https://new.example",
+        "key_id_enc": encrypt_value("pro", "test-key"),
+        "access_token_enc": encrypt_value("token", "test-key"),
+        "user_id_enc": encrypt_value("42", "test-key"),
+    }
+
+    result = await query_newapi_group(account, "test-key", 3)
+
+    assert result["is_valid"] is True
+    assert result["plan_name"] == "专业分组 倍率 0.75"
+    assert '"id": "pro"' in result["extra"]
+    assert '"id": "default"' not in result["extra"]
 
 
 def test_normalize_invalid_message():
