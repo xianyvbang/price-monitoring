@@ -22,6 +22,7 @@
     data-initial-platform="{{ edit_account.platform }}"
     data-initial-name="{{ edit_account.name }}"
     data-initial-base-url="{{ edit_account.base_url }}"
+    data-initial-note="{{ edit_account.note or '' }}"
     data-initial-key-id="{{ edit_account.key_id if edit_account else '' }}"
     data-initial-email="{{ edit_account.email if edit_account else '' }}"
     data-initial-user-id="{{ edit_account.user_id if edit_account else '' }}"
@@ -40,6 +41,7 @@
     </label>
     <label>名称<input name="name" required></label>
     <label>Base URL<input name="base_url" required></label>
+    <label>备注<textarea name="note" rows="3"></textarea></label>
     <label data-platform-field="sub2Api">sub2Api groupId（可选筛选）<input name="key_id" autocomplete="off"></label>
     <label data-platform-field="sub2Api">sub2Api apiKey<input name="api_key" type="password" autocomplete="off"></label>
     <label data-platform-field="sub2Api">sub2Api email<input name="email" type="email" autocomplete="username"></label>
@@ -82,6 +84,7 @@
       <thead>
         <tr>
           <th>名称</th>
+          <th>备注</th>
           <th>Base URL</th>
           <th>凭据</th>
           <th>阈值</th>
@@ -93,6 +96,7 @@
         {% for account in accounts %}
         <tr>
           <td>{{ account.name }}</td>
+          <td class="note-cell">{{ account.note or "-" }}</td>
           <td>{{ account.base_url }}</td>
           <td>
             {% if platform == "sub2Api" %}groupId筛选: {{ "已配置" if account.has_key_id else "未配置" }} / apiKey: {{ "已配置" if account.has_api_key else "未配置" }} / email: {{ "已配置" if account.has_email else "未配置" }} / password: {{ "已配置" if account.has_password else "未配置" }}{% endif %}
@@ -109,6 +113,7 @@
                 data-platform="{{ platform }}"
                 data-name="{{ account.name }}"
                 data-base-url="{{ account.base_url }}"
+                data-note="{{ account.note or '' }}"
                 data-key-id="{{ account.key_id if account.key_id is defined else '' }}"
                 data-email="{{ account.email if account.email is defined else '' }}"
                 data-user-id="{{ account.user_id if account.user_id is defined else '' }}"
@@ -125,7 +130,7 @@
           </td>
         </tr>
         {% else %}
-        <tr><td colspan="6" class="empty">暂无账号</td></tr>
+        <tr><td colspan="7" class="empty">暂无账号</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -134,8 +139,8 @@
 {% endfor %}
 <script>
   const bulkPlaceholders = {
-    newApi: "JSON 数组，或 CSV 行。newApi: name,baseUrl,accessToken,userId,threshold。",
-    sub2Api: "JSON 数组，或 CSV 行。sub2Api: name,baseUrl,email,password,apiKey,threshold；可选筛选指定组：name,baseUrl,groupId,email,password,apiKey,threshold。"
+    newApi: "JSON 数组，或 CSV 行。newApi: name,baseUrl,accessToken,userId,threshold,note。",
+    sub2Api: "JSON 数组，或 CSV 行。sub2Api: name,baseUrl,email,password,apiKey,threshold,note；可选筛选指定组：name,baseUrl,groupId,email,password,apiKey,threshold,note。"
   };
 
   document.querySelectorAll("[data-account-form]").forEach((form) => {
@@ -162,6 +167,7 @@
       select.value = account.platform || "newApi";
       form.elements.name.value = account.name || "";
       form.elements.base_url.value = account.baseUrl || "";
+      form.elements.note.value = account.note || "";
       form.elements.threshold.value = account.threshold || "";
       form.elements.is_enabled.checked = account.isEnabled === "true";
       form.elements.key_id.value = account.keyId || "";
@@ -202,6 +208,7 @@
         platform: form.dataset.initialPlatform,
         name: form.dataset.initialName,
         baseUrl: form.dataset.initialBaseUrl,
+        note: form.dataset.initialNote,
         keyId: form.dataset.initialKeyId,
         email: form.dataset.initialEmail,
         userId: form.dataset.initialUserId,

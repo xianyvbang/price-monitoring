@@ -4,11 +4,12 @@
 <section class="page-head">
   <div>
     <h1>余额仪表盘</h1>
-    <p>自动查询间隔 {{ settings.query_interval }} 秒，请求超时 {{ settings.request_timeout }} 秒。</p>
+    <p>
+      自动查询间隔 {{ settings.query_interval }} 秒，请求超时 {{ settings.request_timeout }} 秒。
+      <span data-refresh-status data-refresh-interval="{{ settings.query_interval }}">下次自动刷新 {{ settings.query_interval }} 秒</span>
+    </p>
   </div>
-  <form method="post" action="/query-all">
-    <button class="primary" type="submit">立即查询全部</button>
-  </form>
+  <button class="primary" type="button" data-query-all>立即查询全部</button>
 </section>
 
 {% for platform, accounts in grouped.items() %}
@@ -22,8 +23,10 @@
       <thead>
         <tr>
           <th>名称</th>
+          <th>备注</th>
           <th>状态</th>
           <th>套餐</th>
+          <th>分组倍率</th>
           <th>剩余</th>
           {% if platform != "sub2Api" %}
           <th>已用</th>
@@ -39,26 +42,37 @@
         {% for account in accounts %}
         <tr data-account-row="{{ account.id }}">
           <td>{{ account.name }}</td>
+          <td class="note-cell">{{ account.note or "-" }}</td>
           <td><span class="status {{ account.last_status }}" data-account-status>{{ account.last_status }}</span></td>
           <td data-account-plan>{{ account.last_plan_name or "-" }}</td>
+          <td data-account-group-rates>
+            {% if account.group_rates %}
+            <div class="group-rates">
+              {% for group_rate in account.group_rates %}
+              <span class="group-rate-item">{{ group_rate.plan_name }}: {{ group_rate.rate_multiplier if group_rate.rate_multiplier is not none else "-" }}</span>
+              {% endfor %}
+            </div>
+            {% else %}
+            -
+            {% endif %}
+          </td>
           <td data-account-remaining>{{ account.last_remaining if account.last_remaining is not none else "-" }} {{ account.last_unit or "" }}</td>
           {% if platform != "sub2Api" %}
-          <td>{{ account.last_used if account.last_used is not none else "-" }}</td>
-          <td>{{ account.last_total if account.last_total is not none else "-" }}</td>
+          <td data-account-used>{{ account.last_used if account.last_used is not none else "-" }}</td>
+          <td data-account-total>{{ account.last_total if account.last_total is not none else "-" }}</td>
           {% endif %}
-          <td>{{ account.threshold if account.threshold is not none else settings.default_threshold }}</td>
+          <td data-account-threshold="{{ account.threshold if account.threshold is not none else settings.default_threshold }}">{{ account.threshold if account.threshold is not none else settings.default_threshold }}</td>
           {% set effective_threshold = account.threshold if account.threshold is not none else settings.default_threshold %}
           {% set is_low = account.last_remaining is not none and account.last_remaining < effective_threshold %}
-          <td class="{{ 'low-balance' if is_low else '' }}">{{ "是" if is_low else "否" }}</td>
-          <td>{{ account.last_checked_at or "-" }}</td>
+          <td class="{{ 'low-balance' if is_low else '' }}" data-account-low>{{ "是" if is_low else "否" }}</td>
+          <td data-account-checked-at>{{ format_time(account.last_checked_at) }}</td>
           <td>
             <div class="actions">
               <a class="button-link" href="{{ account.base_url }}" target="_blank" rel="noopener noreferrer">打开</a>
-              <form method="post" action="/accounts/{{ account.id }}/query">
-                <button type="submit">查询</button>
-              </form>
+              <button type="button" data-account-query data-account-id="{{ account.id }}">查询</button>
               {% if platform == "sub2Api" %}
               <button type="button" data-group-query data-account-id="{{ account.id }}">查组</button>
+              <a class="button-link" href="/accounts/{{ account.id }}/group-rates">分组变化</a>
               {% endif %}
               <a class="button-link" href="/accounts?edit_id={{ account.id }}">修改</a>
             </div>
@@ -66,11 +80,11 @@
         </tr>
         {% if account.last_error %}
         <tr class="detail-row">
-          <td colspan="{{ 8 if platform == 'sub2Api' else 10 }}">{{ account.last_error }}</td>
+          <td colspan="{{ 10 if platform == 'sub2Api' else 12 }}">{{ account.last_error }}</td>
         </tr>
         {% endif %}
         {% else %}
-        <tr><td colspan="{{ 8 if platform == 'sub2Api' else 10 }}" class="empty">暂无账号</td></tr>
+        <tr><td colspan="{{ 10 if platform == 'sub2Api' else 12 }}" class="empty">暂无账号</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -79,22 +93,88 @@
 {% endfor %}
 <script>
   const formatValue = (value, fallback = "-") => value === null || value === undefined || value === "" ? fallback : value;
+  const formatChinaTime = (value) => {
+    if (!value) {
+      return "-";
+    }
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return value;
+    }
+    const parts = new Intl.DateTimeFormat("zh-CN", {
+      timeZone: "Asia/Shanghai",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false
+    }).formatToParts(date);
+    const byType = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+    return `${byType.year}-${byType.month}-${byType.day} ${byType.hour}:${byType.minute}:${byType.second}`;
+  };
   const formatRemaining = (result) => {
     const remaining = formatValue(result.remaining);
     const unit = result.unit || "";
     return unit && remaining !== "-" ? `${remaining} ${unit}` : remaining;
   };
-  const updateDashboardRow = (button, result) => {
+  const groupRatesFromResult = (result) => {
+    if (!result || !result.extra) {
+      return [];
+    }
+    try {
+      const extra = typeof result.extra === "string" ? JSON.parse(result.extra) : result.extra;
+      const groups = Array.isArray(extra.groups) ? extra.groups : extra.group ? [extra.group] : [];
+      return groups.map((group) => ({
+        planName: group.plan_name || group.planName || group.name || group.id || "-",
+        rateMultiplier: group.user_rate_multiplier ?? group.default_rate_multiplier
+      }));
+    } catch (error) {
+      return [];
+    }
+  };
+  const escapeHtml = (value) => String(formatValue(value)).replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "\"": "&quot;",
+    "'": "&#39;"
+  }[char]));
+  const renderGroupRates = (groups) => {
+    if (!groups.length) {
+      return "-";
+    }
+    return `<div class="group-rates">${groups.map((group) => {
+      return `<span class="group-rate-item">${escapeHtml(group.planName)}: ${escapeHtml(group.rateMultiplier)}</span>`;
+    }).join("")}</div>`;
+  };
+  const updateGroupRatesCell = (button, result) => {
     const row = button.closest("[data-account-row]");
+    if (!row) {
+      return;
+    }
+    const groupRates = row.querySelector("[data-account-group-rates]");
+    if (groupRates) {
+      groupRates.innerHTML = renderGroupRates(groupRatesFromResult(result));
+    }
+  };
+  const updateBalanceRow = (target, result) => {
+    const row = target instanceof Element ? target.closest("[data-account-row]") : document.querySelector(`[data-account-row="${target}"]`);
     if (!row) {
       return;
     }
     const status = row.querySelector("[data-account-status]");
     const plan = row.querySelector("[data-account-plan]");
     const remaining = row.querySelector("[data-account-remaining]");
+    const used = row.querySelector("[data-account-used]");
+    const total = row.querySelector("[data-account-total]");
+    const low = row.querySelector("[data-account-low]");
+    const checkedAt = row.querySelector("[data-account-checked-at]");
+    const isValid = Boolean(result.is_valid);
     if (status) {
-      status.textContent = result.is_valid ? "valid" : "invalid";
-      status.className = `status ${result.is_valid ? "valid" : "invalid"}`;
+      status.textContent = isValid ? "valid" : "invalid";
+      status.className = `status ${isValid ? "valid" : "invalid"}`;
     }
     if (plan) {
       plan.textContent = formatValue(result.plan_name);
@@ -102,31 +182,130 @@
     if (remaining) {
       remaining.textContent = formatRemaining(result);
     }
+    if (used) {
+      used.textContent = formatValue(result.used);
+    }
+    if (total) {
+      total.textContent = formatValue(result.total);
+    }
+    if (low) {
+      const threshold = Number.parseFloat(row.querySelector("[data-account-threshold]")?.dataset.accountThreshold || "");
+      const isLow = result.remaining !== null && result.remaining !== undefined && !Number.isNaN(threshold) && Number(result.remaining) < threshold;
+      low.textContent = isLow ? "是" : "否";
+      low.classList.toggle("low-balance", isLow);
+    }
+    if (checkedAt) {
+      checkedAt.textContent = formatChinaTime(result.checked_at || result.checkedAt);
+    }
   };
-  document.querySelectorAll("[data-group-query]").forEach((button) => {
-    const originalText = button.textContent;
-    button.addEventListener("click", async () => {
-      button.disabled = true;
-      button.textContent = "查询中";
-      try {
-        const response = await fetch(`/api/accounts/${button.dataset.accountId}/group-query`, { method: "POST" });
-        const result = await response.json();
-        if (!response.ok) {
-          throw new Error(result.detail || "查询失败");
-        }
-        updateDashboardRow(button, result);
-        button.textContent = result.is_valid ? "已完成" : "失败";
-        button.title = result.invalid_message || result.extra || result.plan_name || "";
-      } catch (error) {
-        button.textContent = "失败";
-        button.title = error.message || "查询失败";
-      } finally {
-        setTimeout(() => {
-          button.disabled = false;
-          button.textContent = originalText;
-        }, 1200);
+  const updateBalanceRows = (results) => {
+    results.forEach((result) => {
+      const accountId = result.account_id || result.accountId;
+      if (accountId !== null && accountId !== undefined) {
+        updateBalanceRow(String(accountId), result);
       }
     });
+  };
+  const bindAsyncButton = (selector, loadingText, urlBuilder, onSuccess) => {
+    document.querySelectorAll(selector).forEach((button) => {
+      const originalText = button.textContent;
+      button.addEventListener("click", async () => {
+        button.disabled = true;
+        button.textContent = loadingText;
+        try {
+          const response = await fetch(urlBuilder(button), { method: "POST" });
+          const result = await response.json();
+          if (!response.ok) {
+            throw new Error(result.detail || "查询失败");
+          }
+          onSuccess(button, result);
+          button.textContent = result.is_valid === false ? "失败" : "已完成";
+          button.title = result.invalid_message || result.extra || result.plan_name || "";
+        } catch (error) {
+          button.textContent = "失败";
+          button.title = error.message || "查询失败";
+        } finally {
+          setTimeout(() => {
+            button.disabled = false;
+            button.textContent = originalText;
+          }, 1200);
+        }
+      });
+    });
+  };
+  bindAsyncButton(
+    "[data-account-query]",
+    "查询中",
+    (button) => `/api/accounts/${button.dataset.accountId}/query`,
+    updateBalanceRow
+  );
+  bindAsyncButton(
+    "[data-group-query]",
+    "查询中",
+    (button) => `/api/accounts/${button.dataset.accountId}/group-query`,
+    updateGroupRatesCell
+  );
+  const refreshStatus = document.querySelector("[data-refresh-status]");
+  const queryAllButton = document.querySelector("[data-query-all]");
+  const refreshInterval = Math.max(30, Number.parseInt(refreshStatus?.dataset.refreshInterval || "30", 10));
+  let refreshRemaining = refreshInterval;
+  let refreshInFlight = false;
+  let refreshTimer = null;
+  const setRefreshStatus = (text) => {
+    if (refreshStatus) {
+      refreshStatus.textContent = text;
+    }
+  };
+  const resetRefreshCountdown = () => {
+    refreshRemaining = refreshInterval;
+    setRefreshStatus(`下次自动刷新 ${refreshRemaining} 秒`);
+  };
+  const runQueryAll = async (trigger = "manual") => {
+    if (refreshInFlight) {
+      return;
+    }
+    refreshInFlight = true;
+    const originalText = queryAllButton?.textContent || "";
+    if (queryAllButton) {
+      queryAllButton.disabled = true;
+      queryAllButton.textContent = trigger === "auto" ? "自动刷新中" : "查询中";
+    }
+    setRefreshStatus(trigger === "auto" ? "自动刷新中" : "查询全部中");
+    try {
+      const response = await fetch("/api/query-all", { method: "POST" });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.detail || "查询失败");
+      }
+      updateBalanceRows(payload.results || []);
+      resetRefreshCountdown();
+    } catch (error) {
+      setRefreshStatus(error.message || "自动刷新失败");
+      refreshRemaining = refreshInterval;
+    } finally {
+      refreshInFlight = false;
+      if (queryAllButton) {
+        queryAllButton.disabled = false;
+        queryAllButton.textContent = originalText;
+      }
+    }
+  };
+  queryAllButton?.addEventListener("click", () => {
+    runQueryAll("manual");
   });
+  if (refreshStatus) {
+    resetRefreshCountdown();
+    refreshTimer = setInterval(() => {
+      if (refreshInFlight) {
+        return;
+      }
+      refreshRemaining -= 1;
+      if (refreshRemaining <= 0) {
+        runQueryAll("auto");
+        return;
+      }
+      setRefreshStatus(`下次自动刷新 ${refreshRemaining} 秒`);
+    }, 1000);
+  }
 </script>
 {% endblock %}

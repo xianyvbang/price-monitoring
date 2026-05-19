@@ -285,6 +285,12 @@ th {
   white-space: normal;
 }
 
+.note-cell {
+  max-width: 260px;
+  white-space: normal;
+  word-break: break-word;
+}
+
 .detail-row td {
   color: var(--danger);
   white-space: normal;
@@ -293,6 +299,18 @@ th {
 [data-account-plan] {
   max-width: 520px;
   white-space: normal;
+  word-break: break-word;
+}
+
+.group-rates {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 280px;
+  white-space: normal;
+}
+
+.group-rate-item {
   word-break: break-word;
 }
 
@@ -347,6 +365,28 @@ th {
 
 .actions form {
   margin: 0;
+}
+
+dialog {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  max-width: min(760px, calc(100% - 32px));
+  padding: 0;
+  width: 760px;
+}
+
+.json-dialog {
+  padding: 18px;
+}
+
+pre {
+  background: #f8fafc;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  max-height: 60vh;
+  overflow: auto;
+  padding: 12px;
+  white-space: pre-wrap;
 }
 
 @media (max-width: 760px) {

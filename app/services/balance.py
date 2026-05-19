@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import json
+from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 import httpx
@@ -11,6 +13,9 @@ LogCallback = Callable[[str, str, str], None]
 SENSITIVE_HEADERS = {"authorization", "cookie", "set-cookie"}
 SENSITIVE_FIELDS = {"api_key", "apikey", "password", "access_token", "refresh_token", "token", "secret"}
 LOG_VALUE_LIMIT = 2000
+SUB2API_TOKEN_DEFAULT_TTL_SECONDS = 50 * 60
+SUB2API_TOKEN_REFRESH_SKEW_SECONDS = 60
+_SUB2API_TOKEN_CACHE: dict[str, dict[str, Any]] = {}
 
 
 def normalize_result(data: dict[str, Any]) -> dict[str, Any]:
@@ -85,44 +90,57 @@ async def query_sub2api_group(account: Any, secret_key: str, timeout: float, log
 
 async def _query_sub2api_group(account: Any, secret_key: str, timeout: float, log: LogCallback | None = None) -> dict[str, Any]:
     key_id = decrypt_value(_account_value(account, "key_id_enc"), secret_key)
+    api_key = decrypt_value(_account_value(account, "api_key_enc"), secret_key)
     email = decrypt_value(_account_value(account, "email_enc"), secret_key)
     password = decrypt_value(_account_value(account, "password_enc"), secret_key)
+    if not api_key:
+        return normalize_result({"is_valid": False, "invalid_message": "缺少 apiKey"})
     if not email:
         return normalize_result({"is_valid": False, "invalid_message": "缺少 email"})
     if not password:
         return normalize_result({"is_valid": False, "invalid_message": "缺少 password"})
 
     base_url = account["base_url"].rstrip("/")
+    token_cache_key = _sub2api_token_cache_key(base_url, email)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        login_response = await _logged_post_json(
-            client,
-            f"{base_url}/api/v1/auth/login",
-            {"email": email, "password": password},
-            {},
-            log,
-            account,
-        )
-        login_response.raise_for_status()
-        login_payload = login_response.json()
-        token = _extract_access_token(login_payload)
+        usage_response = await _logged_get(client, f"{base_url}/v1/usage", {"Authorization": f"Bearer {api_key}"}, log, account)
+        usage_response.raise_for_status()
+        active_plan_name = _extract_usage_plan_name(usage_response.json())
+
+        token = _get_cached_sub2api_token(token_cache_key)
+        used_cached_token = token is not None
         if not token:
-            login_data = _unwrap_response_data(login_payload)
-            if isinstance(login_data, dict) and login_data.get("requires_2fa"):
-                return normalize_result({"is_valid": False, "invalid_message": "账号启用了 2FA，无法自动登录查组"})
-            return normalize_result({"is_valid": False, "invalid_message": "登录成功但响应中没有 access_token"})
+            token_result = await _login_sub2api(client, base_url, email, password, token_cache_key, log, account)
+            if isinstance(token_result, dict):
+                return token_result
+            token = token_result
+        try:
+            groups_payload, rates_payload = await _fetch_sub2api_group_payloads(client, base_url, token, log, account)
+            groups = _extract_groups(groups_payload)
+            rates = _extract_group_rates(rates_payload)
+            active_key_group_id = None
+            summary = _build_current_group_rate_summary(key_id, active_key_group_id, active_plan_name, groups, rates)
+            if _is_unrecognized_group_summary(summary):
+                summary = await _try_match_group_from_api_key(
+                    client, base_url, token, log, account, api_key, key_id, active_plan_name, groups, rates, summary
+                )
+        except httpx.HTTPError:
+            if not used_cached_token:
+                raise
+            _SUB2API_TOKEN_CACHE.pop(token_cache_key, None)
+            token_result = await _login_sub2api(client, base_url, email, password, token_cache_key, log, account)
+            if isinstance(token_result, dict):
+                return token_result
+            groups_payload, rates_payload = await _fetch_sub2api_group_payloads(client, base_url, token_result, log, account)
+            groups = _extract_groups(groups_payload)
+            rates = _extract_group_rates(rates_payload)
+            active_key_group_id = None
+            summary = _build_current_group_rate_summary(key_id, active_key_group_id, active_plan_name, groups, rates)
+            if _is_unrecognized_group_summary(summary):
+                summary = await _try_match_group_from_api_key(
+                    client, base_url, token_result, log, account, api_key, key_id, active_plan_name, groups, rates, summary
+                )
 
-        auth_headers = {"Authorization": f"Bearer {token}"}
-        groups_response = await _logged_get(client, f"{base_url}/api/v1/groups/available", auth_headers, log, account)
-        groups_response.raise_for_status()
-        groups_payload = groups_response.json()
-
-        rates_response = await _logged_get(client, f"{base_url}/api/v1/groups/rates", auth_headers, log, account)
-        rates_response.raise_for_status()
-        rates_payload = rates_response.json()
-
-    groups = _extract_groups(groups_payload)
-    rates = _extract_group_rates(rates_payload)
-    summary = _build_group_rate_summary(key_id, groups, rates)
     raw_json = _compact_json(summary)
     return normalize_result({"is_valid": True, "plan_name": summary["title"], "extra": raw_json})
 
@@ -230,6 +248,182 @@ async def _logged_post_json(
     return response
 
 
+async def _login_sub2api(
+    client: httpx.AsyncClient,
+    base_url: str,
+    email: str,
+    password: str,
+    cache_key: str,
+    log: LogCallback | None,
+    account: Any,
+) -> str | dict[str, Any]:
+    login_response = await _logged_post_json(
+        client,
+        f"{base_url}/api/v1/auth/login",
+        {"email": email, "password": password},
+        {},
+        log,
+        account,
+    )
+    login_response.raise_for_status()
+    login_payload = login_response.json()
+    token = _extract_access_token(login_payload)
+    if not token:
+        login_data = _unwrap_response_data(login_payload)
+        if isinstance(login_data, dict) and login_data.get("requires_2fa"):
+            return normalize_result({"is_valid": False, "invalid_message": "账号启用了 2FA，无法自动登录查组"})
+        return normalize_result({"is_valid": False, "invalid_message": "登录成功但响应中没有 access_token"})
+    _cache_sub2api_token(cache_key, token, login_payload)
+    return token
+
+
+async def _fetch_sub2api_group_payloads(
+    client: httpx.AsyncClient,
+    base_url: str,
+    token: str,
+    log: LogCallback | None,
+    account: Any,
+) -> tuple[Any, Any]:
+    auth_headers = {"Authorization": f"Bearer {token}"}
+    groups_response = await _logged_get(client, f"{base_url}/api/v1/groups/available", auth_headers, log, account)
+    groups_response.raise_for_status()
+    groups_payload = groups_response.json()
+
+    rates_response = await _logged_get(client, f"{base_url}/api/v1/groups/rates", auth_headers, log, account)
+    rates_response.raise_for_status()
+    return groups_payload, rates_response.json()
+
+
+async def _fetch_sub2api_keys_payload(
+    client: httpx.AsyncClient,
+    base_url: str,
+    token: str,
+    log: LogCallback | None,
+    account: Any,
+) -> Any:
+    keys_response = await _logged_get(client, f"{base_url}/api/v1/keys?page=1&page_size=100", {"Authorization": f"Bearer {token}"}, log, account)
+    keys_response.raise_for_status()
+    return keys_response.json()
+
+
+async def _try_match_group_from_api_key(
+    client: httpx.AsyncClient,
+    base_url: str,
+    token: str,
+    log: LogCallback | None,
+    account: Any,
+    api_key: str,
+    key_id: Optional[str],
+    active_plan_name: Optional[str],
+    groups: list[dict[str, Any]],
+    rates: dict[str, float],
+    fallback_summary: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        keys_payload = await _fetch_sub2api_keys_payload(client, base_url, token, log, account)
+    except (httpx.HTTPError, KeyError, IndexError, ValueError):
+        return fallback_summary
+    active_key_group_id = _extract_api_key_group_id(keys_payload, api_key)
+    if not active_key_group_id:
+        return fallback_summary
+    return _build_current_group_rate_summary(key_id, active_key_group_id, active_plan_name, groups, rates)
+
+
+def _sub2api_token_cache_key(base_url: str, email: str) -> str:
+    return f"{base_url}|{email.strip().lower()}"
+
+
+def _get_cached_sub2api_token(cache_key: str) -> Optional[str]:
+    cached = _SUB2API_TOKEN_CACHE.get(cache_key)
+    if not cached:
+        return None
+    if _now_timestamp() >= float(cached.get("expires_at", 0)):
+        _SUB2API_TOKEN_CACHE.pop(cache_key, None)
+        return None
+    token = cached.get("token")
+    return str(token) if token else None
+
+
+def _cache_sub2api_token(cache_key: str, token: str, payload: Any) -> None:
+    expires_at = _extract_token_expires_at(payload, token)
+    _SUB2API_TOKEN_CACHE[cache_key] = {"token": token, "expires_at": expires_at}
+
+
+def _extract_token_expires_at(payload: Any, token: str) -> float:
+    expires_at = _extract_expiry_timestamp(payload)
+    if expires_at is None:
+        expires_at = _extract_jwt_expiry(token)
+    if expires_at is None:
+        expires_at = _now_timestamp() + SUB2API_TOKEN_DEFAULT_TTL_SECONDS
+    return max(_now_timestamp(), expires_at - SUB2API_TOKEN_REFRESH_SKEW_SECONDS)
+
+
+def _extract_expiry_timestamp(payload: Any) -> Optional[float]:
+    data = _unwrap_response_data(payload)
+    candidates = []
+    if isinstance(data, dict):
+        candidates.extend(
+            [
+                data.get("expires_at"),
+                data.get("expiresAt"),
+                data.get("expire_at"),
+                data.get("expireAt"),
+                data.get("exp"),
+            ]
+        )
+        ttl = data.get("expires_in") or data.get("expiresIn")
+        ttl_number = _optional_number(ttl)
+        if ttl_number is not None:
+            return _now_timestamp() + ttl_number
+    if isinstance(payload, dict):
+        candidates.extend(
+            [
+                payload.get("expires_at"),
+                payload.get("expiresAt"),
+                payload.get("expire_at"),
+                payload.get("expireAt"),
+                payload.get("exp"),
+            ]
+        )
+        ttl = payload.get("expires_in") or payload.get("expiresIn")
+        ttl_number = _optional_number(ttl)
+        if ttl_number is not None:
+            return _now_timestamp() + ttl_number
+    for value in candidates:
+        timestamp = _parse_expiry_value(value)
+        if timestamp is not None:
+            return timestamp
+    return None
+
+
+def _parse_expiry_value(value: Any) -> Optional[float]:
+    number = _optional_number(value)
+    if number is not None:
+        return number / 1000 if number > 9999999999 else number
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def _extract_jwt_expiry(token: str) -> Optional[float]:
+    parts = token.split(".")
+    if len(parts) < 2:
+        return None
+    payload = parts[1] + "=" * (-len(parts[1]) % 4)
+    try:
+        data = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return _parse_expiry_value(data.get("exp")) if isinstance(data, dict) else None
+
+
+def _now_timestamp() -> float:
+    return datetime.now(timezone.utc).timestamp()
+
+
 def _safe_headers(headers: dict[str, str]) -> dict[str, str]:
     return {key: "***" if key.lower() in SENSITIVE_HEADERS else value for key, value in headers.items()}
 
@@ -296,6 +490,19 @@ def _extract_access_token(payload: Any) -> Optional[str]:
     return None
 
 
+def _extract_usage_plan_name(payload: Any) -> Optional[str]:
+    data = _unwrap_response_data(payload)
+    if isinstance(data, dict):
+        plan_name = data.get("planName") or data.get("plan_name") or data.get("group")
+        if plan_name:
+            return str(plan_name)
+    if isinstance(payload, dict):
+        plan_name = payload.get("planName") or payload.get("plan_name") or payload.get("group")
+        if plan_name:
+            return str(plan_name)
+    return None
+
+
 def _extract_groups(payload: Any) -> list[dict[str, Any]]:
     data = _unwrap_response_data(payload)
     if isinstance(data, list):
@@ -320,37 +527,122 @@ def _extract_group_rates(payload: Any) -> dict[str, float]:
     return rates
 
 
-def _build_group_rate_summary(key_id: Optional[str], groups: list[dict[str, Any]], rates: dict[str, float]) -> dict[str, Any]:
+def _extract_api_key_group_id(payload: Any, api_key: str) -> Optional[str]:
+    keys = _extract_api_keys(payload)
+    if len(keys) == 1:
+        return _value_as_string(_extract_group_id_from_key(keys[0]))
+    for item in keys:
+        candidate = item.get("key") or item.get("api_key") or item.get("apiKey") or item.get("token")
+        if candidate is not None and _api_key_matches(str(candidate), api_key):
+            return _value_as_string(_extract_group_id_from_key(item))
+    return None
+
+
+def _extract_api_keys(payload: Any) -> list[dict[str, Any]]:
+    data = _unwrap_response_data(payload)
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if isinstance(data, dict):
+        for key in ("items", "keys", "list", "records", "data"):
+            items = data.get(key)
+            if isinstance(items, list):
+                return [item for item in items if isinstance(item, dict)]
+    return []
+
+
+def _extract_group_id_from_key(item: dict[str, Any]) -> Any:
+    group = item.get("group")
+    if isinstance(group, dict):
+        return group.get("id") or group.get("group_id") or group.get("groupId")
+    return item.get("group_id") or item.get("groupId") or item.get("groupID")
+
+
+def _api_key_matches(candidate: str, api_key: str) -> bool:
+    if candidate == api_key:
+        return True
+    if "*" in candidate or candidate.endswith("..."):
+        visible = candidate.replace("*", "").replace("...", "")
+        return bool(visible) and (api_key.startswith(visible) or api_key.endswith(visible))
+    return False
+
+
+def _value_as_string(value: Any) -> Optional[str]:
+    if value is None or value == "":
+        return None
+    return str(value)
+
+
+def _build_current_group_rate_summary(
+    key_id: Optional[str],
+    active_key_group_id: Optional[str],
+    active_plan_name: Optional[str],
+    groups: list[dict[str, Any]],
+    rates: dict[str, float],
+) -> dict[str, Any]:
     group_summaries = [_summarize_group(group, rates) for group in groups]
-    if key_id:
-        target_group = next((item for item in group_summaries if str(item.get("id")) == str(key_id)), None)
-        if target_group:
-            title = f"{target_group.get('name') or key_id} 倍率 {target_group['effective_rate_multiplier']}"
-            return {
-                "title": title,
-                "group_id": key_id,
-                "group": target_group,
-                "rates": rates,
-            }
-        rate = rates.get(str(key_id))
-        if rate is not None:
-            return {
-                "title": f"分组 {key_id} 专属倍率 {rate}",
-                "group_id": key_id,
-                "group": None,
-                "rates": rates,
-            }
+    match_group_id = active_key_group_id or key_id
+    target_group = None
+    if match_group_id:
+        target_group = next((item for item in group_summaries if str(item.get("id")) == str(match_group_id)), None)
+    if target_group is None:
+        target_group = _find_active_group(active_plan_name, group_summaries)
+    if target_group is None and len(group_summaries) == 1:
+        target_group = group_summaries[0]
+    if target_group:
+        title_name = target_group.get("plan_name") or target_group.get("name") or target_group.get("id") or active_plan_name or key_id
+        title = f"{title_name} 倍率 {target_group['effective_rate_multiplier']}"
         return {
-            "title": f"未找到分组 {key_id}",
-            "group_id": key_id,
-            "groups": group_summaries,
-            "rates": rates,
+            "title": title,
+            "group_id": target_group.get("id") or match_group_id,
+            "group": target_group,
+            "groups": [target_group],
+            "active_plan_name": active_plan_name,
+            "active_key_group_id": active_key_group_id,
         }
+    if match_group_id:
+        rate = rates.get(str(match_group_id))
+        if rate is not None:
+            target_group = {
+                "id": match_group_id,
+                "name": None,
+                "plan_name": active_plan_name or f"分组 {match_group_id}",
+                "platform": None,
+                "status": None,
+                "default_rate_multiplier": None,
+                "user_rate_multiplier": rate,
+                "effective_rate_multiplier": rate,
+            }
+            return {
+                "title": f"{target_group['plan_name']} 倍率 {rate}",
+                "group_id": match_group_id,
+                "group": target_group,
+                "groups": [target_group],
+                "active_plan_name": active_plan_name,
+                "active_key_group_id": active_key_group_id,
+            }
     return {
-        "title": f"可用分组 {len(group_summaries)} 个",
-        "groups": group_summaries,
-        "rates": rates,
+        "title": "未识别当前 apiKey 分组",
+        "group_id": key_id,
+        "groups": [],
+        "available_groups": group_summaries,
+        "active_plan_name": active_plan_name,
+        "active_key_group_id": active_key_group_id,
     }
+
+
+def _is_unrecognized_group_summary(summary: dict[str, Any]) -> bool:
+    return summary.get("title") == "未识别当前 apiKey 分组"
+
+
+def _find_active_group(active_plan_name: Optional[str], groups: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    if not active_plan_name:
+        return None
+    normalized = active_plan_name.strip().lower()
+    for group in groups:
+        candidates = (group.get("plan_name"), group.get("name"), group.get("id"))
+        if any(str(candidate).strip().lower() == normalized for candidate in candidates if candidate is not None):
+            return group
+    return None
 
 
 def _summarize_group(group: dict[str, Any], rates: dict[str, float]) -> dict[str, Any]:
@@ -361,6 +653,7 @@ def _summarize_group(group: dict[str, Any], rates: dict[str, float]) -> dict[str
     return {
         "id": group_id,
         "name": group.get("name"),
+        "plan_name": group.get("plan_name") or group.get("planName") or group.get("name"),
         "platform": group.get("platform"),
         "status": group.get("status"),
         "default_rate_multiplier": default_rate,

@@ -14,6 +14,22 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+CHINA_TZ = timezone(timedelta(hours=8))
+
+
+def format_china_time(value: Any) -> str:
+    if not value:
+        return "-"
+    try:
+        text = str(value)
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return str(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(CHINA_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+
 class Database:
     def __init__(self, path: str, secret_key: str) -> None:
         self.path = path
@@ -67,6 +83,7 @@ class Database:
                     platform TEXT NOT NULL CHECK (platform IN ('newApi', 'sub2Api')),
                     name TEXT NOT NULL,
                     base_url TEXT NOT NULL,
+                    note TEXT,
                     key_id_enc TEXT,
                     api_key_enc TEXT,
                     email_enc TEXT,
@@ -105,6 +122,15 @@ class Database:
                     checked_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS group_rate_records (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    plan_name TEXT NOT NULL,
+                    rate_multiplier REAL,
+                    raw_json TEXT NOT NULL,
+                    checked_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS app_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     level TEXT NOT NULL,
@@ -114,13 +140,17 @@ class Database:
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_app_logs_created_at ON app_logs(created_at);
+                CREATE INDEX IF NOT EXISTS idx_group_rate_records_account_checked_at
+                ON group_rate_records(account_id, checked_at DESC);
                 """
             )
             self._migrate_smtp_nullable(conn)
             self._migrate_accounts_key_id(conn)
             self._migrate_accounts_sub2api_login(conn)
+            self._migrate_accounts_note(conn)
             self._set_default(conn, "request_timeout", "15")
             self._set_default(conn, "query_interval", "30")
+            self._set_default(conn, "group_rate_query_interval", "1200")
             self._set_default(conn, "default_threshold", "5")
             conn.execute(
                 """
@@ -221,6 +251,13 @@ class Database:
         if "password_enc" not in column_names:
             conn.execute("ALTER TABLE accounts ADD COLUMN password_enc TEXT")
 
+    @staticmethod
+    def _migrate_accounts_note(conn: sqlite3.Connection) -> None:
+        columns = conn.execute("PRAGMA table_info(accounts)").fetchall()
+        column_names = {row["name"] for row in columns}
+        if "note" not in column_names:
+            conn.execute("ALTER TABLE accounts ADD COLUMN note TEXT")
+
     def get_user(self, username: str) -> Optional[sqlite3.Row]:
         with self.connect() as conn:
             return conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
@@ -232,14 +269,22 @@ class Database:
         return {
             "request_timeout": float(values.get("request_timeout", "15")),
             "query_interval": int(float(values.get("query_interval", "30"))),
+            "group_rate_query_interval": int(float(values.get("group_rate_query_interval", "1200"))),
             "default_threshold": float(values.get("default_threshold", "5")),
         }
 
-    def update_general_settings(self, request_timeout: float, query_interval: int, default_threshold: float) -> None:
+    def update_general_settings(
+        self,
+        request_timeout: float,
+        query_interval: int,
+        default_threshold: float,
+        group_rate_query_interval: int = 1200,
+    ) -> None:
         with self.connect() as conn:
             for key, value in {
                 "request_timeout": str(max(1.0, request_timeout)),
                 "query_interval": str(max(30, query_interval)),
+                "group_rate_query_interval": str(max(60, group_rate_query_interval)),
                 "default_threshold": str(max(0.0, default_threshold)),
             }.items():
                 conn.execute(
@@ -296,6 +341,7 @@ class Database:
     def upsert_account(self, data: dict[str, Any]) -> int:
         now = utc_now()
         platform = data["platform"]
+        note = str(data.get("note") or "").strip()
         key_id = data.get("key_id")
         api_key = data.get("api_key")
         email = data.get("email")
@@ -315,13 +361,14 @@ class Database:
             conn.execute(
                 """
                 INSERT INTO accounts (
-                    platform, name, base_url, key_id_enc, api_key_enc, email_enc, password_enc,
+                    platform, name, base_url, note, key_id_enc, api_key_enc, email_enc, password_enc,
                     access_token_enc, user_id_enc,
                     threshold, is_enabled, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(platform, name) DO UPDATE SET
                     base_url = excluded.base_url,
+                    note = excluded.note,
                     key_id_enc = COALESCE(excluded.key_id_enc, accounts.key_id_enc),
                     api_key_enc = COALESCE(excluded.api_key_enc, accounts.api_key_enc),
                     email_enc = COALESCE(excluded.email_enc, accounts.email_enc),
@@ -336,6 +383,7 @@ class Database:
                     platform,
                     data["name"],
                     data["base_url"].rstrip("/"),
+                    note,
                     key_id_enc,
                     api_key_enc,
                     email_enc,
@@ -360,6 +408,7 @@ class Database:
             raise ValueError("账号不存在")
         now = utc_now()
         platform = data["platform"]
+        note = str(data.get("note") or "").strip()
         key_id = data.get("key_id")
         api_key = data.get("api_key")
         email = data.get("email")
@@ -379,7 +428,7 @@ class Database:
             conn.execute(
                 """
                 UPDATE accounts
-                SET platform = ?, name = ?, base_url = ?,
+                SET platform = ?, name = ?, base_url = ?, note = ?,
                     key_id_enc = COALESCE(?, key_id_enc),
                     api_key_enc = COALESCE(?, api_key_enc),
                     email_enc = COALESCE(?, email_enc),
@@ -393,6 +442,7 @@ class Database:
                     platform,
                     data["name"],
                     data["base_url"].rstrip("/"),
+                    note,
                     key_id_enc,
                     api_key_enc,
                     email_enc,
@@ -413,12 +463,13 @@ class Database:
 
     def update_account_result(self, account_id: int, result: dict[str, Any]) -> None:
         status = "valid" if result.get("is_valid") else "invalid"
+        checked_at = result.get("checked_at") or utc_now()
         with self.connect() as conn:
             conn.execute(
                 """
                 UPDATE accounts
                 SET last_status = ?, last_error = ?, last_plan_name = ?, last_remaining = ?,
-                    last_unit = ?, last_total = ?, last_used = ?, last_extra = ?,
+                    last_unit = ?, last_total = ?, last_used = ?,
                     last_checked_at = ?, updated_at = ?
                 WHERE id = ?
                 """,
@@ -430,8 +481,7 @@ class Database:
                     result.get("unit"),
                     result.get("total"),
                     result.get("used"),
-                    result.get("extra"),
-                    utc_now(),
+                    checked_at,
                     utc_now(),
                     account_id,
                 ),
@@ -453,9 +503,99 @@ class Database:
                     result.get("used"),
                     result.get("extra"),
                     result.get("invalid_message"),
-                    utc_now(),
+                    checked_at,
                 ),
             )
+
+    def update_account_group_result(self, account_id: int, result: dict[str, Any]) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE accounts
+                SET last_extra = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    result.get("extra"),
+                    utc_now(),
+                    account_id,
+                ),
+            )
+
+    def record_group_rate_if_changed(
+        self,
+        account_id: int,
+        group_summary: dict[str, Any],
+        checked_at: str,
+    ) -> dict[str, Any]:
+        group = group_summary.get("group") if isinstance(group_summary.get("group"), dict) else {}
+        plan_name = (
+            group.get("plan_name")
+            or group.get("planName")
+            or group.get("name")
+            or group_summary.get("active_plan_name")
+            or group_summary.get("title")
+            or "-"
+        )
+        current_rate = _optional_float(group.get("effective_rate_multiplier"))
+        if not group and current_rate is None:
+            return {
+                "inserted": False,
+                "changed": False,
+                "previous_rate": None,
+                "current_rate": None,
+                "record": None,
+            }
+        raw_json = group_summary.get("raw_json")
+        if not raw_json:
+            raw_json = group_summary.get("extra")
+        if not raw_json:
+            raw_json = _json_dumps(group_summary)
+
+        with self.connect() as conn:
+            previous = conn.execute(
+                """
+                SELECT * FROM group_rate_records
+                WHERE account_id = ?
+                ORDER BY checked_at DESC, id DESC
+                LIMIT 1
+                """,
+                (account_id,),
+            ).fetchone()
+            previous_rate = previous["rate_multiplier"] if previous else None
+            changed = previous is not None and previous_rate != current_rate
+            inserted = previous is None or previous_rate != current_rate
+            record = previous
+            if inserted:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO group_rate_records (account_id, plan_name, rate_multiplier, raw_json, checked_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (account_id, str(plan_name), current_rate, raw_json, checked_at),
+                )
+                record = conn.execute(
+                    "SELECT * FROM group_rate_records WHERE id = ?",
+                    (cursor.lastrowid,),
+                ).fetchone()
+            return {
+                "inserted": inserted,
+                "changed": changed,
+                "previous_rate": previous_rate,
+                "current_rate": current_rate,
+                "record": row_to_dict(record) if record else None,
+            }
+
+    def list_group_rate_records(self, account_id: int) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            return conn.execute(
+                """
+                SELECT * FROM group_rate_records
+                WHERE account_id = ?
+                ORDER BY checked_at DESC, id DESC
+                """,
+                (account_id,),
+            ).fetchall()
 
     def set_alert_state(self, account_id: int, active: bool, sent: bool = False) -> None:
         with self.connect() as conn:
@@ -497,3 +637,9 @@ def _optional_float(value: Any) -> Optional[float]:
     if value is None or value == "":
         return None
     return float(value)
+
+
+def _json_dumps(value: Any) -> str:
+    import json
+
+    return json.dumps(value, ensure_ascii=False, default=str)

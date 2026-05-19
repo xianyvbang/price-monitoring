@@ -12,7 +12,7 @@ from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeSerializer
 
 from app.config import get_config
-from app.models import Database, row_to_dict
+from app.models import Database, format_china_time, row_to_dict
 from app.security import decrypt_value
 from app.security import verify_password
 from app.services.emailer import send_email
@@ -105,7 +105,7 @@ def redirect_if_needed(request: Request) -> RedirectResponse | None:
 
 
 def template_context(request: Request, **extra: Any) -> dict[str, Any]:
-    return {"request": request, "user": current_user(request), **extra}
+    return {"request": request, "user": current_user(request), "format_time": format_china_time, **extra}
 
 
 def _log_text(value: Any) -> str:
@@ -212,7 +212,41 @@ def public_account(row: Any) -> dict[str, Any]:
     data["has_password"] = bool(data.pop("password_enc", None))
     data["has_access_token"] = bool(data.pop("access_token_enc", None))
     data["has_user_id"] = bool(data.pop("user_id_enc", None))
+    data["group_rates"] = group_rates_from_extra(data.get("last_extra"))
     return data
+
+
+def group_rates_from_extra(extra: Any) -> list[dict[str, Any]]:
+    if not extra:
+        return []
+    if isinstance(extra, str):
+        try:
+            extra = json.loads(extra)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(extra, dict):
+        return []
+
+    groups = extra.get("groups")
+    if not isinstance(groups, list) and isinstance(extra.get("group"), dict):
+        groups = [extra["group"]]
+    if not isinstance(groups, list):
+        return []
+
+    group_rates = []
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        rate = group.get("user_rate_multiplier")
+        if rate is None:
+            rate = group.get("default_rate_multiplier")
+        group_rates.append(
+            {
+                "plan_name": group.get("plan_name") or group.get("planName") or group.get("name") or group.get("id") or "-",
+                "rate_multiplier": rate,
+            }
+        )
+    return group_rates
 
 
 def grouped_accounts() -> dict[str, list[dict[str, Any]]]:
@@ -394,6 +428,24 @@ async def settings_page(request: Request):
     )
 
 
+@app.get("/accounts/{account_id}/group-rates", response_class=HTMLResponse)
+async def group_rates_page(request: Request, account_id: int):
+    redirect = redirect_if_needed(request)
+    if redirect:
+        return redirect
+    account = db.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    return templates.TemplateResponse(
+        "group_rates.html",
+        template_context(
+            request,
+            account=public_account(account),
+            records=[row_to_dict(row) for row in db.list_group_rate_records(account_id)],
+        ),
+    )
+
+
 @app.get("/logs", response_class=HTMLResponse)
 async def logs_page(request: Request):
     redirect = redirect_if_needed(request)
@@ -415,6 +467,7 @@ async def save_general_settings_form(request: Request):
         float(form.get("request_timeout") or 15),
         int(float(form.get("query_interval") or 30)),
         float(form.get("default_threshold") or 5),
+        int(float(form.get("group_rate_query_interval") or 1200)),
     )
     db.add_log("info", "settings", "更新通用设置")
     return RedirectResponse("/settings", status_code=303)
@@ -509,6 +562,18 @@ async def api_logs(request: Request):
     return {"logs": [row_to_dict(row) for row in db.list_logs()]}
 
 
+@app.get("/api/accounts/{account_id}/group-rates")
+async def api_group_rates(request: Request, account_id: int):
+    require_user(request)
+    account = db.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    return {
+        "account": public_account(account),
+        "records": [row_to_dict(row) for row in db.list_group_rate_records(account_id)],
+    }
+
+
 @app.post("/api/accounts")
 async def api_create_account(request: Request):
     require_user(request)
@@ -564,6 +629,7 @@ async def api_general_settings(request: Request):
         float(payload.get("request_timeout", 15)),
         int(payload.get("query_interval", 30)),
         float(payload.get("default_threshold", 5)),
+        int(payload.get("group_rate_query_interval", payload.get("groupRateQueryInterval", 1200))),
     )
     db.add_log("info", "settings", "API 更新通用设置")
     return {"ok": True, "settings": db.get_general_settings()}
@@ -605,6 +671,7 @@ def _account_from_form(form: Any) -> dict[str, Any]:
             "platform": form.get("platform"),
             "name": form.get("name"),
             "base_url": form.get("base_url"),
+            "note": form.get("note"),
             "key_id": form.get("key_id"),
             "api_key": form.get("api_key"),
             "email": form.get("email"),
@@ -629,6 +696,7 @@ def _account_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "platform": platform,
         "name": name,
         "base_url": base_url,
+        "note": payload.get("note") or payload.get("remark") or payload.get("remarks") or "",
         "key_id": payload.get("key_id") or payload.get("keyId"),
         "api_key": payload.get("api_key") or payload.get("apiKey"),
         "email": payload.get("email"),
@@ -666,6 +734,7 @@ def import_bulk_accounts(platform: str, bulk_text: str) -> int:
                             "password": parts[4],
                             "api_key": parts[5],
                             "threshold": parts[6] if len(parts) > 6 else None,
+                            "note": parts[7] if len(parts) > 7 else "",
                         }
                     )
                 elif len(parts) >= 6:
@@ -677,6 +746,7 @@ def import_bulk_accounts(platform: str, bulk_text: str) -> int:
                             "password": parts[3],
                             "api_key": parts[4],
                             "threshold": parts[5] if len(parts) > 5 else None,
+                            "note": parts[6] if len(parts) > 6 else "",
                         }
                     )
                 elif len(parts) >= 5:
@@ -687,6 +757,7 @@ def import_bulk_accounts(platform: str, bulk_text: str) -> int:
                             "key_id": parts[2],
                             "api_key": parts[3],
                             "threshold": parts[4] if len(parts) > 4 else None,
+                            "note": parts[5] if len(parts) > 5 else "",
                         }
                     )
                 elif len(parts) >= 4:
@@ -696,6 +767,7 @@ def import_bulk_accounts(platform: str, bulk_text: str) -> int:
                             "base_url": parts[1],
                             "api_key": parts[2],
                             "threshold": parts[3] if len(parts) > 3 else None,
+                            "note": parts[4] if len(parts) > 4 else "",
                         }
                     )
             if platform == "newApi" and len(parts) >= 4:
@@ -706,6 +778,7 @@ def import_bulk_accounts(platform: str, bulk_text: str) -> int:
                         "access_token": parts[2],
                         "user_id": parts[3],
                         "threshold": parts[4] if len(parts) > 4 else None,
+                        "note": parts[5] if len(parts) > 5 else "",
                     }
                 )
     for item in items:

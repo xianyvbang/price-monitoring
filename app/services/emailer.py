@@ -5,6 +5,7 @@ from email.message import EmailMessage
 from email.utils import formataddr
 from typing import Any
 
+from app.models import format_china_time
 from app.security import decrypt_value
 
 
@@ -54,7 +55,28 @@ def build_low_balance_email(account: Any, threshold: float, remaining: float) ->
             f"当前余额: {remaining} {unit}",
             f"预警阈值: {threshold} {unit}",
             f"套餐: {account['last_plan_name'] or '-'}",
-            f"最近查询: {account['last_checked_at'] or '-'}",
+            f"最近查询: {format_china_time(account['last_checked_at'])}",
+        ]
+    )
+    return subject, body
+
+
+def build_group_rate_change_email(
+    account: Any,
+    plan_name: str,
+    old_rate: float | None,
+    new_rate: float | None,
+    checked_at: str,
+) -> tuple[str, str]:
+    subject = f"分组倍率变化: {account['name']}"
+    body = "\n".join(
+        [
+            f"平台: {account['platform']}",
+            f"账号: {account['name']}",
+            f"分组名称: {plan_name}",
+            f"旧倍率: {old_rate if old_rate is not None else '-'}",
+            f"新倍率: {new_rate if new_rate is not None else '-'}",
+            f"查询时间: {format_china_time(checked_at)}",
         ]
     )
     return subject, body

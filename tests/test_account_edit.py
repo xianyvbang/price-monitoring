@@ -14,6 +14,7 @@ def test_update_account_changes_name_without_losing_secret(tmp_path):
             "api_key": "secret",
             "email": "user@example.com",
             "password": "login-password",
+            "note": "old note",
         }
     )
 
@@ -28,6 +29,7 @@ def test_update_account_changes_name_without_losing_secret(tmp_path):
             "email": "",
             "password": "",
             "threshold": 2,
+            "note": "重要账号",
             "is_enabled": False,
         },
     )
@@ -36,6 +38,7 @@ def test_update_account_changes_name_without_losing_secret(tmp_path):
 
     assert account["name"] == "new"
     assert account["base_url"] == "https://new.example"
+    assert account["note"] == "重要账号"
     assert account["threshold"] == 2
     assert account["is_enabled"] == 0
     assert decrypt_value(account["key_id_enc"], "test-key") == "group-1"

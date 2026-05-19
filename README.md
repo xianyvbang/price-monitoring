@@ -8,6 +8,9 @@
 cp .env.example .env
 # 修改 .env 中的 ADMIN_PASSWORD 和 APP_SECRET_KEY
 docker compose up -d --build
+
+# 重新启动
+docker compose up -d --force-recreate
 ```
 
 访问 `http://localhost:8000`，默认账号来自 `.env`。
@@ -69,7 +72,7 @@ JSON 示例：
 ]
 ```
 
-`sub2Api` 账号自动查询时使用 `GET {baseUrl}/v1/usage`，并使用 `apiKey` 作为 `Authorization: Bearer ...`。手动点击“查组”时会先用 `email/password` 登录 `POST {baseUrl}/api/v1/auth/login` 获取 JWT，再调用 `GET {baseUrl}/api/v1/groups/available` 和 `GET {baseUrl}/api/v1/groups/rates` 汇总账号可用分组倍率。`groupId` 可选，填写后会优先展示该分组的有效倍率。
+`sub2Api` 账号自动查询时使用 `GET {baseUrl}/v1/usage`，并使用 `apiKey` 作为 `Authorization: Bearer ...`。手动点击“查组”时会先用当前 `apiKey` 查询激活分组，再用 `email/password` 登录 `POST {baseUrl}/api/v1/auth/login` 获取 JWT，调用 `GET {baseUrl}/api/v1/groups/available` 和 `GET {baseUrl}/api/v1/groups/rates` 获取该激活分组的名称和倍率。登录 JWT 会按过期时间缓存在服务进程内，未过期时复用；如果分组接口请求失败，会清除缓存并重新登录后重试一次。倍率优先显示 `user_rate_multiplier`，为空时显示 `default_rate_multiplier`。
 
 ## 接口
 
