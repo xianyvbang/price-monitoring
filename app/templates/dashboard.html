@@ -37,11 +37,11 @@
       </thead>
       <tbody>
         {% for account in accounts %}
-        <tr>
+        <tr data-account-row="{{ account.id }}">
           <td>{{ account.name }}</td>
-          <td><span class="status {{ account.last_status }}">{{ account.last_status }}</span></td>
-          <td>{{ account.last_plan_name or "-" }}</td>
-          <td>{{ account.last_remaining if account.last_remaining is not none else "-" }} {{ account.last_unit or "" }}</td>
+          <td><span class="status {{ account.last_status }}" data-account-status>{{ account.last_status }}</span></td>
+          <td data-account-plan>{{ account.last_plan_name or "-" }}</td>
+          <td data-account-remaining>{{ account.last_remaining if account.last_remaining is not none else "-" }} {{ account.last_unit or "" }}</td>
           {% if platform != "sub2Api" %}
           <td>{{ account.last_used if account.last_used is not none else "-" }}</td>
           <td>{{ account.last_total if account.last_total is not none else "-" }}</td>
@@ -57,6 +57,9 @@
               <form method="post" action="/accounts/{{ account.id }}/query">
                 <button type="submit">查询</button>
               </form>
+              {% if platform == "sub2Api" %}
+              <button type="button" data-group-query data-account-id="{{ account.id }}">查组</button>
+              {% endif %}
               <a class="button-link" href="/accounts?edit_id={{ account.id }}">修改</a>
             </div>
           </td>
@@ -74,4 +77,56 @@
   </div>
 </section>
 {% endfor %}
+<script>
+  const formatValue = (value, fallback = "-") => value === null || value === undefined || value === "" ? fallback : value;
+  const formatRemaining = (result) => {
+    const remaining = formatValue(result.remaining);
+    const unit = result.unit || "";
+    return unit && remaining !== "-" ? `${remaining} ${unit}` : remaining;
+  };
+  const updateDashboardRow = (button, result) => {
+    const row = button.closest("[data-account-row]");
+    if (!row) {
+      return;
+    }
+    const status = row.querySelector("[data-account-status]");
+    const plan = row.querySelector("[data-account-plan]");
+    const remaining = row.querySelector("[data-account-remaining]");
+    if (status) {
+      status.textContent = result.is_valid ? "valid" : "invalid";
+      status.className = `status ${result.is_valid ? "valid" : "invalid"}`;
+    }
+    if (plan) {
+      plan.textContent = formatValue(result.plan_name);
+    }
+    if (remaining) {
+      remaining.textContent = formatRemaining(result);
+    }
+  };
+  document.querySelectorAll("[data-group-query]").forEach((button) => {
+    const originalText = button.textContent;
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      button.textContent = "查询中";
+      try {
+        const response = await fetch(`/api/accounts/${button.dataset.accountId}/group-query`, { method: "POST" });
+        const result = await response.json();
+        if (!response.ok) {
+          throw new Error(result.detail || "查询失败");
+        }
+        updateDashboardRow(button, result);
+        button.textContent = result.is_valid ? "已完成" : "失败";
+        button.title = result.invalid_message || result.extra || result.plan_name || "";
+      } catch (error) {
+        button.textContent = "失败";
+        button.title = error.message || "查询失败";
+      } finally {
+        setTimeout(() => {
+          button.disabled = false;
+          button.textContent = originalText;
+        }, 1200);
+      }
+    });
+  });
+</script>
 {% endblock %}

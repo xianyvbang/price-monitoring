@@ -188,6 +188,11 @@ button:hover,
   border-color: #98a2b3;
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
 .primary {
   background: var(--primary);
   border-color: var(--primary);
@@ -283,6 +288,12 @@ th {
 .detail-row td {
   color: var(--danger);
   white-space: normal;
+}
+
+[data-account-plan] {
+  max-width: 520px;
+  white-space: normal;
+  word-break: break-word;
 }
 
 .low-balance {

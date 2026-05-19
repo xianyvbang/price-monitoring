@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from contextlib import asynccontextmanager
 from typing import Any
+from urllib.parse import parse_qs
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -15,13 +16,28 @@ from app.models import Database, row_to_dict
 from app.security import decrypt_value
 from app.security import verify_password
 from app.services.emailer import send_email
-from app.services.scheduler import BalanceScheduler, query_all_accounts, query_one_account
+from app.services.scheduler import BalanceScheduler, query_all_accounts, query_one_account, query_sub2api_group_for_account
 
 config = get_config()
 db = Database(config.database_path, config.app_secret_key)
 templates = Jinja2Templates(directory="app/templates")
 serializer = URLSafeSerializer(config.app_secret_key, salt="balance-monitor-session")
 scheduler = BalanceScheduler(db)
+SENSITIVE_HEADER_NAMES = {"authorization", "cookie", "set-cookie"}
+SENSITIVE_FIELD_NAMES = {
+    "api_key",
+    "apiKey",
+    "key_id",
+    "keyId",
+    "access_token",
+    "accessToken",
+    "password",
+    "email",
+    "token",
+    "secret",
+    "app_secret_key",
+}
+LOG_VALUE_LIMIT = 2000
 
 
 @asynccontextmanager
@@ -35,6 +51,28 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="余额监控", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
+
+
+@app.middleware("http")
+async def log_http_requests(request: Request, call_next):
+    body = await request.body()
+    if request.url.path not in {"/static"} and not request.url.path.startswith("/static/"):
+        db.add_log(
+            "info",
+            "http",
+            f"IN {request.method} {request.url.path} request={_safe_request_payload(request, body)}",
+        )
+
+    async def receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    request = Request(request.scope, receive)
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        db.add_log("error", "http", f"IN {request.method} {request.url.path} error={exc}")
+        raise
+    return await _log_response(request, response)
 
 
 @app.get("/health")
@@ -70,9 +108,108 @@ def template_context(request: Request, **extra: Any) -> dict[str, Any]:
     return {"request": request, "user": current_user(request), **extra}
 
 
+def _log_text(value: Any) -> str:
+    text = json.dumps(_mask_sensitive(value), ensure_ascii=False, default=str)
+    if len(text) > LOG_VALUE_LIMIT:
+        return text[:LOG_VALUE_LIMIT] + "...<truncated>"
+    return text
+
+
+def _mask_sensitive(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: "***"
+            if _is_sensitive_key(str(key))
+            else _mask_sensitive(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_mask_sensitive(item) for item in value]
+    return value
+
+
+def _is_sensitive_key(key: str) -> bool:
+    normalized = key.replace("-", "_").lower()
+    return (
+        key in SENSITIVE_FIELD_NAMES
+        or normalized in SENSITIVE_HEADER_NAMES
+        or normalized == "email"
+        or "password" in normalized
+        or "token" in normalized
+        or "secret" in normalized
+        or normalized in {"api_key", "apikey", "key_id", "keyid"}
+    )
+
+
+def _safe_headers(headers: Any) -> dict[str, str]:
+    return {
+        key: "***" if _is_sensitive_key(key) else value
+        for key, value in headers.items()
+    }
+
+
+def _parse_logged_body(content_type: str, body: bytes) -> Any:
+    if not body:
+        return None
+    content_type = content_type.lower()
+    if "application/json" in content_type:
+        try:
+            return json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return body.decode("utf-8", errors="replace")
+    if "application/x-www-form-urlencoded" in content_type:
+        parsed = parse_qs(body.decode("utf-8", errors="replace"), keep_blank_values=True)
+        return {key: values[0] if len(values) == 1 else values for key, values in parsed.items()}
+    if content_type.startswith("text/"):
+        return body.decode("utf-8", errors="replace")
+    return f"<{len(body)} bytes>"
+
+
+def _safe_request_payload(request: Request, body: bytes) -> str:
+    payload = {
+        "query": dict(request.query_params),
+        "headers": _safe_headers(request.headers),
+        "body": _parse_logged_body(request.headers.get("content-type", ""), body),
+    }
+    return _log_text(payload)
+
+
+def _safe_response_payload(response: Any, body: bytes) -> str:
+    payload = {
+        "status": response.status_code,
+        "headers": _safe_headers(response.headers),
+        "body": _parse_logged_body(response.headers.get("content-type", ""), body),
+    }
+    return _log_text(payload)
+
+
+async def _log_response(request: Request, response: Any):
+    body = b""
+    async for chunk in response.body_iterator:
+        if isinstance(chunk, str):
+            chunk = chunk.encode("utf-8")
+        body += chunk
+    if request.url.path not in {"/static"} and not request.url.path.startswith("/static/"):
+        db.add_log(
+            "info",
+            "http",
+            f"IN {request.method} {request.url.path} response={_safe_response_payload(response, body)}",
+        )
+    response.body_iterator = _body_iterator(body)
+    response.headers["content-length"] = str(len(body))
+    return response
+
+
+async def _body_iterator(body: bytes):
+    yield body
+
+
 def public_account(row: Any) -> dict[str, Any]:
     data = row_to_dict(row)
+    data["has_key_id"] = bool(data.pop("key_id_enc", None))
     data["has_api_key"] = bool(data.pop("api_key_enc", None))
+    data["has_email"] = bool(data.pop("email_enc", None))
+    data["has_password"] = bool(data.pop("password_enc", None))
     data["has_access_token"] = bool(data.pop("access_token_enc", None))
     data["has_user_id"] = bool(data.pop("user_id_enc", None))
     return data
@@ -92,6 +229,9 @@ def public_edit_account(account_id: int | None) -> dict[str, Any] | None:
     if not row:
         return None
     data = public_account(row)
+    if row["platform"] == "sub2Api":
+        data["key_id"] = decrypt_value(row["key_id_enc"], config.app_secret_key) or ""
+        data["email"] = decrypt_value(row["email_enc"], config.app_secret_key) or ""
     if row["platform"] == "newApi":
         data["user_id"] = decrypt_value(row["user_id_enc"], config.app_secret_key) or ""
     return data
@@ -220,6 +360,16 @@ async def query_account_form(request: Request, account_id: int):
         return redirect
     db.add_log("info", "query", f"手动查询账号: {account_id}")
     await query_one_account(db, account_id)
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/accounts/{account_id}/group-query")
+async def query_account_group_form(request: Request, account_id: int):
+    redirect = redirect_if_needed(request)
+    if redirect:
+        return redirect
+    db.add_log("info", "query", f"手动组查询账号: {account_id}")
+    await query_sub2api_group_for_account(db, account_id)
     return RedirectResponse("/", status_code=303)
 
 
@@ -392,6 +542,13 @@ async def api_query_account(request: Request, account_id: int):
     return await query_one_account(db, account_id)
 
 
+@app.post("/api/accounts/{account_id}/group-query")
+async def api_query_account_group(request: Request, account_id: int):
+    require_user(request)
+    db.add_log("info", "query", f"API 手动组查询账号: {account_id}")
+    return await query_sub2api_group_for_account(db, account_id)
+
+
 @app.post("/api/query-all")
 async def api_query_all(request: Request):
     require_user(request)
@@ -448,7 +605,10 @@ def _account_from_form(form: Any) -> dict[str, Any]:
             "platform": form.get("platform"),
             "name": form.get("name"),
             "base_url": form.get("base_url"),
+            "key_id": form.get("key_id"),
             "api_key": form.get("api_key"),
+            "email": form.get("email"),
+            "password": form.get("password"),
             "access_token": form.get("access_token"),
             "user_id": form.get("user_id"),
             "threshold": form.get("threshold"),
@@ -469,7 +629,10 @@ def _account_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "platform": platform,
         "name": name,
         "base_url": base_url,
+        "key_id": payload.get("key_id") or payload.get("keyId"),
         "api_key": payload.get("api_key") or payload.get("apiKey"),
+        "email": payload.get("email"),
+        "password": payload.get("password"),
         "access_token": payload.get("access_token") or payload.get("accessToken"),
         "user_id": payload.get("user_id") or payload.get("userId"),
         "threshold": payload.get("threshold"),
@@ -492,8 +655,49 @@ def import_bulk_accounts(platform: str, bulk_text: str) -> int:
             if not line.strip():
                 continue
             parts = [part.strip() for part in line.split(",")]
-            if platform == "sub2Api" and len(parts) >= 3:
-                items.append({"name": parts[0], "base_url": parts[1], "api_key": parts[2], "threshold": parts[3] if len(parts) > 3 else None})
+            if platform == "sub2Api":
+                if len(parts) >= 7:
+                    items.append(
+                        {
+                            "name": parts[0],
+                            "base_url": parts[1],
+                            "key_id": parts[2],
+                            "email": parts[3],
+                            "password": parts[4],
+                            "api_key": parts[5],
+                            "threshold": parts[6] if len(parts) > 6 else None,
+                        }
+                    )
+                elif len(parts) >= 6:
+                    items.append(
+                        {
+                            "name": parts[0],
+                            "base_url": parts[1],
+                            "email": parts[2],
+                            "password": parts[3],
+                            "api_key": parts[4],
+                            "threshold": parts[5] if len(parts) > 5 else None,
+                        }
+                    )
+                elif len(parts) >= 5:
+                    items.append(
+                        {
+                            "name": parts[0],
+                            "base_url": parts[1],
+                            "key_id": parts[2],
+                            "api_key": parts[3],
+                            "threshold": parts[4] if len(parts) > 4 else None,
+                        }
+                    )
+                elif len(parts) >= 4:
+                    items.append(
+                        {
+                            "name": parts[0],
+                            "base_url": parts[1],
+                            "api_key": parts[2],
+                            "threshold": parts[3] if len(parts) > 3 else None,
+                        }
+                    )
             if platform == "newApi" and len(parts) >= 4:
                 items.append(
                     {

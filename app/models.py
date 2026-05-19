@@ -67,7 +67,10 @@ class Database:
                     platform TEXT NOT NULL CHECK (platform IN ('newApi', 'sub2Api')),
                     name TEXT NOT NULL,
                     base_url TEXT NOT NULL,
+                    key_id_enc TEXT,
                     api_key_enc TEXT,
+                    email_enc TEXT,
+                    password_enc TEXT,
                     access_token_enc TEXT,
                     user_id_enc TEXT,
                     threshold REAL,
@@ -114,6 +117,8 @@ class Database:
                 """
             )
             self._migrate_smtp_nullable(conn)
+            self._migrate_accounts_key_id(conn)
+            self._migrate_accounts_sub2api_login(conn)
             self._set_default(conn, "request_timeout", "15")
             self._set_default(conn, "query_interval", "30")
             self._set_default(conn, "default_threshold", "5")
@@ -200,6 +205,22 @@ class Database:
             """
         )
 
+    @staticmethod
+    def _migrate_accounts_key_id(conn: sqlite3.Connection) -> None:
+        columns = conn.execute("PRAGMA table_info(accounts)").fetchall()
+        column_names = {row["name"] for row in columns}
+        if "key_id_enc" not in column_names:
+            conn.execute("ALTER TABLE accounts ADD COLUMN key_id_enc TEXT")
+
+    @staticmethod
+    def _migrate_accounts_sub2api_login(conn: sqlite3.Connection) -> None:
+        columns = conn.execute("PRAGMA table_info(accounts)").fetchall()
+        column_names = {row["name"] for row in columns}
+        if "email_enc" not in column_names:
+            conn.execute("ALTER TABLE accounts ADD COLUMN email_enc TEXT")
+        if "password_enc" not in column_names:
+            conn.execute("ALTER TABLE accounts ADD COLUMN password_enc TEXT")
+
     def get_user(self, username: str) -> Optional[sqlite3.Row]:
         with self.connect() as conn:
             return conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
@@ -275,11 +296,17 @@ class Database:
     def upsert_account(self, data: dict[str, Any]) -> int:
         now = utc_now()
         platform = data["platform"]
+        key_id = data.get("key_id")
         api_key = data.get("api_key")
+        email = data.get("email")
+        password = data.get("password")
         access_token = data.get("access_token")
         if platform == "newApi" and not access_token and api_key:
             access_token = api_key
+        key_id_enc = encrypt_value(key_id, self.secret_key)
         api_key_enc = encrypt_value(api_key, self.secret_key)
+        email_enc = encrypt_value(email, self.secret_key)
+        password_enc = encrypt_value(password, self.secret_key)
         access_token_enc = encrypt_value(access_token, self.secret_key)
         user_id_enc = encrypt_value(data.get("user_id"), self.secret_key)
         threshold = _optional_float(data.get("threshold"))
@@ -288,13 +315,17 @@ class Database:
             conn.execute(
                 """
                 INSERT INTO accounts (
-                    platform, name, base_url, api_key_enc, access_token_enc, user_id_enc,
+                    platform, name, base_url, key_id_enc, api_key_enc, email_enc, password_enc,
+                    access_token_enc, user_id_enc,
                     threshold, is_enabled, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(platform, name) DO UPDATE SET
                     base_url = excluded.base_url,
+                    key_id_enc = COALESCE(excluded.key_id_enc, accounts.key_id_enc),
                     api_key_enc = COALESCE(excluded.api_key_enc, accounts.api_key_enc),
+                    email_enc = COALESCE(excluded.email_enc, accounts.email_enc),
+                    password_enc = COALESCE(excluded.password_enc, accounts.password_enc),
                     access_token_enc = COALESCE(excluded.access_token_enc, accounts.access_token_enc),
                     user_id_enc = COALESCE(excluded.user_id_enc, accounts.user_id_enc),
                     threshold = excluded.threshold,
@@ -305,7 +336,10 @@ class Database:
                     platform,
                     data["name"],
                     data["base_url"].rstrip("/"),
+                    key_id_enc,
                     api_key_enc,
+                    email_enc,
+                    password_enc,
                     access_token_enc,
                     user_id_enc,
                     threshold,
@@ -326,11 +360,17 @@ class Database:
             raise ValueError("账号不存在")
         now = utc_now()
         platform = data["platform"]
+        key_id = data.get("key_id")
         api_key = data.get("api_key")
+        email = data.get("email")
+        password = data.get("password")
         access_token = data.get("access_token")
         if platform == "newApi" and not access_token and api_key:
             access_token = api_key
+        key_id_enc = encrypt_value(key_id, self.secret_key)
         api_key_enc = encrypt_value(api_key, self.secret_key)
+        email_enc = encrypt_value(email, self.secret_key)
+        password_enc = encrypt_value(password, self.secret_key)
         access_token_enc = encrypt_value(access_token, self.secret_key)
         user_id_enc = encrypt_value(data.get("user_id"), self.secret_key)
         threshold = _optional_float(data.get("threshold"))
@@ -340,7 +380,10 @@ class Database:
                 """
                 UPDATE accounts
                 SET platform = ?, name = ?, base_url = ?,
+                    key_id_enc = COALESCE(?, key_id_enc),
                     api_key_enc = COALESCE(?, api_key_enc),
+                    email_enc = COALESCE(?, email_enc),
+                    password_enc = COALESCE(?, password_enc),
                     access_token_enc = COALESCE(?, access_token_enc),
                     user_id_enc = COALESCE(?, user_id_enc),
                     threshold = ?, is_enabled = ?, updated_at = ?
@@ -350,7 +393,10 @@ class Database:
                     platform,
                     data["name"],
                     data["base_url"].rstrip("/"),
+                    key_id_enc,
                     api_key_enc,
+                    email_enc,
+                    password_enc,
                     access_token_enc,
                     user_id_enc,
                     threshold,

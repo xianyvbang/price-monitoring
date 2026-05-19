@@ -22,6 +22,8 @@
     data-initial-platform="{{ edit_account.platform }}"
     data-initial-name="{{ edit_account.name }}"
     data-initial-base-url="{{ edit_account.base_url }}"
+    data-initial-key-id="{{ edit_account.key_id if edit_account else '' }}"
+    data-initial-email="{{ edit_account.email if edit_account else '' }}"
     data-initial-user-id="{{ edit_account.user_id if edit_account else '' }}"
     data-initial-threshold="{{ edit_account.threshold if edit_account.threshold is not none else '' }}"
     data-initial-is-enabled="{{ 'true' if edit_account.is_enabled else 'false' }}"
@@ -38,7 +40,10 @@
     </label>
     <label>名称<input name="name" required></label>
     <label>Base URL<input name="base_url" required></label>
+    <label data-platform-field="sub2Api">sub2Api groupId（可选筛选）<input name="key_id" autocomplete="off"></label>
     <label data-platform-field="sub2Api">sub2Api apiKey<input name="api_key" type="password" autocomplete="off"></label>
+    <label data-platform-field="sub2Api">sub2Api email<input name="email" type="email" autocomplete="username"></label>
+    <label data-platform-field="sub2Api">sub2Api password<input name="password" type="password" autocomplete="current-password"></label>
     <label data-platform-field="newApi">newApi accessToken<input name="access_token" type="password" autocomplete="off"></label>
     <label data-platform-field="newApi">newApi userId<input name="user_id" autocomplete="off"></label>
     <label>预警阈值<input name="threshold" type="number" min="0" step="0.01"></label>
@@ -90,7 +95,7 @@
           <td>{{ account.name }}</td>
           <td>{{ account.base_url }}</td>
           <td>
-            {% if platform == "sub2Api" %}apiKey: {{ "已配置" if account.has_api_key else "未配置" }}{% endif %}
+            {% if platform == "sub2Api" %}groupId筛选: {{ "已配置" if account.has_key_id else "未配置" }} / apiKey: {{ "已配置" if account.has_api_key else "未配置" }} / email: {{ "已配置" if account.has_email else "未配置" }} / password: {{ "已配置" if account.has_password else "未配置" }}{% endif %}
             {% if platform == "newApi" %}accessToken: {{ "已配置" if account.has_access_token else "未配置" }} / userId: {{ "已配置" if account.has_user_id else "未配置" }}{% endif %}
           </td>
           <td>{{ account.threshold if account.threshold is not none else settings.default_threshold }}</td>
@@ -104,10 +109,15 @@
                 data-platform="{{ platform }}"
                 data-name="{{ account.name }}"
                 data-base-url="{{ account.base_url }}"
+                data-key-id="{{ account.key_id if account.key_id is defined else '' }}"
+                data-email="{{ account.email if account.email is defined else '' }}"
                 data-user-id="{{ account.user_id if account.user_id is defined else '' }}"
                 data-threshold="{{ account.threshold if account.threshold is not none else '' }}"
                 data-is-enabled="{{ 'true' if account.is_enabled else 'false' }}"
               >编辑</button>
+              {% if platform == "sub2Api" %}
+              <button type="button" data-group-query data-account-id="{{ account.id }}">查组</button>
+              {% endif %}
               <form method="post" action="/accounts/{{ account.id }}/delete">
                 <button class="danger" type="submit">删除</button>
               </form>
@@ -125,7 +135,7 @@
 <script>
   const bulkPlaceholders = {
     newApi: "JSON 数组，或 CSV 行。newApi: name,baseUrl,accessToken,userId,threshold。",
-    sub2Api: "JSON 数组，或 CSV 行。sub2Api: name,baseUrl,apiKey,threshold。"
+    sub2Api: "JSON 数组，或 CSV 行。sub2Api: name,baseUrl,email,password,apiKey,threshold；可选筛选指定组：name,baseUrl,groupId,email,password,apiKey,threshold。"
   };
 
   document.querySelectorAll("[data-account-form]").forEach((form) => {
@@ -154,7 +164,10 @@
       form.elements.base_url.value = account.baseUrl || "";
       form.elements.threshold.value = account.threshold || "";
       form.elements.is_enabled.checked = account.isEnabled === "true";
+      form.elements.key_id.value = account.keyId || "";
       form.elements.api_key.value = "";
+      form.elements.email.value = account.email || "";
+      form.elements.password.value = "";
       form.elements.access_token.value = "";
       form.elements.user_id.value = account.userId || "";
       title.textContent = "编辑账号";
@@ -189,6 +202,8 @@
         platform: form.dataset.initialPlatform,
         name: form.dataset.initialName,
         baseUrl: form.dataset.initialBaseUrl,
+        keyId: form.dataset.initialKeyId,
+        email: form.dataset.initialEmail,
         userId: form.dataset.initialUserId,
         threshold: form.dataset.initialThreshold,
         isEnabled: form.dataset.initialIsEnabled
@@ -208,6 +223,31 @@
       syncPlaceholder();
     });
     syncPlaceholder();
+  });
+
+  document.querySelectorAll("[data-group-query]").forEach((button) => {
+    const originalText = button.textContent;
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      button.textContent = "查询中";
+      try {
+        const response = await fetch(`/api/accounts/${button.dataset.accountId}/group-query`, { method: "POST" });
+        const result = await response.json();
+        if (!response.ok) {
+          throw new Error(result.detail || "查询失败");
+        }
+        button.textContent = result.is_valid ? "已完成" : "失败";
+        button.title = result.invalid_message || result.extra || result.plan_name || "";
+      } catch (error) {
+        button.textContent = "失败";
+        button.title = error.message || "查询失败";
+      } finally {
+        setTimeout(() => {
+          button.disabled = false;
+          button.textContent = originalText;
+        }, 1200);
+      }
+    });
   });
 </script>
 {% endblock %}

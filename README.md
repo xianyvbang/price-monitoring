@@ -33,6 +33,18 @@ uvicorn app.main:app --reload
 name,baseUrl,apiKey,threshold
 ```
 
+如果要手动查询账号分组倍率，也可以补充登录邮箱和登录密码：
+
+```text
+name,baseUrl,email,password,apiKey,threshold
+```
+
+`groupId` 不是必填项。只想筛选展示某个分组时再使用：
+
+```text
+name,baseUrl,groupId,email,password,apiKey,threshold
+```
+
 `newApi` CSV：
 
 ```text
@@ -46,12 +58,18 @@ JSON 示例：
   {
     "name": "main",
     "base_url": "https://example.com",
+    "key_id": "group-id",
+    "email": "user@example.com",
+    "password": "login-password",
+    "api_key": "sk-xxx",
     "access_token": "token",
     "user_id": "1",
     "threshold": 5
   }
 ]
 ```
+
+`sub2Api` 账号自动查询时使用 `GET {baseUrl}/v1/usage`，并使用 `apiKey` 作为 `Authorization: Bearer ...`。手动点击“查组”时会先用 `email/password` 登录 `POST {baseUrl}/api/v1/auth/login` 获取 JWT，再调用 `GET {baseUrl}/api/v1/groups/available` 和 `GET {baseUrl}/api/v1/groups/rates` 汇总账号可用分组倍率。`groupId` 可选，填写后会优先展示该分组的有效倍率。
 
 ## 接口
 
