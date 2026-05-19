@@ -672,6 +672,7 @@ def _account_from_form(form: Any) -> dict[str, Any]:
             "name": form.get("name"),
             "base_url": form.get("base_url"),
             "note": form.get("note"),
+            "recharge_url": form.get("recharge_url"),
             "key_id": form.get("key_id"),
             "api_key": form.get("api_key"),
             "email": form.get("email"),
@@ -697,6 +698,7 @@ def _account_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "name": name,
         "base_url": base_url,
         "note": payload.get("note") or payload.get("remark") or payload.get("remarks") or "",
+        "recharge_url": payload.get("recharge_url") or payload.get("rechargeUrl") or "",
         "key_id": payload.get("key_id") or payload.get("keyId"),
         "api_key": payload.get("api_key") or payload.get("apiKey"),
         "email": payload.get("email"),
@@ -735,6 +737,7 @@ def import_bulk_accounts(platform: str, bulk_text: str) -> int:
                             "api_key": parts[5],
                             "threshold": parts[6] if len(parts) > 6 else None,
                             "note": parts[7] if len(parts) > 7 else "",
+                            "recharge_url": parts[8] if len(parts) > 8 else "",
                         }
                     )
                 elif len(parts) >= 6:
@@ -747,6 +750,7 @@ def import_bulk_accounts(platform: str, bulk_text: str) -> int:
                             "api_key": parts[4],
                             "threshold": parts[5] if len(parts) > 5 else None,
                             "note": parts[6] if len(parts) > 6 else "",
+                            "recharge_url": parts[7] if len(parts) > 7 else "",
                         }
                     )
                 elif len(parts) >= 5:
@@ -758,6 +762,7 @@ def import_bulk_accounts(platform: str, bulk_text: str) -> int:
                             "api_key": parts[3],
                             "threshold": parts[4] if len(parts) > 4 else None,
                             "note": parts[5] if len(parts) > 5 else "",
+                            "recharge_url": parts[6] if len(parts) > 6 else "",
                         }
                     )
                 elif len(parts) >= 4:
@@ -768,6 +773,7 @@ def import_bulk_accounts(platform: str, bulk_text: str) -> int:
                             "api_key": parts[2],
                             "threshold": parts[3] if len(parts) > 3 else None,
                             "note": parts[4] if len(parts) > 4 else "",
+                            "recharge_url": parts[5] if len(parts) > 5 else "",
                         }
                     )
             if platform == "newApi" and len(parts) >= 4:
@@ -779,6 +785,7 @@ def import_bulk_accounts(platform: str, bulk_text: str) -> int:
                         "user_id": parts[3],
                         "threshold": parts[4] if len(parts) > 4 else None,
                         "note": parts[5] if len(parts) > 5 else "",
+                        "recharge_url": parts[6] if len(parts) > 6 else "",
                     }
                 )
     for item in items:

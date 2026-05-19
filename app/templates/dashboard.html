@@ -79,6 +79,9 @@
           <td>
             <div class="actions">
               <a class="button-link" href="{{ account.base_url }}" target="_blank" rel="noopener noreferrer">打开</a>
+              {% if account.recharge_url %}
+              <a class="button-link" href="{{ account.recharge_url }}" target="_blank" rel="noopener noreferrer">充值</a>
+              {% endif %}
               <button type="button" data-account-query data-account-id="{{ account.id }}">查询</button>
               {% if platform == "sub2Api" %}
               <button type="button" data-group-query data-account-id="{{ account.id }}">查组</button>

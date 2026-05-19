@@ -15,6 +15,7 @@ def test_group_query_buttons_use_api_fetch(tmp_path, monkeypatch):
             "base_url": "https://sub.example",
             "api_key": "secret",
             "note": "monitor note",
+            "recharge_url": "https://sub.example/topup",
         }
     )
     monkeypatch.setattr("app.main.db", test_db)
@@ -38,6 +39,9 @@ def test_group_query_buttons_use_api_fetch(tmp_path, monkeypatch):
     assert 'data-refresh-interval="30"' in dashboard.text
     assert "备注" in dashboard.text
     assert "monitor note" in dashboard.text
+    assert "充值路径" in accounts.text
+    assert "https://sub.example/topup" in dashboard.text
+    assert "https://sub.example/topup" in accounts.text
     assert "倍率变化" in dashboard.text
     assert "未变化" in dashboard.text
     assert 'action="/query-all"' not in dashboard.text

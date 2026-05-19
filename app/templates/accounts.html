@@ -23,6 +23,7 @@
     data-initial-name="{{ edit_account.name }}"
     data-initial-base-url="{{ edit_account.base_url }}"
     data-initial-note="{{ edit_account.note or '' }}"
+    data-initial-recharge-url="{{ edit_account.recharge_url or '' }}"
     data-initial-key-id="{{ edit_account.key_id if edit_account else '' }}"
     data-initial-email="{{ edit_account.email if edit_account else '' }}"
     data-initial-user-id="{{ edit_account.user_id if edit_account else '' }}"
@@ -41,6 +42,7 @@
     </label>
     <label>名称<input name="name" required></label>
     <label>Base URL<input name="base_url" required></label>
+    <label>充值路径（可选）<input name="recharge_url" type="url" autocomplete="off"></label>
     <label>备注<textarea name="note" rows="3"></textarea></label>
     <label data-platform-field="sub2Api">sub2Api groupId（可选筛选）<input name="key_id" autocomplete="off"></label>
     <label data-platform-field="sub2Api">sub2Api apiKey<input name="api_key" type="password" autocomplete="off"></label>
@@ -86,6 +88,7 @@
           <th>名称</th>
           <th>备注</th>
           <th>Base URL</th>
+          <th>充值路径</th>
           <th>凭据</th>
           <th>阈值</th>
           <th>启用</th>
@@ -98,6 +101,13 @@
           <td>{{ account.name }}</td>
           <td class="note-cell">{{ account.note or "-" }}</td>
           <td>{{ account.base_url }}</td>
+          <td>
+            {% if account.recharge_url %}
+            <a class="button-link" href="{{ account.recharge_url }}" target="_blank" rel="noopener noreferrer">充值</a>
+            {% else %}
+            -
+            {% endif %}
+          </td>
           <td>
             {% if platform == "sub2Api" %}groupId筛选: {{ "已配置" if account.has_key_id else "未配置" }} / apiKey: {{ "已配置" if account.has_api_key else "未配置" }} / email: {{ "已配置" if account.has_email else "未配置" }} / password: {{ "已配置" if account.has_password else "未配置" }}{% endif %}
             {% if platform == "newApi" %}accessToken: {{ "已配置" if account.has_access_token else "未配置" }} / userId: {{ "已配置" if account.has_user_id else "未配置" }}{% endif %}
@@ -114,6 +124,7 @@
                 data-name="{{ account.name }}"
                 data-base-url="{{ account.base_url }}"
                 data-note="{{ account.note or '' }}"
+                data-recharge-url="{{ account.recharge_url or '' }}"
                 data-key-id="{{ account.key_id if account.key_id is defined else '' }}"
                 data-email="{{ account.email if account.email is defined else '' }}"
                 data-user-id="{{ account.user_id if account.user_id is defined else '' }}"
@@ -130,7 +141,7 @@
           </td>
         </tr>
         {% else %}
-        <tr><td colspan="7" class="empty">暂无账号</td></tr>
+        <tr><td colspan="8" class="empty">暂无账号</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -139,8 +150,8 @@
 {% endfor %}
 <script>
   const bulkPlaceholders = {
-    newApi: "JSON 数组，或 CSV 行。newApi: name,baseUrl,accessToken,userId,threshold,note。",
-    sub2Api: "JSON 数组，或 CSV 行。sub2Api: name,baseUrl,email,password,apiKey,threshold,note；可选筛选指定组：name,baseUrl,groupId,email,password,apiKey,threshold,note。"
+    newApi: "JSON 数组，或 CSV 行。newApi: name,baseUrl,accessToken,userId,threshold,note,rechargeUrl。",
+    sub2Api: "JSON 数组，或 CSV 行。sub2Api: name,baseUrl,email,password,apiKey,threshold,note,rechargeUrl；可选筛选指定组：name,baseUrl,groupId,email,password,apiKey,threshold,note,rechargeUrl。"
   };
 
   document.querySelectorAll("[data-account-form]").forEach((form) => {
@@ -167,6 +178,7 @@
       select.value = account.platform || "newApi";
       form.elements.name.value = account.name || "";
       form.elements.base_url.value = account.baseUrl || "";
+      form.elements.recharge_url.value = account.rechargeUrl || "";
       form.elements.note.value = account.note || "";
       form.elements.threshold.value = account.threshold || "";
       form.elements.is_enabled.checked = account.isEnabled === "true";
@@ -208,6 +220,7 @@
         platform: form.dataset.initialPlatform,
         name: form.dataset.initialName,
         baseUrl: form.dataset.initialBaseUrl,
+        rechargeUrl: form.dataset.initialRechargeUrl,
         note: form.dataset.initialNote,
         keyId: form.dataset.initialKeyId,
         email: form.dataset.initialEmail,

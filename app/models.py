@@ -84,6 +84,7 @@ class Database:
                     name TEXT NOT NULL,
                     base_url TEXT NOT NULL,
                     note TEXT,
+                    recharge_url TEXT,
                     key_id_enc TEXT,
                     api_key_enc TEXT,
                     email_enc TEXT,
@@ -149,6 +150,7 @@ class Database:
             self._migrate_accounts_key_id(conn)
             self._migrate_accounts_sub2api_login(conn)
             self._migrate_accounts_note(conn)
+            self._migrate_accounts_recharge_url(conn)
             self._migrate_accounts_group_rate_changed(conn)
             self._set_default(conn, "request_timeout", "15")
             self._set_default(conn, "query_interval", "30")
@@ -261,6 +263,13 @@ class Database:
             conn.execute("ALTER TABLE accounts ADD COLUMN note TEXT")
 
     @staticmethod
+    def _migrate_accounts_recharge_url(conn: sqlite3.Connection) -> None:
+        columns = conn.execute("PRAGMA table_info(accounts)").fetchall()
+        column_names = {row["name"] for row in columns}
+        if "recharge_url" not in column_names:
+            conn.execute("ALTER TABLE accounts ADD COLUMN recharge_url TEXT")
+
+    @staticmethod
     def _migrate_accounts_group_rate_changed(conn: sqlite3.Connection) -> None:
         columns = conn.execute("PRAGMA table_info(accounts)").fetchall()
         column_names = {row["name"] for row in columns}
@@ -351,6 +360,7 @@ class Database:
         now = utc_now()
         platform = data["platform"]
         note = str(data.get("note") or "").strip()
+        recharge_url = str(data.get("recharge_url") or "").strip()
         key_id = data.get("key_id")
         api_key = data.get("api_key")
         email = data.get("email")
@@ -370,14 +380,15 @@ class Database:
             conn.execute(
                 """
                 INSERT INTO accounts (
-                    platform, name, base_url, note, key_id_enc, api_key_enc, email_enc, password_enc,
+                    platform, name, base_url, note, recharge_url, key_id_enc, api_key_enc, email_enc, password_enc,
                     access_token_enc, user_id_enc,
                     threshold, is_enabled, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(platform, name) DO UPDATE SET
                     base_url = excluded.base_url,
                     note = excluded.note,
+                    recharge_url = excluded.recharge_url,
                     key_id_enc = COALESCE(excluded.key_id_enc, accounts.key_id_enc),
                     api_key_enc = COALESCE(excluded.api_key_enc, accounts.api_key_enc),
                     email_enc = COALESCE(excluded.email_enc, accounts.email_enc),
@@ -393,6 +404,7 @@ class Database:
                     data["name"],
                     data["base_url"].rstrip("/"),
                     note,
+                    recharge_url,
                     key_id_enc,
                     api_key_enc,
                     email_enc,
@@ -418,6 +430,7 @@ class Database:
         now = utc_now()
         platform = data["platform"]
         note = str(data.get("note") or "").strip()
+        recharge_url = str(data.get("recharge_url") or "").strip()
         key_id = data.get("key_id")
         api_key = data.get("api_key")
         email = data.get("email")
@@ -437,7 +450,7 @@ class Database:
             conn.execute(
                 """
                 UPDATE accounts
-                SET platform = ?, name = ?, base_url = ?, note = ?,
+                SET platform = ?, name = ?, base_url = ?, note = ?, recharge_url = ?,
                     key_id_enc = COALESCE(?, key_id_enc),
                     api_key_enc = COALESCE(?, api_key_enc),
                     email_enc = COALESCE(?, email_enc),
@@ -452,6 +465,7 @@ class Database:
                     data["name"],
                     data["base_url"].rstrip("/"),
                     note,
+                    recharge_url,
                     key_id_enc,
                     api_key_enc,
                     email_enc,

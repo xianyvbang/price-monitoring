@@ -54,6 +54,7 @@ def test_account_note_is_saved_and_updated(tmp_path):
             "password": "login-password",
             "api_key": "sk-test",
             "note": "first note",
+            "recharge_url": "https://example.com/topup",
         }
     )
 
@@ -67,6 +68,7 @@ def test_account_note_is_saved_and_updated(tmp_path):
             "password": "",
             "api_key": "",
             "note": "second note",
+            "recharge_url": "https://example.com/new-topup",
             "is_enabled": True,
         },
     )
@@ -74,6 +76,7 @@ def test_account_note_is_saved_and_updated(tmp_path):
     account = db.get_account(account_id)
 
     assert account["note"] == "second note"
+    assert account["recharge_url"] == "https://example.com/new-topup"
 
 
 def test_group_rate_change_status_defaults_and_updates(tmp_path):
