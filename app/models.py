@@ -136,6 +136,13 @@ class Database:
                     (username, hash_password(password), utc_now()),
                 )
 
+    def update_user_password(self, username: str, password: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE users SET password_hash = ? WHERE username = ?",
+                (hash_password(password), username),
+            )
+
     @staticmethod
     def _set_default(conn: sqlite3.Connection, key: str, value: str) -> None:
         conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, value))

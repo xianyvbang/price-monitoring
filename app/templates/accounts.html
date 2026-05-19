@@ -22,6 +22,7 @@
     data-initial-platform="{{ edit_account.platform }}"
     data-initial-name="{{ edit_account.name }}"
     data-initial-base-url="{{ edit_account.base_url }}"
+    data-initial-user-id="{{ edit_account.user_id if edit_account else '' }}"
     data-initial-threshold="{{ edit_account.threshold if edit_account.threshold is not none else '' }}"
     data-initial-is-enabled="{{ 'true' if edit_account.is_enabled else 'false' }}"
     {% endif %}
@@ -103,6 +104,7 @@
                 data-platform="{{ platform }}"
                 data-name="{{ account.name }}"
                 data-base-url="{{ account.base_url }}"
+                data-user-id="{{ account.user_id if account.user_id is defined else '' }}"
                 data-threshold="{{ account.threshold if account.threshold is not none else '' }}"
                 data-is-enabled="{{ 'true' if account.is_enabled else 'false' }}"
               >编辑</button>
@@ -154,7 +156,7 @@
       form.elements.is_enabled.checked = account.isEnabled === "true";
       form.elements.api_key.value = "";
       form.elements.access_token.value = "";
-      form.elements.user_id.value = "";
+      form.elements.user_id.value = account.userId || "";
       title.textContent = "编辑账号";
       submitLabel.textContent = "保存修改";
       cancelEdit.hidden = false;
@@ -187,6 +189,7 @@
         platform: form.dataset.initialPlatform,
         name: form.dataset.initialName,
         baseUrl: form.dataset.initialBaseUrl,
+        userId: form.dataset.initialUserId,
         threshold: form.dataset.initialThreshold,
         isEnabled: form.dataset.initialIsEnabled
       });

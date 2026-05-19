@@ -12,6 +12,7 @@ from itsdangerous import BadSignature, URLSafeSerializer
 
 from app.config import get_config
 from app.models import Database, row_to_dict
+from app.security import decrypt_value
 from app.security import verify_password
 from app.services.emailer import send_email
 from app.services.scheduler import BalanceScheduler, query_all_accounts, query_one_account
@@ -90,7 +91,10 @@ def public_edit_account(account_id: int | None) -> dict[str, Any] | None:
     row = db.get_account(account_id)
     if not row:
         return None
-    return public_account(row)
+    data = public_account(row)
+    if row["platform"] == "newApi":
+        data["user_id"] = decrypt_value(row["user_id_enc"], config.app_secret_key) or ""
+    return data
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -106,7 +110,8 @@ async def dashboard(request: Request):
 
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
-    return templates.TemplateResponse("login.html", template_context(request, error=None))
+    message = request.query_params.get("message")
+    return templates.TemplateResponse("login.html", template_context(request, error=None, message=message))
 
 
 @app.post("/login")
@@ -308,6 +313,34 @@ async def test_smtp_form(request: Request):
     except Exception as exc:
         message = f"测试邮件发送失败: {exc}"
         db.add_log("error", "email", f"SMTP 测试邮件发送失败: {exc}")
+    return templates.TemplateResponse(
+        "settings.html",
+        template_context(request, settings=db.get_general_settings(), smtp=public_smtp_settings(), message=message),
+    )
+
+
+@app.post("/settings/password", response_class=HTMLResponse)
+async def change_password_form(request: Request):
+    username = require_user(request)
+    form = await request.form()
+    current_password = str(form.get("current_password", ""))
+    new_password = str(form.get("new_password", ""))
+    confirm_password = str(form.get("confirm_password", ""))
+    message = None
+    user = db.get_user(username)
+    if not user or not verify_password(current_password, user["password_hash"]):
+        message = "当前密码错误"
+        db.add_log("warning", "auth", f"修改密码失败: {username}")
+    elif len(new_password) < 8:
+        message = "新密码至少需要 8 位"
+    elif new_password != confirm_password:
+        message = "两次输入的新密码不一致"
+    else:
+        db.update_user_password(username, new_password)
+        db.add_log("info", "auth", f"修改密码成功: {username}")
+        response = RedirectResponse("/login?message=password_changed", status_code=303)
+        response.delete_cookie(config.session_cookie)
+        return response
     return templates.TemplateResponse(
         "settings.html",
         template_context(request, settings=db.get_general_settings(), smtp=public_smtp_settings(), message=message),

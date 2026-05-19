@@ -4,6 +4,7 @@
 <section class="login-shell">
   <form class="panel login-panel" method="post" action="/login">
     <h1>管理员登录</h1>
+    {% if message == "password_changed" %}<p class="notice">密码已更新，请使用新密码登录。</p>{% endif %}
     {% if error %}<p class="error">{{ error }}</p>{% endif %}
     <label>
       用户名
