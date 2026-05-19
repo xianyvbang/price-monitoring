@@ -64,7 +64,7 @@ a {
 
 .page {
   margin: 0 auto;
-  max-width: 1280px;
+  width: min(100%, 1760px);
   padding: 24px;
 }
 
@@ -279,6 +279,24 @@ th {
 .log-level.error {
   background: #fef3f2;
   color: var(--danger);
+}
+
+.change-status {
+  border-radius: 999px;
+  display: inline-block;
+  font-size: 12px;
+  padding: 3px 8px;
+}
+
+.change-status.changed {
+  background: #fef3f2;
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.change-status.unchanged {
+  background: #f2f4f7;
+  color: #475467;
 }
 
 .log-message {

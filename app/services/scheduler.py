@@ -105,6 +105,8 @@ async def query_group_rate_for_account(db: Database, account_id: int, notify: bo
         checked_at = utc_now()
         record_result = db.record_group_rate_if_changed(account_id, _group_summary_from_result(result), checked_at)
         result["group_rate_record"] = record_result
+        result["group_rate_changed"] = record_result["changed"]
+        db.update_account_group_rate_change_status(account_id, record_result["changed"])
         if notify and record_result["changed"]:
             try:
                 smtp = db.get_smtp_settings()

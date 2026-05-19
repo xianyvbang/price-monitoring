@@ -69,11 +69,14 @@ async def test_query_group_rate_records_baseline_and_emails_only_on_change(tmp_p
 
     assert first["group_rate_record"]["inserted"] is True
     assert first["group_rate_record"]["changed"] is False
+    assert first["group_rate_changed"] is False
     assert same["group_rate_record"]["inserted"] is False
     assert changed["group_rate_record"]["changed"] is True
+    assert changed["group_rate_changed"] is True
     assert len(records) == 2
     assert records[0]["rate_multiplier"] == 1.1
     assert account["last_extra"] == changed["extra"]
+    assert account["last_group_rate_changed"] == 1
     assert len(sent) == 1
     assert sent[0][0] == "分组倍率变化: sub"
     assert "旧倍率: 0.8" in sent[0][1]

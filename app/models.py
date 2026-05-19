@@ -100,6 +100,7 @@ class Database:
                     last_total REAL,
                     last_used REAL,
                     last_extra TEXT,
+                    last_group_rate_changed INTEGER NOT NULL DEFAULT 0,
                     last_checked_at TEXT,
                     low_balance_active INTEGER NOT NULL DEFAULT 0,
                     last_alert_sent_at TEXT,
@@ -148,6 +149,7 @@ class Database:
             self._migrate_accounts_key_id(conn)
             self._migrate_accounts_sub2api_login(conn)
             self._migrate_accounts_note(conn)
+            self._migrate_accounts_group_rate_changed(conn)
             self._set_default(conn, "request_timeout", "15")
             self._set_default(conn, "query_interval", "30")
             self._set_default(conn, "group_rate_query_interval", "1200")
@@ -257,6 +259,13 @@ class Database:
         column_names = {row["name"] for row in columns}
         if "note" not in column_names:
             conn.execute("ALTER TABLE accounts ADD COLUMN note TEXT")
+
+    @staticmethod
+    def _migrate_accounts_group_rate_changed(conn: sqlite3.Connection) -> None:
+        columns = conn.execute("PRAGMA table_info(accounts)").fetchall()
+        column_names = {row["name"] for row in columns}
+        if "last_group_rate_changed" not in column_names:
+            conn.execute("ALTER TABLE accounts ADD COLUMN last_group_rate_changed INTEGER NOT NULL DEFAULT 0")
 
     def get_user(self, username: str) -> Optional[sqlite3.Row]:
         with self.connect() as conn:
@@ -520,6 +529,17 @@ class Database:
                     utc_now(),
                     account_id,
                 ),
+            )
+
+    def update_account_group_rate_change_status(self, account_id: int, changed: bool) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE accounts
+                SET last_group_rate_changed = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (1 if changed else 0, utc_now(), account_id),
             )
 
     def record_group_rate_if_changed(

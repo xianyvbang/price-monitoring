@@ -76,6 +76,27 @@ def test_account_note_is_saved_and_updated(tmp_path):
     assert account["note"] == "second note"
 
 
+def test_group_rate_change_status_defaults_and_updates(tmp_path):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+    account_id = db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "sub-rate-status",
+            "base_url": "https://example.com",
+            "email": "user@example.com",
+            "password": "login-password",
+            "api_key": "sk-test",
+        }
+    )
+
+    assert db.get_account(account_id)["last_group_rate_changed"] == 0
+
+    db.update_account_group_rate_change_status(account_id, True)
+
+    assert db.get_account(account_id)["last_group_rate_changed"] == 1
+
+
 def test_group_result_only_updates_extra(tmp_path):
     db = Database(str(tmp_path / "app.db"), "test-key")
     db.init()

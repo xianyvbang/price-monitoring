@@ -38,6 +38,8 @@ def test_group_query_buttons_use_api_fetch(tmp_path, monkeypatch):
     assert 'data-refresh-interval="30"' in dashboard.text
     assert "备注" in dashboard.text
     assert "monitor note" in dashboard.text
+    assert "倍率变化" in dashboard.text
+    assert "未变化" in dashboard.text
     assert 'action="/query-all"' not in dashboard.text
     assert "/accounts/1/query" not in dashboard.text
     assert "/accounts/1/group-query" not in dashboard.text
@@ -74,6 +76,7 @@ def test_dashboard_shows_group_rate_column(tmp_path, monkeypatch):
             ),
         },
     )
+    test_db.update_account_group_rate_change_status(account_id, True)
     monkeypatch.setattr("app.main.db", test_db)
     monkeypatch.setattr("app.main.scheduler.db", test_db)
     monkeypatch.setattr("app.main.scheduler.start", lambda: None)
@@ -89,6 +92,9 @@ def test_dashboard_shows_group_rate_column(tmp_path, monkeypatch):
 
     assert dashboard.status_code == 200
     assert "分组倍率" in dashboard.text
+    assert "倍率变化" in dashboard.text
+    assert "变化" in dashboard.text
+    assert 'change-status changed' in dashboard.text
     assert "Basic Plan: 0.8" in dashboard.text
     assert "Pro Plan: 2.0" in dashboard.text
 

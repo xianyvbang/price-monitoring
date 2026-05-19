@@ -27,6 +27,9 @@
           <th>状态</th>
           <th>套餐</th>
           <th>分组倍率</th>
+          {% if platform == "sub2Api" %}
+          <th>倍率变化</th>
+          {% endif %}
           <th>剩余</th>
           {% if platform != "sub2Api" %}
           <th>已用</th>
@@ -56,6 +59,13 @@
             -
             {% endif %}
           </td>
+          {% if platform == "sub2Api" %}
+          <td data-group-rate-change>
+            <span class="change-status {{ 'changed' if account.last_group_rate_changed else 'unchanged' }}">
+              {{ "变化" if account.last_group_rate_changed else "未变化" }}
+            </span>
+          </td>
+          {% endif %}
           <td data-account-remaining>{{ account.last_remaining if account.last_remaining is not none else "-" }} {{ account.last_unit or "" }}</td>
           {% if platform != "sub2Api" %}
           <td data-account-used>{{ account.last_used if account.last_used is not none else "-" }}</td>
@@ -80,11 +90,11 @@
         </tr>
         {% if account.last_error %}
         <tr class="detail-row">
-          <td colspan="{{ 10 if platform == 'sub2Api' else 12 }}">{{ account.last_error }}</td>
+          <td colspan="{{ 11 if platform == 'sub2Api' else 12 }}">{{ account.last_error }}</td>
         </tr>
         {% endif %}
         {% else %}
-        <tr><td colspan="{{ 10 if platform == 'sub2Api' else 12 }}" class="empty">暂无账号</td></tr>
+        <tr><td colspan="{{ 11 if platform == 'sub2Api' else 12 }}" class="empty">暂无账号</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -157,6 +167,12 @@
     const groupRates = row.querySelector("[data-account-group-rates]");
     if (groupRates) {
       groupRates.innerHTML = renderGroupRates(groupRatesFromResult(result));
+    }
+    const changeStatus = row.querySelector("[data-group-rate-change] .change-status");
+    if (changeStatus) {
+      const changed = Boolean(result.group_rate_changed || result.groupRateChanged || result.group_rate_record?.changed);
+      changeStatus.textContent = changed ? "变化" : "未变化";
+      changeStatus.className = `change-status ${changed ? "changed" : "unchanged"}`;
     }
   };
   const updateBalanceRow = (target, result) => {
