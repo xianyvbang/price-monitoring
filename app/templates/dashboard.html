@@ -225,11 +225,11 @@
   document.querySelector("[data-group-picker-close]")?.addEventListener("click", () => {
     groupPicker?.close();
   });
-  const chooseNewapiGroup = async (accountId, groupId) => {
+  const chooseNewapiGroup = async (accountId, groupId, group) => {
     const response = await fetch(`/api/accounts/${accountId}/selected-group`, {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({group_id: groupId})
+      body: JSON.stringify({group_id: groupId, group})
     });
     const result = await response.json();
     if (!response.ok) {
@@ -262,11 +262,11 @@
       option.addEventListener("click", async () => {
         option.disabled = true;
         try {
-          await chooseNewapiGroup(accountId, groupId);
+          const result = await chooseNewapiGroup(accountId, groupId, group);
           groupPicker.close();
           if (sourceButton) {
             sourceButton.title = `当前分组: ${groupId}`;
-            resetGroupRateChangeCell(sourceButton);
+            updateGroupRatesCell(sourceButton, result.group_result || {extra: null});
           }
         } catch (error) {
           option.disabled = false;

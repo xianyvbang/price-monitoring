@@ -62,6 +62,10 @@ a {
   margin: 0;
 }
 
+.inline-form {
+  margin: 0;
+}
+
 .page {
   margin: 0 auto;
   width: min(100%, 1760px);

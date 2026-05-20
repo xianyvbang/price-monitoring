@@ -6,6 +6,9 @@
     <h1>日志</h1>
     <p>显示最近 7 天的全部日志。</p>
   </div>
+  <form class="inline-form" method="post" action="/logs/clear" onsubmit="return confirm('确定清空全部日志？');">
+    <button class="danger" type="submit">清空日志</button>
+  </form>
 </section>
 
 <section class="panel">

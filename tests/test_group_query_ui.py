@@ -92,11 +92,51 @@ def test_newapi_group_picker_ui_and_api_routes(tmp_path, monkeypatch):
     assert "重新获取分组" in dashboard.text
     assert "重新获取分组" in accounts.text
     assert "当前分组: pro" in accounts.text
+    assert "当前分组 pro: -" in dashboard.text
     assert 'data-group-picker' in dashboard.text
     assert 'data-group-picker' in accounts.text
     assert f"/accounts/{account_id}/group-rates" in dashboard.text
     assert "/api/accounts/${button.dataset.accountId}/newapi-groups" in dashboard.text
     assert "/api/accounts/${accountId}/selected-group" in accounts.text
+
+
+def test_selected_newapi_group_shows_rate_on_dashboard(tmp_path, monkeypatch):
+    test_db = Database(str(tmp_path / "app.db"), config.app_secret_key)
+    test_db.init()
+    test_db.ensure_admin("admin", "password123")
+    account_id = test_db.upsert_account(
+        {
+            "platform": "newApi",
+            "name": "new",
+            "base_url": "https://new.example",
+            "access_token": "token",
+            "user_id": "42",
+        }
+    )
+    monkeypatch.setattr("app.main.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
+
+    async def stop_scheduler():
+        return None
+
+    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+
+    with TestClient(app) as client:
+        client.post("/login", data={"username": "admin", "password": "password123"})
+        response = client.post(
+            f"/api/accounts/{account_id}/selected-group",
+            json={
+                "group_id": "pro",
+                "group": {"id": "pro", "name": "专业分组", "rate": 0.75},
+            },
+        )
+        dashboard = client.get("/")
+
+    assert response.status_code == 200
+    assert response.json()["account"]["group_rates"][0]["plan_name"] == "专业分组"
+    assert response.json()["account"]["group_rates"][0]["rate_multiplier"] == 0.75
+    assert "专业分组: 0.75" in dashboard.text
 
 
 def test_dashboard_shows_group_rate_column(tmp_path, monkeypatch):

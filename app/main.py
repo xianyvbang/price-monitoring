@@ -9,9 +9,9 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from itsdangerous import BadSignature, URLSafeSerializer
+from itsdangerous import BadSignature, URLSafeTimedSerializer
 
-from app.config import get_config
+from app.config import get_config, uses_default_app_secret
 from app.models import Database, format_china_time, row_to_dict
 from app.security import decrypt_value
 from app.security import verify_password
@@ -22,7 +22,7 @@ from app.services.scheduler import BalanceScheduler, query_all_accounts, query_g
 config = get_config()
 db = Database(config.database_path, config.app_secret_key)
 templates = Jinja2Templates(directory="app/templates")
-serializer = URLSafeSerializer(config.app_secret_key, salt="balance-monitor-session")
+serializer = URLSafeTimedSerializer(config.app_secret_key, salt="balance-monitor-session")
 scheduler = BalanceScheduler(db)
 SENSITIVE_HEADER_NAMES = {"authorization", "cookie", "set-cookie"}
 SENSITIVE_FIELD_NAMES = {
@@ -45,6 +45,8 @@ LOG_VALUE_LIMIT = 2000
 async def lifespan(app: FastAPI):
     db.init()
     db.ensure_admin(config.admin_username, config.admin_password)
+    if uses_default_app_secret(config.app_secret_key):
+        db.add_log("warning", "security", "APP_SECRET_KEY 仍为默认值，请尽快在 .env 中更换为长随机密钥")
     scheduler.start()
     yield
     await scheduler.stop()
@@ -57,7 +59,7 @@ app.mount("/static", StaticFiles(directory="app/static"), name="static")
 @app.middleware("http")
 async def log_http_requests(request: Request, call_next):
     body = await request.body()
-    if request.url.path not in {"/static"} and not request.url.path.startswith("/static/"):
+    if should_log_http_request(request):
         db.add_log(
             "info",
             "http",
@@ -86,10 +88,28 @@ def current_user(request: Request) -> str | None:
     if not token:
         return None
     try:
-        payload = serializer.loads(token)
+        payload = serializer.loads(token, max_age=config.session_max_age_seconds)
     except BadSignature:
         return None
-    return payload.get("username")
+    if not isinstance(payload, dict):
+        return None
+    username = str(payload.get("username") or "")
+    if not username:
+        return None
+    try:
+        session_version = int(payload.get("session_version"))
+    except (TypeError, ValueError):
+        return None
+    user = db.get_user(username)
+    if not user:
+        return None
+    try:
+        current_session_version = int(user["session_version"])
+    except (IndexError, KeyError, TypeError, ValueError):
+        return None
+    if session_version != current_session_version:
+        return None
+    return username
 
 
 def require_user(request: Request) -> str:
@@ -107,6 +127,17 @@ def redirect_if_needed(request: Request) -> RedirectResponse | None:
 
 def template_context(request: Request, **extra: Any) -> dict[str, Any]:
     return {"request": request, "user": current_user(request), "format_time": format_china_time, **extra}
+
+
+def should_log_http_request(request: Request) -> bool:
+    path = request.url.path
+    if path == "/static" or path.startswith("/static/"):
+        return False
+    if path == "/logs" or path.startswith("/logs/"):
+        return False
+    if path == "/api/logs" or path.startswith("/api/logs/"):
+        return False
+    return True
 
 
 def _log_text(value: Any) -> str:
@@ -190,7 +221,7 @@ async def _log_response(request: Request, response: Any):
         if isinstance(chunk, str):
             chunk = chunk.encode("utf-8")
         body += chunk
-    if request.url.path not in {"/static"} and not request.url.path.startswith("/static/"):
+    if should_log_http_request(request):
         db.add_log(
             "info",
             "http",
@@ -209,13 +240,16 @@ def public_account(row: Any) -> dict[str, Any]:
     data = row_to_dict(row)
     key_id_enc = data.pop("key_id_enc", None)
     data["has_key_id"] = bool(key_id_enc)
-    data["selected_group_id"] = decrypt_value(key_id_enc, config.app_secret_key) if data["platform"] == "newApi" and key_id_enc else None
+    selected_group_id = decrypt_value(key_id_enc, config.app_secret_key) if data["platform"] == "newApi" and key_id_enc else None
+    data["selected_group_id"] = selected_group_id
     data["has_api_key"] = bool(data.pop("api_key_enc", None))
     data["has_email"] = bool(data.pop("email_enc", None))
     data["has_password"] = bool(data.pop("password_enc", None))
     data["has_access_token"] = bool(data.pop("access_token_enc", None))
     data["has_user_id"] = bool(data.pop("user_id_enc", None))
     data["group_rates"] = group_rates_from_extra(data.get("last_extra"))
+    if data["platform"] == "newApi" and selected_group_id and not data["group_rates"]:
+        data["group_rates"] = [{"plan_name": f"当前分组 {selected_group_id}", "rate_multiplier": None}]
     return data
 
 
@@ -254,6 +288,58 @@ def group_rates_from_extra(extra: Any) -> list[dict[str, Any]]:
     return group_rates
 
 
+def newapi_group_result_from_selection(group_id: str, group: dict[str, Any]) -> dict[str, Any]:
+    selected_id = str(group.get("id") or group.get("name") or group_id)
+    if selected_id != group_id:
+        raise HTTPException(status_code=400, detail="分组信息与选择的分组不一致")
+    plan_name = (
+        group.get("plan_name")
+        or group.get("planName")
+        or group.get("name")
+        or group.get("desc")
+        or group.get("description")
+        or group_id
+    )
+    default_rate = _optional_number(
+        group.get("default_rate_multiplier")
+        if group.get("default_rate_multiplier") is not None
+        else group.get("rate")
+        if group.get("rate") is not None
+        else group.get("ratio")
+        if group.get("ratio") is not None
+        else group.get("rate_multiplier")
+        if group.get("rate_multiplier") is not None
+        else group.get("rateMultiplier")
+    )
+    user_rate = _optional_number(group.get("user_rate_multiplier"))
+    effective_rate = _optional_number(group.get("effective_rate_multiplier"))
+    if effective_rate is None:
+        effective_rate = user_rate if user_rate is not None else default_rate
+    selected_group = {
+        "id": group_id,
+        "name": group.get("name") or plan_name,
+        "plan_name": plan_name,
+        "platform": "newApi",
+        "status": group.get("status"),
+        "default_rate_multiplier": default_rate,
+        "user_rate_multiplier": user_rate,
+        "effective_rate_multiplier": effective_rate,
+    }
+    rate_label = effective_rate if effective_rate is not None else "-"
+    title = f"{plan_name} 倍率 {rate_label}"
+    extra = json.dumps(
+        {
+            "title": title,
+            "group_id": group_id,
+            "group": selected_group,
+            "groups": [selected_group],
+        },
+        ensure_ascii=False,
+        default=str,
+    )
+    return {"is_valid": True, "plan_name": title, "extra": extra}
+
+
 def grouped_accounts() -> dict[str, list[dict[str, Any]]]:
     grouped = {"newApi": [], "sub2Api": []}
     for row in db.list_accounts():
@@ -283,6 +369,7 @@ async def dashboard(request: Request):
     if redirect:
         return redirect
     return templates.TemplateResponse(
+        request,
         "dashboard.html",
         template_context(request, grouped=grouped_accounts(), settings=db.get_general_settings()),
     )
@@ -291,7 +378,7 @@ async def dashboard(request: Request):
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
     message = request.query_params.get("message")
-    return templates.TemplateResponse("login.html", template_context(request, error=None, message=message))
+    return templates.TemplateResponse(request, "login.html", template_context(request, error=None, message=message))
 
 
 @app.post("/login")
@@ -303,14 +390,21 @@ async def login(request: Request):
     if not user or not verify_password(password, user["password_hash"]):
         db.add_log("warning", "auth", f"登录失败: {username or '-'}")
         return templates.TemplateResponse(
+            request,
             "login.html",
             template_context(request, error="用户名或密码错误"),
             status_code=401,
         )
     db.add_log("info", "auth", f"登录成功: {username}")
-    token = serializer.dumps({"username": username})
+    token = serializer.dumps({"username": username, "session_version": int(user["session_version"])})
     response = RedirectResponse("/", status_code=303)
-    response.set_cookie(config.session_cookie, token, httponly=True, samesite="lax")
+    response.set_cookie(
+        config.session_cookie,
+        token,
+        httponly=True,
+        max_age=config.session_max_age_seconds,
+        samesite="lax",
+    )
     return response
 
 
@@ -331,6 +425,7 @@ async def accounts_page(request: Request):
         return redirect
     edit_id = _optional_int(request.query_params.get("edit_id"))
     return templates.TemplateResponse(
+        request,
         "accounts.html",
         template_context(
             request,
@@ -351,7 +446,21 @@ async def save_account_form(request: Request):
     account_data = _account_from_form(form)
     account_id = _optional_int(form.get("account_id"))
     if account_id:
-        db.update_account(account_id, account_data)
+        try:
+            db.update_account(account_id, account_data)
+        except ValueError:
+            return templates.TemplateResponse(
+                request,
+                "accounts.html",
+                template_context(
+                    request,
+                    grouped=grouped_accounts(),
+                    settings=db.get_general_settings(),
+                    message="账号不存在或已删除",
+                    edit_account=None,
+                ),
+                status_code=404,
+            )
         db.add_log("info", "account", f"编辑账号: {account_data['platform']} / {account_data['name']}")
     else:
         db.upsert_account(account_data)
@@ -370,6 +479,7 @@ async def bulk_accounts_form(request: Request):
     imported = import_bulk_accounts(platform, bulk_text)
     db.add_log("info", "account", f"批量导入 {platform} 账号 {imported} 个")
     return templates.TemplateResponse(
+        request,
         "accounts.html",
         template_context(
             request,
@@ -429,6 +539,7 @@ async def settings_page(request: Request):
     if redirect:
         return redirect
     return templates.TemplateResponse(
+        request,
         "settings.html",
         template_context(request, settings=db.get_general_settings(), smtp=public_smtp_settings(), message=None),
     )
@@ -443,6 +554,7 @@ async def group_rates_page(request: Request, account_id: int):
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")
     return templates.TemplateResponse(
+        request,
         "group_rates.html",
         template_context(
             request,
@@ -458,9 +570,19 @@ async def logs_page(request: Request):
     if redirect:
         return redirect
     return templates.TemplateResponse(
+        request,
         "logs.html",
         template_context(request, logs=[row_to_dict(row) for row in db.list_logs()]),
     )
+
+
+@app.post("/logs/clear")
+async def clear_logs_form(request: Request):
+    redirect = redirect_if_needed(request)
+    if redirect:
+        return redirect
+    db.clear_logs()
+    return RedirectResponse("/logs", status_code=303)
 
 
 @app.post("/settings/general", response_class=HTMLResponse)
@@ -523,6 +645,7 @@ async def test_smtp_form(request: Request):
         message = f"测试邮件发送失败: {exc}"
         db.add_log("error", "email", f"SMTP 测试邮件发送失败: {exc}")
     return templates.TemplateResponse(
+        request,
         "settings.html",
         template_context(request, settings=db.get_general_settings(), smtp=public_smtp_settings(), message=message),
     )
@@ -551,6 +674,7 @@ async def change_password_form(request: Request):
         response.delete_cookie(config.session_cookie)
         return response
     return templates.TemplateResponse(
+        request,
         "settings.html",
         template_context(request, settings=db.get_general_settings(), smtp=public_smtp_settings(), message=message),
     )
@@ -614,7 +738,10 @@ async def api_create_account(request: Request):
 async def api_update_account(request: Request, account_id: int):
     require_user(request)
     payload = await request.json()
-    db.update_account(account_id, _account_from_payload(payload))
+    try:
+        db.update_account(account_id, _account_from_payload(payload))
+    except ValueError:
+        raise HTTPException(status_code=404, detail="账号不存在") from None
     db.add_log("info", "account", f"API 更新账号: {payload.get('platform')} / {payload.get('name')}")
     return {"id": account_id, "ok": True}
 
@@ -677,10 +804,13 @@ async def api_select_account_group(request: Request, account_id: int):
     group_id = str(payload.get("group_id") or payload.get("groupId") or "").strip()
     if not group_id:
         raise HTTPException(status_code=400, detail="请选择分组")
+    group = payload.get("group")
+    group_result = newapi_group_result_from_selection(group_id, group) if isinstance(group, dict) else None
     db.update_account_selected_group(account_id, group_id)
+    db.update_account_group_result(account_id, group_result or {"extra": None})
     updated = db.get_account(account_id)
     db.add_log("info", "account", f"newApi / {account['name']} 选择分组: {group_id}")
-    return {"ok": True, "account": public_account(updated)}
+    return {"ok": True, "account": public_account(updated), "group_result": group_result}
 
 
 @app.post("/api/query-all")
@@ -884,3 +1014,12 @@ def _optional_int(value: Any) -> int | None:
     if value is None or value == "":
         return None
     return int(float(value))
+
+
+def _optional_number(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None

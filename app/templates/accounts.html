@@ -185,11 +185,11 @@
   document.querySelector("[data-group-picker-close]")?.addEventListener("click", () => {
     groupPicker?.close();
   });
-  const chooseNewapiGroup = async (accountId, groupId) => {
+  const chooseNewapiGroup = async (accountId, groupId, group) => {
     const response = await fetch(`/api/accounts/${accountId}/selected-group`, {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({group_id: groupId})
+      body: JSON.stringify({group_id: groupId, group})
     });
     const result = await response.json();
     if (!response.ok) {
@@ -222,7 +222,7 @@
       option.addEventListener("click", async () => {
         option.disabled = true;
         try {
-          await chooseNewapiGroup(accountId, groupId);
+          await chooseNewapiGroup(accountId, groupId, group);
           if (sourceButton?.dataset?.submitLabel !== undefined) {
             window.location.href = "/accounts";
             return;

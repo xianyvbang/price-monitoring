@@ -344,5 +344,20 @@ def test_group_rate_records_cascade_delete_and_settings_default(tmp_path):
     assert db.list_group_rate_records(account_id) == []
 
 
+def test_default_accounts_only_seed_on_first_init(tmp_path):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+    assert len(db.list_accounts()) > 0
+
+    for account in db.list_accounts():
+        db.delete_account(account["id"])
+
+    assert db.list_accounts() == []
+
+    db.init()
+
+    assert db.list_accounts() == []
+
+
 def test_format_china_time():
     assert format_china_time("2026-05-19T00:00:00+00:00") == "2026-05-19 08:00:00"

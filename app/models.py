@@ -51,12 +51,14 @@ class Database:
 
     def init(self) -> None:
         with self.connect() as conn:
+            accounts_existed = self._table_exists(conn, "accounts")
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS users (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     username TEXT NOT NULL UNIQUE,
                     password_hash TEXT NOT NULL,
+                    session_version INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL
                 );
 
@@ -147,6 +149,7 @@ class Database:
                 """
             )
             self._migrate_smtp_nullable(conn)
+            self._migrate_users_session_version(conn)
             self._migrate_accounts_key_id(conn)
             self._migrate_accounts_sub2api_login(conn)
             self._migrate_accounts_note(conn)
@@ -163,7 +166,8 @@ class Database:
                 """,
                 (utc_now(),),
             )
-            self._seed_default_accounts(conn)
+            if not accounts_existed:
+                self._seed_default_accounts(conn)
         self.cleanup_logs()
 
     def ensure_admin(self, username: str, password: str) -> None:
@@ -171,14 +175,14 @@ class Database:
             row = conn.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
             if row is None:
                 conn.execute(
-                    "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
-                    (username, hash_password(password), utc_now()),
+                    "INSERT INTO users (username, password_hash, session_version, created_at) VALUES (?, ?, ?, ?)",
+                    (username, hash_password(password), 0, utc_now()),
                 )
 
     def update_user_password(self, username: str, password: str) -> None:
         with self.connect() as conn:
             conn.execute(
-                "UPDATE users SET password_hash = ? WHERE username = ?",
+                "UPDATE users SET password_hash = ?, session_version = COALESCE(session_version, 0) + 1 WHERE username = ?",
                 (hash_password(password), username),
             )
 
@@ -202,6 +206,14 @@ class Database:
                 """,
                 (account["platform"], account["name"], account["base_url"], now, now),
             )
+
+    @staticmethod
+    def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (name,),
+        ).fetchone()
+        return row is not None
 
     @staticmethod
     def _migrate_smtp_nullable(conn: sqlite3.Connection) -> None:
@@ -275,6 +287,13 @@ class Database:
         column_names = {row["name"] for row in columns}
         if "last_group_rate_changed" not in column_names:
             conn.execute("ALTER TABLE accounts ADD COLUMN last_group_rate_changed INTEGER NOT NULL DEFAULT 0")
+
+    @staticmethod
+    def _migrate_users_session_version(conn: sqlite3.Connection) -> None:
+        columns = conn.execute("PRAGMA table_info(users)").fetchall()
+        column_names = {row["name"] for row in columns}
+        if "session_version" not in column_names:
+            conn.execute("ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0")
 
     def get_user(self, username: str) -> Optional[sqlite3.Row]:
         with self.connect() as conn:
@@ -669,6 +688,10 @@ class Database:
         self.cleanup_logs()
         with self.connect() as conn:
             return conn.execute("SELECT * FROM app_logs ORDER BY created_at DESC, id DESC").fetchall()
+
+    def clear_logs(self) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM app_logs")
 
     def cleanup_logs(self) -> None:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat(timespec="seconds")
