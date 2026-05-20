@@ -108,6 +108,10 @@ async def query_group_rate_for_account(db: Database, account_id: int, notify: bo
         checked_at = utc_now()
         record_result = db.record_group_rate_if_changed(account_id, _group_summary_from_result(result), checked_at)
         result["group_rate_record"] = record_result
+        record = record_result.get("record") or {}
+        updated_name = db.update_account_name_rate_suffix(account_id, record.get("rate_multiplier"))
+        if updated_name:
+            account = db.get_account(account_id) or account
         group_rate_changed = bool(account["last_group_rate_changed"])
         if record_result["changed"]:
             group_rate_changed = True
@@ -117,7 +121,6 @@ async def query_group_rate_for_account(db: Database, account_id: int, notify: bo
         if notify and record_result["changed"]:
             try:
                 smtp = db.get_smtp_settings()
-                record = record_result["record"] or {}
                 subject, body = build_group_rate_change_email(
                     account,
                     str(record.get("plan_name") or result.get("plan_name") or "-"),

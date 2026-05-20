@@ -25,13 +25,13 @@
       <tbody>
         {% for log in logs %}
         <tr>
-          <td>{{ format_time(log.created_at) }}</td>
-          <td><span class="log-level {{ log.level }}">{{ log.level }}</span></td>
-          <td>{{ log.category }}</td>
-          <td class="log-message">{{ log.message }}</td>
+          <td data-label="时间">{{ format_time(log.created_at) }}</td>
+          <td data-label="级别"><span class="log-level {{ log.level }}">{{ log.level }}</span></td>
+          <td data-label="分类">{{ log.category }}</td>
+          <td class="log-message" data-label="内容">{{ log.message }}</td>
         </tr>
         {% else %}
-        <tr><td colspan="4" class="empty">暂无日志</td></tr>
+        <tr class="empty-row"><td colspan="4" class="empty">暂无日志</td></tr>
         {% endfor %}
       </tbody>
     </table>

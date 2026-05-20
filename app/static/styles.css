@@ -390,12 +390,14 @@ th {
   align-items: center;
   display: flex;
   gap: 10px;
+  flex-wrap: wrap;
 }
 
 .actions {
   align-items: center;
   display: flex;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
 .actions form {
@@ -470,23 +472,266 @@ pre {
 }
 
 @media (max-width: 760px) {
-  .topbar,
-  .page-head,
-  .nav {
-    align-items: flex-start;
-    flex-direction: column;
-    height: auto;
+  body {
+    font-size: 13px;
   }
 
   .topbar {
-    padding: 14px 18px;
+    align-items: flex-start;
+    flex-direction: column;
+    height: auto;
+    gap: 12px;
+    padding: 12px 14px;
+  }
+
+  .brand {
+    font-size: 17px;
+  }
+
+  .nav {
+    align-items: center;
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 8px 14px;
+    width: 100%;
+  }
+
+  .nav a,
+  .nav .link-button {
+    line-height: 1.4;
+    padding: 2px 0;
   }
 
   .page {
-    padding: 18px;
+    padding: 14px;
+  }
+
+  .page-head {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+
+  .page-head .primary,
+  .page-head .button-link,
+  .page-head .inline-form,
+  .page-head .inline-form button {
+    width: 100%;
+  }
+
+  .page-head .primary {
+    margin-top: 0;
+  }
+
+  h1 {
+    font-size: 22px;
+  }
+
+  h2 {
+    font-size: 17px;
+  }
+
+  p {
+    line-height: 1.55;
+  }
+
+  .panel {
+    border-radius: 8px;
+    margin-bottom: 14px;
+    padding: 14px;
+  }
+
+  .panel-title {
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .panel-title span {
+    flex-shrink: 0;
   }
 
   .grid.two {
     grid-template-columns: 1fr;
+  }
+
+  input,
+  select,
+  textarea {
+    min-height: 42px;
+  }
+
+  textarea {
+    min-height: 130px;
+  }
+
+  button,
+  .button-link {
+    justify-content: center;
+    min-height: 40px;
+  }
+
+  .button-row,
+  .actions {
+    align-items: stretch;
+    gap: 8px;
+    width: 100%;
+  }
+
+  .button-row > *,
+  .actions > *,
+  .actions form,
+  .actions form button {
+    flex: 1 1 120px;
+  }
+
+  .actions form button {
+    width: 100%;
+  }
+
+  .table-wrap {
+    overflow-x: visible;
+  }
+
+  table,
+  thead,
+  tbody,
+  tr,
+  th,
+  td {
+    display: block;
+  }
+
+  table {
+    border-collapse: separate;
+  }
+
+  thead {
+    display: none;
+  }
+
+  tbody {
+    display: grid;
+    gap: 12px;
+  }
+
+  tr {
+    background: #ffffff;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  td {
+    align-items: flex-start;
+    border-bottom: 1px solid #edf1f6;
+    display: grid;
+    gap: 10px;
+    grid-template-columns: minmax(78px, 32%) minmax(0, 1fr);
+    padding: 10px 12px;
+    white-space: normal;
+    word-break: break-word;
+  }
+
+  td:last-child {
+    border-bottom: 0;
+  }
+
+  td::before {
+    color: var(--muted);
+    content: attr(data-label);
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1.5;
+  }
+
+  td:not([data-label])::before {
+    content: "";
+    display: none;
+  }
+
+  .empty-row,
+  .detail-row {
+    border: 0;
+    overflow: visible;
+  }
+
+  .empty-row td,
+  .detail-row td {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    display: block;
+    padding: 12px;
+  }
+
+  .empty-row td::before,
+  .detail-row td::before {
+    display: none;
+  }
+
+  .detail-row td {
+    background: #fef3f2;
+  }
+
+  [data-account-plan],
+  .note-cell,
+  .log-message,
+  .group-rates {
+    max-width: none;
+  }
+
+  .change-status-actions {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .change-status-reset {
+    min-height: 30px;
+  }
+
+  .login-shell {
+    align-items: start;
+    min-height: calc(100vh - 84px);
+    padding-top: 8vh;
+  }
+
+  .login-panel {
+    width: 100%;
+  }
+
+  dialog {
+    max-height: calc(100dvh - 24px);
+    max-width: calc(100% - 20px);
+    width: calc(100% - 20px);
+  }
+
+  .dialog-shell,
+  .json-dialog {
+    padding: 14px;
+  }
+
+  .dialog-head {
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .dialog-head button {
+    width: 100%;
+  }
+
+  .group-option-list {
+    max-height: 64dvh;
+  }
+
+  .group-option {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  pre {
+    max-height: 64dvh;
+    word-break: break-word;
   }
 }

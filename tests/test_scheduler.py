@@ -61,7 +61,7 @@ def _group_result(plan_name: str, rate: float) -> dict:
 async def test_query_group_rate_records_baseline_and_emails_only_on_change(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "app.db"), "test-key")
     db.init()
-    account_id = db.upsert_account(_sub2api_account("sub"))
+    account_id = db.upsert_account(_sub2api_account("sub-0.8"))
     results = [
         _group_result("Basic", 0.8),
         _group_result("Basic", 0.8),
@@ -99,8 +99,9 @@ async def test_query_group_rate_records_baseline_and_emails_only_on_change(tmp_p
     assert records[0]["rate_multiplier"] == 1.1
     assert account["last_extra"] == changed["extra"]
     assert account["last_group_rate_changed"] == 1
+    assert account["name"] == "sub-1.1"
     assert len(sent) == 1
-    assert sent[0][0] == "分组倍率变化: sub"
+    assert sent[0][0] == "分组倍率变化: sub-1.1"
     assert "旧倍率: 0.8" in sent[0][1]
     assert "新倍率: 1.1" in sent[0][1]
     assert "查询时间:" in sent[0][1]

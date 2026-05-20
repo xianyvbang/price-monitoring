@@ -23,13 +23,13 @@
       <tbody>
         {% for record in records %}
         <tr>
-          <td>{{ record.plan_name }}</td>
-          <td>{{ record.rate_multiplier if record.rate_multiplier is not none else "-" }}</td>
-          <td>{{ format_time(record.checked_at) }}</td>
-          <td><button type="button" data-json-button data-json="{{ record.raw_json | e }}">查看 JSON</button></td>
+          <td data-label="名称">{{ record.plan_name }}</td>
+          <td data-label="分组倍率">{{ record.rate_multiplier if record.rate_multiplier is not none else "-" }}</td>
+          <td data-label="查询时间">{{ format_time(record.checked_at) }}</td>
+          <td data-label="操作"><button type="button" data-json-button data-json="{{ record.raw_json | e }}">查看 JSON</button></td>
         </tr>
         {% else %}
-        <tr><td colspan="4" class="empty">暂无分组倍率变化记录</td></tr>
+        <tr class="empty-row"><td colspan="4" class="empty">暂无分组倍率变化记录</td></tr>
         {% endfor %}
       </tbody>
     </table>

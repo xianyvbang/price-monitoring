@@ -165,6 +165,46 @@ def test_group_result_only_updates_extra(tmp_path):
     assert account["last_extra"] == "new-extra"
 
 
+def test_update_account_name_rate_suffix_replaces_existing_suffix(tmp_path):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+    account_id = db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "sub-login-0.8",
+            "base_url": "https://example.com",
+            "email": "user@example.com",
+            "password": "login-password",
+            "api_key": "sk-test",
+        }
+    )
+
+    updated_name = db.update_account_name_rate_suffix(account_id, 1.1)
+
+    assert updated_name == "sub-login-1.1"
+    assert db.get_account(account_id)["name"] == "sub-login-1.1"
+
+
+def test_update_account_name_rate_suffix_appends_when_missing(tmp_path):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+    account_id = db.upsert_account(
+        {
+            "platform": "newApi",
+            "name": "new-login",
+            "base_url": "https://example.com",
+            "access_token": "token",
+            "user_id": "1",
+            "key_id": "basic",
+        }
+    )
+
+    updated_name = db.update_account_name_rate_suffix(account_id, 0.7)
+
+    assert updated_name == "new-login-0.7"
+    assert db.get_account(account_id)["name"] == "new-login-0.7"
+
+
 def test_account_result_keeps_group_result_even_with_extra(tmp_path):
     db = Database(str(tmp_path / "app.db"), "test-key")
     db.init()

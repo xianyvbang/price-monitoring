@@ -99,23 +99,23 @@
       <tbody>
         {% for account in accounts %}
         <tr>
-          <td>{{ account.name }}</td>
-          <td class="note-cell">{{ account.note or "-" }}</td>
-          <td>{{ account.base_url }}</td>
-          <td>
+          <td data-label="名称">{{ account.name }}</td>
+          <td class="note-cell" data-label="备注">{{ account.note or "-" }}</td>
+          <td data-label="Base URL">{{ account.base_url }}</td>
+          <td data-label="充值路径">
             {% if account.recharge_url %}
             <a class="button-link" href="{{ account.recharge_url }}" target="_blank" rel="noopener noreferrer">充值</a>
             {% else %}
             -
             {% endif %}
           </td>
-          <td>
+          <td data-label="凭据">
             {% if platform == "sub2Api" %}groupId筛选: {{ "已配置" if account.has_key_id else "未配置" }} / apiKey: {{ "已配置" if account.has_api_key else "未配置" }} / email: {{ "已配置" if account.has_email else "未配置" }} / password: {{ "已配置" if account.has_password else "未配置" }}{% endif %}
             {% if platform == "newApi" %}accessToken: {{ "已配置" if account.has_access_token else "未配置" }} / userId: {{ "已配置" if account.has_user_id else "未配置" }} / 当前分组: {{ account.selected_group_id or "未选择" }}{% endif %}
           </td>
-          <td>{{ account.threshold if account.threshold is not none else settings.default_threshold }}</td>
-          <td>{{ "是" if account.is_enabled else "否" }}</td>
-          <td>
+          <td data-label="阈值">{{ account.threshold if account.threshold is not none else settings.default_threshold }}</td>
+          <td data-label="启用">{{ "是" if account.is_enabled else "否" }}</td>
+          <td data-label="操作">
             <div class="actions">
               <button
                 type="button"
@@ -146,7 +146,7 @@
           </td>
         </tr>
         {% else %}
-        <tr><td colspan="8" class="empty">暂无账号</td></tr>
+        <tr class="empty-row"><td colspan="8" class="empty">暂无账号</td></tr>
         {% endfor %}
       </tbody>
     </table>

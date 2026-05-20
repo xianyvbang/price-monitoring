@@ -44,11 +44,11 @@
       <tbody>
         {% for account in accounts %}
         <tr data-account-row="{{ account.id }}">
-          <td>{{ account.name }}</td>
-          <td class="note-cell">{{ account.note or "-" }}</td>
-          <td><span class="status {{ account.last_status }}" data-account-status>{{ account.last_status }}</span></td>
-          <td data-account-plan>{{ account.last_plan_name or "-" }}</td>
-          <td data-account-group-rates>
+          <td data-label="名称">{{ account.name }}</td>
+          <td class="note-cell" data-label="备注">{{ account.note or "-" }}</td>
+          <td data-label="状态"><span class="status {{ account.last_status }}" data-account-status>{{ account.last_status }}</span></td>
+          <td data-account-plan data-label="套餐">{{ account.last_plan_name or "-" }}</td>
+          <td data-account-group-rates data-label="分组倍率">
             {% if account.group_rates %}
             <div class="group-rates">
               {% for group_rate in account.group_rates %}
@@ -60,7 +60,7 @@
             {% endif %}
           </td>
           {% if platform in ["sub2Api", "newApi"] %}
-          <td data-group-rate-change>
+          <td data-group-rate-change data-label="倍率变化">
             <div class="change-status-actions">
               <span class="change-status {{ 'changed' if account.last_group_rate_changed else 'unchanged' }}">
                 {{ "变化" if account.last_group_rate_changed else "未变化" }}
@@ -75,17 +75,17 @@
             </div>
           </td>
           {% endif %}
-          <td data-account-remaining>{{ account.last_remaining if account.last_remaining is not none else "-" }} {{ account.last_unit or "" }}</td>
+          <td data-account-remaining data-label="剩余">{{ account.last_remaining if account.last_remaining is not none else "-" }} {{ account.last_unit or "" }}</td>
           {% if platform != "sub2Api" %}
-          <td data-account-used>{{ account.last_used if account.last_used is not none else "-" }}</td>
-          <td data-account-total>{{ account.last_total if account.last_total is not none else "-" }}</td>
+          <td data-account-used data-label="已用">{{ account.last_used if account.last_used is not none else "-" }}</td>
+          <td data-account-total data-label="总额">{{ account.last_total if account.last_total is not none else "-" }}</td>
           {% endif %}
-          <td data-account-threshold="{{ account.threshold if account.threshold is not none else settings.default_threshold }}">{{ account.threshold if account.threshold is not none else settings.default_threshold }}</td>
+          <td data-account-threshold="{{ account.threshold if account.threshold is not none else settings.default_threshold }}" data-label="阈值">{{ account.threshold if account.threshold is not none else settings.default_threshold }}</td>
           {% set effective_threshold = account.threshold if account.threshold is not none else settings.default_threshold %}
           {% set is_low = account.last_remaining is not none and account.last_remaining < effective_threshold %}
-          <td class="{{ 'low-balance' if is_low else '' }}" data-account-low>{{ "是" if is_low else "否" }}</td>
-          <td data-account-checked-at>{{ format_time(account.last_checked_at) }}</td>
-          <td>
+          <td class="{{ 'low-balance' if is_low else '' }}" data-account-low data-label="低于阈值">{{ "是" if is_low else "否" }}</td>
+          <td data-account-checked-at data-label="最近查询">{{ format_time(account.last_checked_at) }}</td>
+          <td data-label="操作">
             <div class="actions">
               <a class="button-link" href="{{ account.base_url }}" target="_blank" rel="noopener noreferrer">打开</a>
               {% if account.recharge_url %}
@@ -111,7 +111,7 @@
         </tr>
         {% endif %}
         {% else %}
-        <tr><td colspan="{{ 11 if platform == 'sub2Api' else 13 if platform == 'newApi' else 12 }}" class="empty">暂无账号</td></tr>
+        <tr class="empty-row"><td colspan="{{ 11 if platform == 'sub2Api' else 13 if platform == 'newApi' else 12 }}" class="empty">暂无账号</td></tr>
         {% endfor %}
       </tbody>
     </table>

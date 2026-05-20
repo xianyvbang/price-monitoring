@@ -586,6 +586,30 @@ class Database:
                 (1 if changed else 0, utc_now(), account_id),
             )
 
+    def update_account_name_rate_suffix(self, account_id: int, rate: Any) -> Optional[str]:
+        rate_value = _optional_float(rate)
+        if rate_value is None:
+            return None
+        account = self.get_account(account_id)
+        if not account:
+            return None
+        current_name = str(account["name"] or "").strip()
+        if not current_name:
+            return None
+        new_name = _replace_name_rate_suffix(current_name, rate_value)
+        if new_name == current_name:
+            return current_name
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE accounts
+                SET name = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (new_name, utc_now(), account_id),
+            )
+        return new_name
+
     def record_group_rate_if_changed(
         self,
         account_id: int,
@@ -713,3 +737,26 @@ def _json_dumps(value: Any) -> str:
     import json
 
     return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _replace_name_rate_suffix(name: str, rate: float) -> str:
+    prefix, separator, suffix = name.rpartition("-")
+    rate_text = _stringify_rate(rate)
+    if separator and _looks_like_rate_suffix(suffix):
+        return f"{prefix}-{rate_text}"
+    return f"{name}-{rate_text}"
+
+
+def _looks_like_rate_suffix(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    try:
+        float(text)
+        return True
+    except ValueError:
+        return False
+
+
+def _stringify_rate(rate: float) -> str:
+    return format(rate, "g")
