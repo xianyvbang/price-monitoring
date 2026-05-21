@@ -704,6 +704,29 @@ async def api_group_rates(request: Request, account_id: int):
     }
 
 
+@app.get("/api/accounts/{account_id}/balance-history")
+async def api_balance_history(request: Request, account_id: int):
+    require_user(request)
+    account = db.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    return {
+        "account": public_account(account),
+        "records": [row_to_dict(row) for row in db.list_balance_history(account_id)],
+    }
+
+
+@app.delete("/api/accounts/{account_id}/balance-history")
+async def api_clear_balance_history(request: Request, account_id: int):
+    require_user(request)
+    account = db.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    db.clear_balance_history(account_id)
+    db.add_log("warning", "account", f"{account['platform']} / {account['name']} 清空余额历史")
+    return {"ok": True}
+
+
 @app.post("/api/accounts/{account_id}/group-rate-change-status")
 async def api_group_rate_change_status(request: Request, account_id: int):
     require_user(request)

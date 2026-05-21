@@ -146,6 +146,8 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_app_logs_created_at ON app_logs(created_at);
                 CREATE INDEX IF NOT EXISTS idx_group_rate_records_account_checked_at
                 ON group_rate_records(account_id, checked_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_query_records_account_checked_at
+                ON query_records(account_id, checked_at DESC);
                 """
             )
             self._migrate_smtp_nullable(conn)
@@ -169,6 +171,7 @@ class Database:
             if not accounts_existed:
                 self._seed_default_accounts(conn)
         self.cleanup_logs()
+        self.cleanup_balance_history()
 
     def ensure_admin(self, username: str, password: str) -> None:
         with self.connect() as conn:
@@ -506,6 +509,7 @@ class Database:
     def update_account_result(self, account_id: int, result: dict[str, Any]) -> None:
         status = "valid" if result.get("is_valid") else "invalid"
         checked_at = result.get("checked_at") or utc_now()
+        history_cutoff = _days_ago(3)
         with self.connect() as conn:
             conn.execute(
                 """
@@ -548,6 +552,7 @@ class Database:
                     checked_at,
                 ),
             )
+            conn.execute("DELETE FROM query_records WHERE checked_at < ?", (history_cutoff,))
 
     def update_account_group_result(self, account_id: int, result: dict[str, Any]) -> None:
         with self.connect() as conn:
@@ -687,6 +692,27 @@ class Database:
                 (account_id,),
             ).fetchall()
 
+    def list_balance_history(self, account_id: int) -> list[sqlite3.Row]:
+        self.cleanup_balance_history()
+        cutoff = _days_ago(3)
+        with self.connect() as conn:
+            return conn.execute(
+                """
+                SELECT id, account_id, remaining, unit, plan_name, checked_at
+                FROM query_records
+                WHERE account_id = ?
+                    AND is_valid = 1
+                    AND remaining IS NOT NULL
+                    AND checked_at >= ?
+                ORDER BY checked_at ASC, id ASC
+                """,
+                (account_id, cutoff),
+            ).fetchall()
+
+    def clear_balance_history(self, account_id: int) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM query_records WHERE account_id = ?", (account_id,))
+
     def set_alert_state(self, account_id: int, active: bool, sent: bool = False) -> None:
         with self.connect() as conn:
             conn.execute(
@@ -722,6 +748,11 @@ class Database:
         with self.connect() as conn:
             conn.execute("DELETE FROM app_logs WHERE created_at < ?", (cutoff,))
 
+    def cleanup_balance_history(self) -> None:
+        cutoff = _days_ago(3)
+        with self.connect() as conn:
+            conn.execute("DELETE FROM query_records WHERE checked_at < ?", (cutoff,))
+
 
 def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {key: row[key] for key in row.keys()}
@@ -737,6 +768,10 @@ def _json_dumps(value: Any) -> str:
     import json
 
     return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _days_ago(days: int) -> str:
+    return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
 
 
 def _replace_name_rate_suffix(name: str, rate: float) -> str:

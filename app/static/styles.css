@@ -412,6 +412,11 @@ dialog {
   width: 760px;
 }
 
+.balance-history-dialog {
+  max-width: min(960px, calc(100% - 32px));
+  width: 960px;
+}
+
 .json-dialog {
   padding: 18px;
 }
@@ -459,6 +464,45 @@ dialog {
 .group-option.selected {
   border-color: var(--primary);
   box-shadow: inset 0 0 0 1px var(--primary);
+}
+
+.chart-shell {
+  min-height: 340px;
+  position: relative;
+  width: 100%;
+}
+
+.chart-shell canvas {
+  display: block;
+  height: 340px;
+  width: 100%;
+}
+
+.chart-empty {
+  align-items: center;
+  bottom: 48px;
+  color: var(--muted);
+  display: flex;
+  justify-content: center;
+  left: 62px;
+  pointer-events: none;
+  position: absolute;
+  right: 18px;
+  text-align: center;
+  top: 20px;
+}
+
+.chart-tooltip {
+  background: #18202f;
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(24, 32, 47, 0.18);
+  color: #ffffff;
+  font-size: 12px;
+  padding: 6px 8px;
+  pointer-events: none;
+  position: absolute;
+  white-space: nowrap;
+  z-index: 1;
 }
 
 pre {
@@ -728,6 +772,14 @@ pre {
     align-items: stretch;
     flex-direction: column;
     gap: 8px;
+  }
+
+  .chart-shell {
+    min-height: 280px;
+  }
+
+  .chart-shell canvas {
+    height: 280px;
   }
 
   pre {

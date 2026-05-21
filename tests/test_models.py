@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 from app.models import Database, format_china_time
 from app.security import decrypt_value
 
@@ -251,6 +253,65 @@ def test_account_result_keeps_group_result_even_with_extra(tmp_path):
     assert account["last_status"] == "invalid"
     assert account["last_error"] == "bad"
     assert account["last_extra"] == "group-extra"
+
+
+def test_balance_history_keeps_recent_three_days_and_valid_balances(tmp_path):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+    account_id = db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "sub-history",
+            "base_url": "https://example.com",
+            "email": "user@example.com",
+            "password": "login-password",
+            "api_key": "sk-test",
+        }
+    )
+    old_time = (datetime.now(timezone.utc) - timedelta(days=4)).isoformat(timespec="seconds")
+    recent_time = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(timespec="seconds")
+
+    db.update_account_result(account_id, {"is_valid": True, "remaining": 4, "checked_at": old_time})
+    db.update_account_result(account_id, {"is_valid": False, "remaining": 5, "checked_at": recent_time})
+    db.update_account_result(account_id, {"is_valid": True, "remaining": 7.5, "unit": "USD", "checked_at": recent_time})
+
+    records = db.list_balance_history(account_id)
+
+    assert len(records) == 1
+    assert records[0]["remaining"] == 7.5
+    assert records[0]["unit"] == "USD"
+
+
+def test_balance_history_can_be_cleared_for_one_account(tmp_path):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+    first_account_id = db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "sub-history-a",
+            "base_url": "https://example.com",
+            "email": "user@example.com",
+            "password": "login-password",
+            "api_key": "sk-test",
+        }
+    )
+    second_account_id = db.upsert_account(
+        {
+            "platform": "newApi",
+            "name": "new-history-b",
+            "base_url": "https://example.com",
+            "access_token": "token",
+            "user_id": "1",
+        }
+    )
+    checked_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    db.update_account_result(first_account_id, {"is_valid": True, "remaining": 1, "checked_at": checked_at})
+    db.update_account_result(second_account_id, {"is_valid": True, "remaining": 2, "checked_at": checked_at})
+
+    db.clear_balance_history(first_account_id)
+
+    assert db.list_balance_history(first_account_id) == []
+    assert len(db.list_balance_history(second_account_id)) == 1
 
 
 def test_group_rate_records_only_insert_on_change(tmp_path):

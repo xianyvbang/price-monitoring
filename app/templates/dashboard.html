@@ -102,6 +102,13 @@
               <a class="button-link" href="/accounts/{{ account.id }}/group-rates">分组变化</a>
               {% endif %}
               <a class="button-link" href="/accounts?edit_id={{ account.id }}">修改</a>
+              <button
+                type="button"
+                data-balance-history
+                data-account-id="{{ account.id }}"
+                data-account-name="{{ account.name }}"
+                data-account-platform="{{ account.platform }}"
+              >余额趋势</button>
             </div>
           </td>
         </tr>
@@ -129,6 +136,25 @@
     </div>
     <div class="group-option-list" data-group-picker-options></div>
   </form>
+</dialog>
+<dialog class="balance-history-dialog" data-balance-history-dialog>
+  <div class="dialog-shell">
+    <div class="dialog-head">
+      <div>
+        <h2 data-balance-history-title>余额趋势</h2>
+        <p data-balance-history-message>最近 3 天</p>
+      </div>
+      <div class="button-row">
+        <button type="button" class="danger" data-balance-history-clear>清除</button>
+        <button type="button" data-balance-history-close>关闭</button>
+      </div>
+    </div>
+    <div class="chart-shell">
+      <canvas data-balance-chart></canvas>
+      <div class="chart-tooltip" data-balance-chart-tooltip hidden></div>
+      <div class="chart-empty" data-balance-chart-empty hidden>暂无余额数据</div>
+    </div>
+  </div>
 </dialog>
 <script>
   const formatValue = (value, fallback = "-") => value === null || value === undefined || value === "" ? fallback : value;
@@ -285,6 +311,311 @@
     }
     return result;
   };
+  const balanceHistoryDialog = document.querySelector("[data-balance-history-dialog]");
+  const balanceHistoryTitle = document.querySelector("[data-balance-history-title]");
+  const balanceHistoryMessage = document.querySelector("[data-balance-history-message]");
+  const balanceHistoryCanvas = document.querySelector("[data-balance-chart]");
+  const balanceHistoryEmpty = document.querySelector("[data-balance-chart-empty]");
+  const balanceHistoryTooltip = document.querySelector("[data-balance-chart-tooltip]");
+  const balanceHistoryClear = document.querySelector("[data-balance-history-clear]");
+  let activeBalanceHistoryAccountId = null;
+  let activeBalanceHistoryRecords = [];
+  let balanceChartPoints = [];
+
+  const formatChartTime = (value) => {
+    if (!value) {
+      return "-";
+    }
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return value;
+    }
+    const parts = new Intl.DateTimeFormat("zh-CN", {
+      timeZone: "Asia/Shanghai",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false
+    }).formatToParts(date);
+    const byType = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+    return `${byType.month}-${byType.day} ${byType.hour}:${byType.minute}`;
+  };
+  const formatBalanceNumber = (value) => {
+    const number = Number(value);
+    if (!Number.isFinite(number)) {
+      return "-";
+    }
+    return new Intl.NumberFormat("zh-CN", {maximumFractionDigits: 4}).format(number);
+  };
+  const parseBalanceRecords = (records) => {
+    return (records || []).map((record) => {
+      const time = new Date(record.checked_at || record.checkedAt).getTime();
+      const balance = Number(record.remaining);
+      return {
+        balance,
+        checkedAt: record.checked_at || record.checkedAt,
+        planName: record.plan_name || record.planName,
+        time,
+        unit: record.unit || ""
+      };
+    }).filter((record) => Number.isFinite(record.time) && Number.isFinite(record.balance))
+      .sort((left, right) => left.time - right.time);
+  };
+  const drawBalanceChart = () => {
+    if (!balanceHistoryCanvas) {
+      return;
+    }
+    const data = parseBalanceRecords(activeBalanceHistoryRecords);
+    const rect = balanceHistoryCanvas.getBoundingClientRect();
+    const cssWidth = Math.max(360, Math.floor(rect.width || 720));
+    const cssHeight = Math.max(260, Math.floor(rect.height || 340));
+    const dpr = window.devicePixelRatio || 1;
+    balanceHistoryCanvas.width = Math.floor(cssWidth * dpr);
+    balanceHistoryCanvas.height = Math.floor(cssHeight * dpr);
+    const ctx = balanceHistoryCanvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssWidth, cssHeight);
+    balanceChartPoints = [];
+    if (balanceHistoryTooltip) {
+      balanceHistoryTooltip.hidden = true;
+    }
+
+    const left = 62;
+    const right = cssWidth - 18;
+    const top = 20;
+    const bottom = cssHeight - 48;
+    const chartWidth = Math.max(1, right - left);
+    const chartHeight = Math.max(1, bottom - top);
+
+    ctx.font = "12px Arial, Microsoft YaHei, sans-serif";
+    ctx.strokeStyle = "#d9e0ea";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(left, top);
+    ctx.lineTo(left, bottom);
+    ctx.lineTo(right, bottom);
+    ctx.stroke();
+
+    ctx.fillStyle = "#667085";
+    ctx.textAlign = "center";
+    ctx.fillText("时间（月-日 时:分）", left + chartWidth / 2, cssHeight - 10);
+    ctx.save();
+    ctx.translate(14, top + chartHeight / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText("余额", 0, 0);
+    ctx.restore();
+
+    if (!data.length) {
+      if (balanceHistoryEmpty) {
+        balanceHistoryEmpty.hidden = false;
+      }
+      if (balanceHistoryClear) {
+        balanceHistoryClear.disabled = true;
+      }
+      return;
+    }
+    if (balanceHistoryEmpty) {
+      balanceHistoryEmpty.hidden = true;
+      balanceHistoryEmpty.textContent = "暂无余额数据";
+    }
+    if (balanceHistoryClear) {
+      balanceHistoryClear.disabled = false;
+    }
+
+    let minTime = data[0].time;
+    let maxTime = data[data.length - 1].time;
+    if (minTime === maxTime) {
+      minTime -= 30 * 60 * 1000;
+      maxTime += 30 * 60 * 1000;
+    }
+    const balances = data.map((record) => record.balance);
+    let minBalance = Math.min(...balances);
+    let maxBalance = Math.max(...balances);
+    const balanceRange = maxBalance - minBalance;
+    const balancePad = balanceRange === 0 ? Math.max(1, Math.abs(maxBalance) * 0.1) : balanceRange * 0.12;
+    minBalance = minBalance >= 0 ? Math.max(0, minBalance - balancePad) : minBalance - balancePad;
+    maxBalance += balancePad;
+    if (minBalance === maxBalance) {
+      maxBalance = minBalance + 1;
+    }
+    const xScale = (time) => left + ((time - minTime) / (maxTime - minTime)) * chartWidth;
+    const yScale = (balance) => bottom - ((balance - minBalance) / (maxBalance - minBalance)) * chartHeight;
+
+    ctx.strokeStyle = "#eef2f7";
+    ctx.fillStyle = "#667085";
+    ctx.textAlign = "right";
+    for (let index = 0; index <= 4; index += 1) {
+      const ratio = index / 4;
+      const y = bottom - ratio * chartHeight;
+      const value = minBalance + ratio * (maxBalance - minBalance);
+      ctx.beginPath();
+      ctx.moveTo(left, y);
+      ctx.lineTo(right, y);
+      ctx.stroke();
+      ctx.fillText(formatBalanceNumber(value), left - 8, y + 4);
+    }
+
+    ctx.textAlign = "center";
+    for (let index = 0; index <= 3; index += 1) {
+      const ratio = index / 3;
+      const time = minTime + ratio * (maxTime - minTime);
+      const x = left + ratio * chartWidth;
+      ctx.fillText(formatChartTime(new Date(time).toISOString()), x, bottom + 22);
+    }
+
+    ctx.strokeStyle = "#2563eb";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    data.forEach((record, index) => {
+      const x = xScale(record.time);
+      const y = yScale(record.balance);
+      if (index === 0) {
+        ctx.moveTo(x, y);
+      } else {
+        ctx.lineTo(x, y);
+      }
+    });
+    ctx.stroke();
+
+    data.forEach((record) => {
+      const x = xScale(record.time);
+      const y = yScale(record.balance);
+      balanceChartPoints.push({x, y, record});
+      ctx.fillStyle = "#ffffff";
+      ctx.strokeStyle = "#2563eb";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(x, y, data.length > 80 ? 2.5 : 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    });
+  };
+  const showBalanceChartTooltip = (event) => {
+    if (!balanceHistoryTooltip || !balanceHistoryCanvas || !balanceChartPoints.length) {
+      return;
+    }
+    const rect = balanceHistoryCanvas.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    let nearest = null;
+    let nearestDistance = Infinity;
+    balanceChartPoints.forEach((point) => {
+      const distance = Math.hypot(point.x - x, point.y - y);
+      if (distance < nearestDistance) {
+        nearest = point;
+        nearestDistance = distance;
+      }
+    });
+    if (!nearest || nearestDistance > 18) {
+      balanceHistoryTooltip.hidden = true;
+      return;
+    }
+    const unit = nearest.record.unit ? ` ${nearest.record.unit}` : "";
+    balanceHistoryTooltip.textContent = `${formatChartTime(nearest.record.checkedAt)} 余额 ${formatBalanceNumber(nearest.record.balance)}${unit}`;
+    balanceHistoryTooltip.style.left = `${Math.min(Math.max(nearest.x + 10, 8), Math.max(8, rect.width - 190))}px`;
+    balanceHistoryTooltip.style.top = `${Math.max(nearest.y - 36, 8)}px`;
+    balanceHistoryTooltip.hidden = false;
+  };
+  const hideBalanceChartTooltip = () => {
+    if (balanceHistoryTooltip) {
+      balanceHistoryTooltip.hidden = true;
+    }
+  };
+  const setBalanceHistoryMessage = (account, text) => {
+    const platform = account.platform || "";
+    const name = account.name || "";
+    const prefix = [platform, name].filter(Boolean).join(" / ");
+    if (balanceHistoryMessage) {
+      balanceHistoryMessage.textContent = prefix ? `${prefix} · ${text}` : text;
+    }
+  };
+  const loadBalanceHistory = async (accountId) => {
+    const response = await fetch(`/api/accounts/${accountId}/balance-history`);
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.detail || "获取余额趋势失败");
+    }
+    activeBalanceHistoryRecords = payload.records || [];
+    const account = payload.account || {};
+    if (balanceHistoryTitle) {
+      balanceHistoryTitle.textContent = "余额趋势";
+    }
+    if (balanceHistoryEmpty) {
+      balanceHistoryEmpty.textContent = "暂无余额数据";
+    }
+    const unit = activeBalanceHistoryRecords.find((record) => record.unit)?.unit || account.last_unit || "";
+    setBalanceHistoryMessage(account, `最近 3 天${unit ? ` · 单位 ${unit}` : ""}`);
+    drawBalanceChart();
+    return payload;
+  };
+  document.querySelector("[data-balance-history-close]")?.addEventListener("click", () => {
+    balanceHistoryDialog?.close();
+  });
+  balanceHistoryCanvas?.addEventListener("mousemove", showBalanceChartTooltip);
+  balanceHistoryCanvas?.addEventListener("mouseleave", hideBalanceChartTooltip);
+  document.querySelectorAll("[data-balance-history]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      activeBalanceHistoryAccountId = button.dataset.accountId;
+      activeBalanceHistoryRecords = [];
+      if (balanceHistoryTitle) {
+        balanceHistoryTitle.textContent = "余额趋势";
+      }
+      if (balanceHistoryEmpty) {
+        balanceHistoryEmpty.textContent = "加载中";
+      }
+      setBalanceHistoryMessage(
+        {platform: button.dataset.accountPlatform, name: button.dataset.accountName},
+        "加载中"
+      );
+      if (balanceHistoryDialog && !balanceHistoryDialog.open) {
+        balanceHistoryDialog.showModal();
+      }
+      drawBalanceChart();
+      try {
+        await loadBalanceHistory(activeBalanceHistoryAccountId);
+      } catch (error) {
+        activeBalanceHistoryRecords = [];
+        if (balanceHistoryEmpty) {
+          balanceHistoryEmpty.textContent = error.message || "获取余额趋势失败";
+        }
+        drawBalanceChart();
+      }
+    });
+  });
+  balanceHistoryClear?.addEventListener("click", async () => {
+    if (!activeBalanceHistoryAccountId || !window.confirm("确定清除这条平台的余额历史吗？")) {
+      return;
+    }
+    const originalText = balanceHistoryClear.textContent;
+    balanceHistoryClear.disabled = true;
+    balanceHistoryClear.textContent = "清除中";
+    try {
+      const response = await fetch(`/api/accounts/${activeBalanceHistoryAccountId}/balance-history`, {method: "DELETE"});
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.detail || "清除失败");
+      }
+      activeBalanceHistoryRecords = [];
+      if (balanceHistoryEmpty) {
+        balanceHistoryEmpty.textContent = "暂无余额数据";
+      }
+      if (balanceHistoryMessage) {
+        balanceHistoryMessage.textContent = "最近 3 天 · 已清除";
+      }
+      drawBalanceChart();
+    } catch (error) {
+      balanceHistoryClear.title = error.message || "清除失败";
+    } finally {
+      balanceHistoryClear.textContent = originalText;
+      balanceHistoryClear.disabled = parseBalanceRecords(activeBalanceHistoryRecords).length === 0;
+    }
+  });
+  window.addEventListener("resize", () => {
+    if (balanceHistoryDialog?.open) {
+      drawBalanceChart();
+    }
+  });
   const updateBalanceRow = (target, result) => {
     const row = target instanceof Element ? target.closest("[data-account-row]") : document.querySelector(`[data-account-row="${target}"]`);
     if (!row) {
