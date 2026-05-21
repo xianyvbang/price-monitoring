@@ -102,6 +102,43 @@ def test_group_rate_change_status_defaults_and_updates(tmp_path):
     assert db.get_account(account_id)["last_group_rate_changed"] == 1
 
 
+def test_account_eliminated_defaults_updates_and_survives_edit(tmp_path):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+    account_id = db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "sub-eliminated",
+            "base_url": "https://example.com",
+            "email": "user@example.com",
+            "password": "login-password",
+            "api_key": "sk-test",
+        }
+    )
+
+    assert db.get_account(account_id)["is_eliminated"] == 0
+
+    db.update_account_eliminated(account_id, True)
+    db.update_account(
+        account_id,
+        {
+            "platform": "sub2Api",
+            "name": "sub-eliminated",
+            "base_url": "https://example.com",
+            "email": "",
+            "password": "",
+            "api_key": "",
+            "is_enabled": True,
+        },
+    )
+
+    assert db.get_account(account_id)["is_eliminated"] == 1
+
+    db.update_account_eliminated(account_id, False)
+
+    assert db.get_account(account_id)["is_eliminated"] == 0
+
+
 def test_selected_group_can_be_replaced(tmp_path):
     db = Database(str(tmp_path / "app.db"), "test-key")
     db.init()

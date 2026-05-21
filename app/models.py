@@ -95,6 +95,7 @@ class Database:
                     user_id_enc TEXT,
                     threshold REAL,
                     is_enabled INTEGER NOT NULL DEFAULT 1,
+                    is_eliminated INTEGER NOT NULL DEFAULT 0,
                     last_status TEXT NOT NULL DEFAULT 'never',
                     last_error TEXT,
                     last_plan_name TEXT,
@@ -157,6 +158,7 @@ class Database:
             self._migrate_accounts_note(conn)
             self._migrate_accounts_recharge_url(conn)
             self._migrate_accounts_group_rate_changed(conn)
+            self._migrate_accounts_eliminated(conn)
             self._set_default(conn, "request_timeout", "15")
             self._set_default(conn, "query_interval", "30")
             self._set_default(conn, "group_rate_query_interval", "1200")
@@ -292,6 +294,13 @@ class Database:
             conn.execute("ALTER TABLE accounts ADD COLUMN last_group_rate_changed INTEGER NOT NULL DEFAULT 0")
 
     @staticmethod
+    def _migrate_accounts_eliminated(conn: sqlite3.Connection) -> None:
+        columns = conn.execute("PRAGMA table_info(accounts)").fetchall()
+        column_names = {row["name"] for row in columns}
+        if "is_eliminated" not in column_names:
+            conn.execute("ALTER TABLE accounts ADD COLUMN is_eliminated INTEGER NOT NULL DEFAULT 0")
+
+    @staticmethod
     def _migrate_users_session_version(conn: sqlite3.Connection) -> None:
         columns = conn.execute("PRAGMA table_info(users)").fetchall()
         column_names = {row["name"] for row in columns}
@@ -398,15 +407,21 @@ class Database:
         user_id_enc = encrypt_value(data.get("user_id"), self.secret_key)
         threshold = _optional_float(data.get("threshold"))
         is_enabled = 1 if data.get("is_enabled", True) else 0
+        is_eliminated = _optional_bool(data.get("is_eliminated"))
         with self.connect() as conn:
+            current = conn.execute(
+                "SELECT is_eliminated FROM accounts WHERE platform = ? AND name = ?",
+                (platform, data["name"]),
+            ).fetchone()
+            effective_is_eliminated = is_eliminated if is_eliminated is not None else (current["is_eliminated"] if current else 0)
             conn.execute(
                 """
                 INSERT INTO accounts (
                     platform, name, base_url, note, recharge_url, key_id_enc, api_key_enc, email_enc, password_enc,
                     access_token_enc, user_id_enc,
-                    threshold, is_enabled, created_at, updated_at
+                    threshold, is_enabled, is_eliminated, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(platform, name) DO UPDATE SET
                     base_url = excluded.base_url,
                     note = excluded.note,
@@ -419,6 +434,7 @@ class Database:
                     user_id_enc = COALESCE(excluded.user_id_enc, accounts.user_id_enc),
                     threshold = excluded.threshold,
                     is_enabled = excluded.is_enabled,
+                    is_eliminated = excluded.is_eliminated,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -435,6 +451,7 @@ class Database:
                     user_id_enc,
                     threshold,
                     is_enabled,
+                    effective_is_eliminated,
                     now,
                     now,
                 ),
@@ -468,6 +485,7 @@ class Database:
         user_id_enc = encrypt_value(data.get("user_id"), self.secret_key)
         threshold = _optional_float(data.get("threshold"))
         is_enabled = 1 if data.get("is_enabled", True) else 0
+        is_eliminated = _optional_bool(data.get("is_eliminated"))
         with self.connect() as conn:
             conn.execute(
                 """
@@ -479,7 +497,7 @@ class Database:
                     password_enc = COALESCE(?, password_enc),
                     access_token_enc = COALESCE(?, access_token_enc),
                     user_id_enc = COALESCE(?, user_id_enc),
-                    threshold = ?, is_enabled = ?, updated_at = ?
+                    threshold = ?, is_enabled = ?, is_eliminated = COALESCE(?, is_eliminated), updated_at = ?
                 WHERE id = ?
                 """,
                 (
@@ -496,6 +514,7 @@ class Database:
                     user_id_enc,
                     threshold,
                     is_enabled,
+                    is_eliminated,
                     now,
                     account_id,
                 ),
@@ -589,6 +608,18 @@ class Database:
                 WHERE id = ?
                 """,
                 (1 if changed else 0, utc_now(), account_id),
+            )
+
+    def update_account_eliminated(self, account_id: int, is_eliminated: bool) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE accounts
+                SET is_eliminated = ?, low_balance_active = CASE WHEN ? THEN 0 ELSE low_balance_active END,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (1 if is_eliminated else 0, 1 if is_eliminated else 0, utc_now(), account_id),
             )
 
     def update_account_name_rate_suffix(self, account_id: int, rate: Any) -> Optional[str]:
@@ -762,6 +793,14 @@ def _optional_float(value: Any) -> Optional[float]:
     if value is None or value == "":
         return None
     return float(value)
+
+
+def _optional_bool(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return 1 if value else 0
+    return 0 if str(value).strip().lower() in {"0", "false", "no", "off", ""} else 1
 
 
 def _json_dumps(value: Any) -> str:

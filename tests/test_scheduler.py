@@ -108,6 +108,39 @@ async def test_query_group_rate_records_baseline_and_emails_only_on_change(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_eliminated_account_skips_group_rate_change_email(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+    account_id = db.upsert_account(_sub2api_account("sub-0.8"))
+    results = [
+        _group_result("Basic", 0.8),
+        _group_result("Basic", 1.1),
+    ]
+    sent = []
+
+    async def fake_query(account, secret_key, timeout, log):
+        return results.pop(0)
+
+    def fake_send(settings, secret_key, subject, body):
+        sent.append((subject, body))
+
+    monkeypatch.setattr("app.services.scheduler.query_sub2api_group", fake_query)
+    monkeypatch.setattr("app.services.scheduler.send_email", fake_send)
+
+    await query_group_rate_for_account(db, account_id, notify=True)
+    db.update_account_eliminated(account_id, True)
+    changed = await query_group_rate_for_account(db, account_id, notify=True)
+
+    account = db.get_account(account_id)
+
+    assert changed["group_rate_record"]["changed"] is True
+    assert changed["group_rate_changed"] is True
+    assert account["last_group_rate_changed"] == 1
+    assert account["name"] == "sub-1.1"
+    assert sent == []
+
+
+@pytest.mark.asyncio
 async def test_query_all_group_rates_only_queries_enabled_sub2api_with_credentials(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "app.db"), "test-key")
     db.init()

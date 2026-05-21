@@ -316,6 +316,18 @@ th {
   padding: 4px 8px;
 }
 
+.toggle-button {
+  min-width: 76px;
+  padding-inline: 10px;
+}
+
+.toggle-button.active {
+  background: #fffaeb;
+  border-color: #fdb022;
+  color: var(--warn);
+  font-weight: 700;
+}
+
 .log-message {
   white-space: normal;
 }

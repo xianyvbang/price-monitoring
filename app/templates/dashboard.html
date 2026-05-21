@@ -25,7 +25,6 @@
           <th>名称</th>
           <th>备注</th>
           <th>状态</th>
-          <th>套餐</th>
           <th>分组倍率</th>
           {% if platform in ["sub2Api", "newApi"] %}
           <th>倍率变化</th>
@@ -37,17 +36,17 @@
           {% endif %}
           <th>阈值</th>
           <th>低于阈值</th>
+          <th>是否淘汰</th>
           <th>最近查询</th>
           <th>操作</th>
         </tr>
       </thead>
       <tbody>
         {% for account in accounts %}
-        <tr data-account-row="{{ account.id }}">
+        <tr data-account-row="{{ account.id }}" data-account-eliminated="{{ 'true' if account.is_eliminated else 'false' }}">
           <td data-label="名称">{{ account.name }}</td>
           <td class="note-cell" data-label="备注">{{ account.note or "-" }}</td>
           <td data-label="状态"><span class="status {{ account.last_status }}" data-account-status>{{ account.last_status }}</span></td>
-          <td data-account-plan data-label="套餐">{{ account.last_plan_name or "-" }}</td>
           <td data-account-group-rates data-label="分组倍率">
             {% if account.group_rates %}
             <div class="group-rates">
@@ -75,15 +74,24 @@
             </div>
           </td>
           {% endif %}
-          <td data-account-remaining data-label="剩余">{{ account.last_remaining if account.last_remaining is not none else "-" }} {{ account.last_unit or "" }}</td>
+          <td data-account-remaining data-account-remaining-value="{{ account.last_remaining if account.last_remaining is not none else '' }}" data-label="剩余">{{ account.last_remaining if account.last_remaining is not none else "-" }} {{ account.last_unit or "" }}</td>
           {% if platform != "sub2Api" %}
           <td data-account-used data-label="已用">{{ account.last_used if account.last_used is not none else "-" }}</td>
           <td data-account-total data-label="总额">{{ account.last_total if account.last_total is not none else "-" }}</td>
           {% endif %}
           <td data-account-threshold="{{ account.threshold if account.threshold is not none else settings.default_threshold }}" data-label="阈值">{{ account.threshold if account.threshold is not none else settings.default_threshold }}</td>
           {% set effective_threshold = account.threshold if account.threshold is not none else settings.default_threshold %}
-          {% set is_low = account.last_remaining is not none and account.last_remaining < effective_threshold %}
-          <td class="{{ 'low-balance' if is_low else '' }}" data-account-low data-label="低于阈值">{{ "是" if is_low else "否" }}</td>
+          {% set is_low = (not account.is_eliminated) and account.last_remaining is not none and account.last_remaining < effective_threshold %}
+          <td class="{{ 'low-balance' if is_low else '' }}" data-account-low data-label="低于阈值">{{ "不提醒" if account.is_eliminated else "是" if is_low else "否" }}</td>
+          <td data-label="是否淘汰">
+            <button
+              type="button"
+              class="toggle-button {{ 'active' if account.is_eliminated else '' }}"
+              data-account-eliminated-toggle
+              data-account-id="{{ account.id }}"
+              aria-pressed="{{ 'true' if account.is_eliminated else 'false' }}"
+            ><span data-account-eliminated-text>{{ "已淘汰" if account.is_eliminated else "未淘汰" }}</span></button>
+          </td>
           <td data-account-checked-at data-label="最近查询">{{ format_time(account.last_checked_at) }}</td>
           <td data-label="操作">
             <div class="actions">
@@ -616,6 +624,35 @@
       drawBalanceChart();
     }
   });
+  const truthy = (value) => value === true || value === 1 || value === "1" || value === "true";
+  const setEliminatedButtonState = (button, isEliminated) => {
+    if (!button) {
+      return;
+    }
+    button.classList.toggle("active", isEliminated);
+    button.setAttribute("aria-pressed", isEliminated ? "true" : "false");
+    const text = button.querySelector("[data-account-eliminated-text]");
+    if (text) {
+      text.textContent = isEliminated ? "已淘汰" : "未淘汰";
+    }
+  };
+  const updateLowBalanceCell = (row, remainingValue) => {
+    const low = row.querySelector("[data-account-low]");
+    if (!low) {
+      return;
+    }
+    const isEliminated = row.dataset.accountEliminated === "true";
+    if (isEliminated) {
+      low.textContent = "不提醒";
+      low.classList.remove("low-balance");
+      return;
+    }
+    const threshold = Number.parseFloat(row.querySelector("[data-account-threshold]")?.dataset.accountThreshold || "");
+    const remainingNumber = Number(remainingValue);
+    const isLow = remainingValue !== null && remainingValue !== undefined && remainingValue !== "" && Number.isFinite(remainingNumber) && !Number.isNaN(threshold) && remainingNumber < threshold;
+    low.textContent = isLow ? "是" : "否";
+    low.classList.toggle("low-balance", isLow);
+  };
   const updateBalanceRow = (target, result) => {
     const row = target instanceof Element ? target.closest("[data-account-row]") : document.querySelector(`[data-account-row="${target}"]`);
     if (!row) {
@@ -638,6 +675,7 @@
     }
     if (remaining) {
       remaining.textContent = formatRemaining(result);
+      remaining.dataset.accountRemainingValue = result.remaining ?? "";
     }
     if (used) {
       used.textContent = formatValue(result.used);
@@ -645,12 +683,7 @@
     if (total) {
       total.textContent = formatValue(result.total);
     }
-    if (low) {
-      const threshold = Number.parseFloat(row.querySelector("[data-account-threshold]")?.dataset.accountThreshold || "");
-      const isLow = result.remaining !== null && result.remaining !== undefined && !Number.isNaN(threshold) && Number(result.remaining) < threshold;
-      low.textContent = isLow ? "是" : "否";
-      low.classList.toggle("low-balance", isLow);
-    }
+    updateLowBalanceCell(row, result.remaining);
     if (checkedAt) {
       checkedAt.textContent = formatChinaTime(result.checked_at || result.checkedAt);
     }
@@ -727,6 +760,46 @@
           button.textContent = originalText;
           button.title = "";
         }, 1200);
+      }
+    });
+  });
+  document.querySelectorAll("[data-account-eliminated-toggle]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const row = button.closest("[data-account-row]");
+      if (!row) {
+        return;
+      }
+      const nextState = row.dataset.accountEliminated !== "true";
+      const text = button.querySelector("[data-account-eliminated-text]");
+      const originalText = text?.textContent || "";
+      button.disabled = true;
+      if (text) {
+        text.textContent = "保存中";
+      }
+      try {
+        const response = await fetch(`/api/accounts/${button.dataset.accountId}/eliminated`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({is_eliminated: nextState})
+        });
+        const result = await response.json();
+        if (!response.ok) {
+          throw new Error(result.detail || "保存失败");
+        }
+        const isEliminated = truthy(result.account?.is_eliminated ?? nextState);
+        row.dataset.accountEliminated = isEliminated ? "true" : "false";
+        setEliminatedButtonState(button, isEliminated);
+        const remaining = row.querySelector("[data-account-remaining]")?.dataset.accountRemainingValue;
+        updateLowBalanceCell(row, result.account?.last_remaining ?? remaining);
+      } catch (error) {
+        if (text) {
+          text.textContent = originalText;
+        }
+        button.title = error.message || "保存失败";
+      } finally {
+        setTimeout(() => {
+          button.disabled = false;
+        }, 600);
       }
     });
   });

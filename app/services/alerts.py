@@ -14,6 +14,11 @@ def handle_alert_state(db: Database, account_id: int) -> None:
     account = db.get_account(account_id)
     if not account:
         return
+    if account["is_eliminated"]:
+        if account["low_balance_active"]:
+            db.set_alert_state(account_id, False, sent=False)
+            db.add_log("info", "alert", f"{account['platform']} / {account['name']} 已淘汰，停止余额阈值提醒")
+        return
     settings = db.get_general_settings()
     remaining = account["last_remaining"]
     if remaining is None or account["last_status"] != "valid":

@@ -118,7 +118,7 @@ async def query_group_rate_for_account(db: Database, account_id: int, notify: bo
             db.update_account_group_rate_change_status(account_id, True)
         result["group_rate_changed"] = group_rate_changed
         result["groupRateChanged"] = group_rate_changed
-        if notify and record_result["changed"]:
+        if notify and record_result["changed"] and not account["is_eliminated"]:
             try:
                 smtp = db.get_smtp_settings()
                 subject, body = build_group_rate_change_email(
@@ -136,6 +136,12 @@ async def query_group_rate_for_account(db: Database, account_id: int, notify: bo
                 )
             except Exception as exc:
                 db.add_log("error", "alert", f"{account['platform']} / {account['name']} 分组倍率变化邮件发送失败: {exc}")
+        elif notify and record_result["changed"] and account["is_eliminated"]:
+            db.add_log(
+                "info",
+                "alert",
+                f"{account['platform']} / {account['name']} 已淘汰，跳过分组倍率变化邮件",
+            )
     db.add_log(
         "info" if result.get("is_valid") else "error",
         "query",

@@ -238,6 +238,7 @@ async def _body_iterator(body: bytes):
 
 def public_account(row: Any) -> dict[str, Any]:
     data = row_to_dict(row)
+    data["is_eliminated"] = bool(data.get("is_eliminated"))
     key_id_enc = data.pop("key_id_enc", None)
     data["has_key_id"] = bool(key_id_enc)
     selected_group_id = decrypt_value(key_id_enc, config.app_secret_key) if data["platform"] == "newApi" and key_id_enc else None
@@ -748,6 +749,27 @@ async def api_group_rate_change_status(request: Request, account_id: int):
     return {"ok": True, "account": public_account(updated)}
 
 
+@app.post("/api/accounts/{account_id}/eliminated")
+async def api_account_eliminated(request: Request, account_id: int):
+    require_user(request)
+    account = db.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    payload = await request.json()
+    is_eliminated = False
+    if isinstance(payload, dict):
+        if "is_eliminated" in payload:
+            is_eliminated = _to_bool(payload.get("is_eliminated"))
+        elif "isEliminated" in payload:
+            is_eliminated = _to_bool(payload.get("isEliminated"))
+        elif "eliminated" in payload:
+            is_eliminated = _to_bool(payload.get("eliminated"))
+    db.update_account_eliminated(account_id, is_eliminated)
+    updated = db.get_account(account_id)
+    db.add_log("info", "account", f"{account['platform']} / {account['name']} 淘汰状态: {'已淘汰' if is_eliminated else '未淘汰'}")
+    return {"ok": True, "account": public_account(updated)}
+
+
 @app.post("/api/accounts")
 async def api_create_account(request: Request):
     require_user(request)
@@ -915,6 +937,13 @@ def _account_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
     base_url = str(payload.get("base_url") or payload.get("baseUrl") or "").strip()
     if not name or not base_url:
         raise HTTPException(status_code=400, detail="name 和 baseUrl 必填")
+    is_eliminated = None
+    if "is_eliminated" in payload:
+        is_eliminated = _to_bool(payload.get("is_eliminated"))
+    elif "isEliminated" in payload:
+        is_eliminated = _to_bool(payload.get("isEliminated"))
+    elif "eliminated" in payload:
+        is_eliminated = _to_bool(payload.get("eliminated"))
     return {
         "platform": platform,
         "name": name,
@@ -929,6 +958,7 @@ def _account_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "user_id": payload.get("user_id") or payload.get("userId"),
         "threshold": payload.get("threshold"),
         "is_enabled": _to_bool(payload.get("is_enabled", payload.get("isEnabled", True))),
+        "is_eliminated": is_eliminated,
     }
 
 
