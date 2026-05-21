@@ -653,6 +653,28 @@
     low.textContent = isLow ? "是" : "否";
     low.classList.toggle("low-balance", isLow);
   };
+  const moveAccountRowForEliminatedState = (row, isEliminated) => {
+    const tbody = row?.parentElement;
+    if (!tbody) {
+      return;
+    }
+    const detailRow = row.nextElementSibling?.classList.contains("detail-row") ? row.nextElementSibling : null;
+    if (isEliminated) {
+      tbody.appendChild(row);
+      if (detailRow) {
+        tbody.appendChild(detailRow);
+      }
+      return;
+    }
+    const firstEliminatedRow = Array.from(tbody.querySelectorAll("[data-account-row]"))
+      .find((candidate) => candidate !== row && candidate.dataset.accountEliminated === "true");
+    if (firstEliminatedRow) {
+      tbody.insertBefore(row, firstEliminatedRow);
+      if (detailRow) {
+        tbody.insertBefore(detailRow, firstEliminatedRow);
+      }
+    }
+  };
   const updateBalanceRow = (target, result) => {
     const row = target instanceof Element ? target.closest("[data-account-row]") : document.querySelector(`[data-account-row="${target}"]`);
     if (!row) {
@@ -791,6 +813,7 @@
         setEliminatedButtonState(button, isEliminated);
         const remaining = row.querySelector("[data-account-remaining]")?.dataset.accountRemainingValue;
         updateLowBalanceCell(row, result.account?.last_remaining ?? remaining);
+        moveAccountRowForEliminatedState(row, isEliminated);
       } catch (error) {
         if (text) {
           text.textContent = originalText;

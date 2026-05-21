@@ -341,10 +341,13 @@ def newapi_group_result_from_selection(group_id: str, group: dict[str, Any]) -> 
     return {"is_valid": True, "plan_name": title, "extra": extra}
 
 
-def grouped_accounts() -> dict[str, list[dict[str, Any]]]:
+def grouped_accounts(eliminated_last: bool = False) -> dict[str, list[dict[str, Any]]]:
     grouped = {"newApi": [], "sub2Api": []}
     for row in db.list_accounts():
         grouped[row["platform"]].append(public_account(row))
+    if eliminated_last:
+        for accounts in grouped.values():
+            accounts.sort(key=lambda account: (1 if account.get("is_eliminated") else 0, str(account.get("name") or "").lower()))
     return grouped
 
 
@@ -372,7 +375,7 @@ async def dashboard(request: Request):
     return templates.TemplateResponse(
         request,
         "dashboard.html",
-        template_context(request, grouped=grouped_accounts(), settings=db.get_general_settings()),
+        template_context(request, grouped=grouped_accounts(eliminated_last=True), settings=db.get_general_settings()),
     )
 
 

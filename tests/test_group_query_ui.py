@@ -186,6 +186,47 @@ def test_dashboard_shows_group_rate_column(tmp_path, monkeypatch):
     assert "Pro Plan: 2.0" in dashboard.text
 
 
+def test_dashboard_orders_eliminated_accounts_last(tmp_path, monkeypatch):
+    test_db = Database(str(tmp_path / "app.db"), "test-key")
+    test_db.init()
+    test_db.ensure_admin("admin", "password123")
+    for account in test_db.list_accounts():
+        test_db.delete_account(account["id"])
+    eliminated_id = test_db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "a-eliminated-row",
+            "base_url": "https://eliminated.example",
+            "api_key": "secret",
+        }
+    )
+    test_db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "b-active-row",
+            "base_url": "https://active.example",
+            "api_key": "secret",
+        }
+    )
+    test_db.update_account_eliminated(eliminated_id, True)
+    monkeypatch.setattr("app.main.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
+
+    async def stop_scheduler():
+        return None
+
+    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+
+    with TestClient(app) as client:
+        client.post("/login", data={"username": "admin", "password": "password123"})
+        dashboard = client.get("/")
+
+    assert dashboard.status_code == 200
+    assert "套餐" not in dashboard.text
+    assert dashboard.text.index("b-active-row") < dashboard.text.index("a-eliminated-row")
+
+
 def test_group_rate_change_status_reset_api(tmp_path, monkeypatch):
     test_db = Database(str(tmp_path / "app.db"), "test-key")
     test_db.init()
