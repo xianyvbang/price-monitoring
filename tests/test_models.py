@@ -292,7 +292,7 @@ def test_account_result_keeps_group_result_even_with_extra(tmp_path):
     assert account["last_extra"] == "group-extra"
 
 
-def test_balance_history_keeps_recent_three_days_and_valid_balances(tmp_path):
+def test_balance_history_keeps_recent_two_days_and_valid_balances(tmp_path):
     db = Database(str(tmp_path / "app.db"), "test-key")
     db.init()
     account_id = db.upsert_account(
@@ -305,7 +305,7 @@ def test_balance_history_keeps_recent_three_days_and_valid_balances(tmp_path):
             "api_key": "sk-test",
         }
     )
-    old_time = (datetime.now(timezone.utc) - timedelta(days=4)).isoformat(timespec="seconds")
+    old_time = (datetime.now(timezone.utc) - timedelta(days=2, minutes=1)).isoformat(timespec="seconds")
     recent_time = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(timespec="seconds")
 
     db.update_account_result(account_id, {"is_valid": True, "remaining": 4, "checked_at": old_time})

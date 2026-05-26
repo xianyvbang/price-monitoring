@@ -4,7 +4,7 @@
 <section class="page-head">
   <div>
     <h1>日志</h1>
-    <p>显示最近 7 天的全部日志。</p>
+    <p>显示最近 7 天日志。</p>
   </div>
   <form class="inline-form" method="post" action="/logs/clear" onsubmit="return confirm('确定清空全部日志？');">
     <button class="danger" type="submit">清空日志</button>
@@ -22,7 +22,7 @@
           <th>内容</th>
         </tr>
       </thead>
-      <tbody>
+      <tbody data-log-rows>
         {% for log in logs %}
         <tr>
           <td data-label="时间">{{ format_time(log.created_at) }}</td>
@@ -36,5 +36,119 @@
       </tbody>
     </table>
   </div>
+  <div class="pagination" data-log-pagination data-page-size="{{ pagination.page_size }}">
+    <a
+      class="button-link{% if not pagination.has_previous %} disabled{% endif %}"
+      href="/logs?page={{ pagination.previous_page }}&page_size={{ pagination.page_size }}"
+      data-log-page-link
+      data-page="{{ pagination.previous_page }}"
+      aria-disabled="{{ 'true' if not pagination.has_previous else 'false' }}"
+    >上一页</a>
+    <span data-log-page-status>第 {{ pagination.page }} / {{ pagination.total_pages }} 页 · 共 {{ pagination.total }} 条</span>
+    <a
+      class="button-link{% if not pagination.has_next %} disabled{% endif %}"
+      href="/logs?page={{ pagination.next_page }}&page_size={{ pagination.page_size }}"
+      data-log-page-link
+      data-page="{{ pagination.next_page }}"
+      aria-disabled="{{ 'true' if not pagination.has_next else 'false' }}"
+    >下一页</a>
+  </div>
 </section>
+<script>
+  (() => {
+    const rows = document.querySelector("[data-log-rows]");
+    const pagination = document.querySelector("[data-log-pagination]");
+    if (!rows || !pagination) {
+      return;
+    }
+
+    const pageSize = Number(pagination.dataset.pageSize || 50);
+    const status = document.querySelector("[data-log-page-status]");
+    const links = Array.from(document.querySelectorAll("[data-log-page-link]"));
+    const cell = (label, text, className) => {
+      const td = document.createElement("td");
+      td.dataset.label = label;
+      if (className) {
+        td.className = className;
+      }
+      td.textContent = text ?? "";
+      return td;
+    };
+
+    const renderRows = (logs) => {
+      rows.replaceChildren();
+      if (!logs.length) {
+        const tr = document.createElement("tr");
+        tr.className = "empty-row";
+        const td = document.createElement("td");
+        td.colSpan = 4;
+        td.className = "empty";
+        td.textContent = "暂无日志";
+        tr.appendChild(td);
+        rows.appendChild(tr);
+        return;
+      }
+      logs.forEach((log) => {
+        const tr = document.createElement("tr");
+        tr.appendChild(cell("时间", log.created_at_formatted || log.created_at || ""));
+        const levelTd = document.createElement("td");
+        levelTd.dataset.label = "级别";
+        const level = document.createElement("span");
+        level.className = `log-level ${log.level || ""}`;
+        level.textContent = log.level || "";
+        levelTd.appendChild(level);
+        tr.appendChild(levelTd);
+        tr.appendChild(cell("分类", log.category || ""));
+        tr.appendChild(cell("内容", log.message || "", "log-message"));
+        rows.appendChild(tr);
+      });
+    };
+
+    const renderPagination = (meta) => {
+      if (status) {
+        status.textContent = `第 ${meta.page} / ${meta.total_pages} 页 · 共 ${meta.total} 条`;
+      }
+      const states = [
+        {link: links[0], page: meta.previous_page, disabled: !meta.has_previous},
+        {link: links[1], page: meta.next_page, disabled: !meta.has_next},
+      ];
+      states.forEach(({link, page, disabled}) => {
+        if (!link) {
+          return;
+        }
+        link.dataset.page = page;
+        link.href = `/logs?page=${page}&page_size=${meta.page_size}`;
+        link.classList.toggle("disabled", disabled);
+        link.setAttribute("aria-disabled", disabled ? "true" : "false");
+      });
+    };
+
+    const loadPage = async (page) => {
+      rows.setAttribute("aria-busy", "true");
+      try {
+        const response = await fetch(`/api/logs?page=${page}&page_size=${pageSize}`);
+        if (!response.ok) {
+          throw new Error("加载日志失败");
+        }
+        const payload = await response.json();
+        renderRows(payload.logs || []);
+        renderPagination(payload.pagination);
+        window.history.replaceState(null, "", `/logs?page=${payload.pagination.page}&page_size=${payload.pagination.page_size}`);
+      } finally {
+        rows.removeAttribute("aria-busy");
+      }
+    };
+
+    links.forEach((link) => {
+      link.addEventListener("click", (event) => {
+        if (link.getAttribute("aria-disabled") === "true") {
+          event.preventDefault();
+          return;
+        }
+        event.preventDefault();
+        loadPage(Number(link.dataset.page || 1));
+      });
+    });
+  })();
+</script>
 {% endblock %}

@@ -187,6 +187,12 @@ button {
   padding: 8px 12px;
 }
 
+.button-link.disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+  pointer-events: none;
+}
+
 button:hover,
 .button-link:hover {
   border-color: #98a2b3;
@@ -221,6 +227,15 @@ button:disabled {
 
 .table-wrap {
   overflow-x: auto;
+}
+
+.pagination {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+  margin-top: 14px;
 }
 
 table {

@@ -150,7 +150,7 @@
     <div class="dialog-head">
       <div>
         <h2 data-balance-history-title>余额趋势</h2>
-        <p data-balance-history-message>最近 3 天</p>
+        <p data-balance-history-message>最近 2 天</p>
       </div>
       <div class="button-row">
         <button type="button" class="danger" data-balance-history-clear>清除</button>
@@ -553,7 +553,7 @@
       balanceHistoryEmpty.textContent = "暂无余额数据";
     }
     const unit = activeBalanceHistoryRecords.find((record) => record.unit)?.unit || account.last_unit || "";
-    setBalanceHistoryMessage(account, `最近 3 天${unit ? ` · 单位 ${unit}` : ""}`);
+    setBalanceHistoryMessage(account, `最近 2 天${unit ? ` · 单位 ${unit}` : ""}`);
     drawBalanceChart();
     return payload;
   };
@@ -609,7 +609,7 @@
         balanceHistoryEmpty.textContent = "暂无余额数据";
       }
       if (balanceHistoryMessage) {
-        balanceHistoryMessage.textContent = "最近 3 天 · 已清除";
+        balanceHistoryMessage.textContent = "最近 2 天 · 已清除";
       }
       drawBalanceChart();
     } catch (error) {

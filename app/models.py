@@ -15,6 +15,7 @@ def utc_now() -> str:
 
 
 CHINA_TZ = timezone(timedelta(hours=8))
+BALANCE_HISTORY_DAYS = 2
 
 
 def format_china_time(value: Any) -> str:
@@ -528,7 +529,7 @@ class Database:
     def update_account_result(self, account_id: int, result: dict[str, Any]) -> None:
         status = "valid" if result.get("is_valid") else "invalid"
         checked_at = result.get("checked_at") or utc_now()
-        history_cutoff = _days_ago(3)
+        history_cutoff = _days_ago(BALANCE_HISTORY_DAYS)
         with self.connect() as conn:
             conn.execute(
                 """
@@ -725,7 +726,7 @@ class Database:
 
     def list_balance_history(self, account_id: int) -> list[sqlite3.Row]:
         self.cleanup_balance_history()
-        cutoff = _days_ago(3)
+        cutoff = _days_ago(BALANCE_HISTORY_DAYS)
         with self.connect() as conn:
             return conn.execute(
                 """
@@ -765,10 +766,26 @@ class Database:
             cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat(timespec="seconds")
             conn.execute("DELETE FROM app_logs WHERE created_at < ?", (cutoff,))
 
-    def list_logs(self) -> list[sqlite3.Row]:
+    def list_logs(self, limit: int | None = None, offset: int = 0) -> list[sqlite3.Row]:
         self.cleanup_logs()
         with self.connect() as conn:
-            return conn.execute("SELECT * FROM app_logs ORDER BY created_at DESC, id DESC").fetchall()
+            if limit is None:
+                return conn.execute("SELECT * FROM app_logs ORDER BY created_at DESC, id DESC").fetchall()
+            return conn.execute(
+                """
+                SELECT *
+                FROM app_logs
+                ORDER BY created_at DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (max(0, int(limit)), max(0, int(offset))),
+            ).fetchall()
+
+    def count_logs(self) -> int:
+        self.cleanup_logs()
+        with self.connect() as conn:
+            row = conn.execute("SELECT COUNT(*) AS total FROM app_logs").fetchone()
+            return int(row["total"] if row else 0)
 
     def clear_logs(self) -> None:
         with self.connect() as conn:
@@ -780,7 +797,7 @@ class Database:
             conn.execute("DELETE FROM app_logs WHERE created_at < ?", (cutoff,))
 
     def cleanup_balance_history(self) -> None:
-        cutoff = _days_ago(3)
+        cutoff = _days_ago(BALANCE_HISTORY_DAYS)
         with self.connect() as conn:
             conn.execute("DELETE FROM query_records WHERE checked_at < ?", (cutoff,))
 

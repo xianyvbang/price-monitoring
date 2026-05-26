@@ -39,6 +39,8 @@ SENSITIVE_FIELD_NAMES = {
     "app_secret_key",
 }
 LOG_VALUE_LIMIT = 2000
+LOG_PAGE_SIZE = 50
+LOG_MAX_PAGE_SIZE = 200
 
 
 @asynccontextmanager
@@ -127,6 +129,43 @@ def redirect_if_needed(request: Request) -> RedirectResponse | None:
 
 def template_context(request: Request, **extra: Any) -> dict[str, Any]:
     return {"request": request, "user": current_user(request), "format_time": format_china_time, **extra}
+
+
+def public_log(row: Any) -> dict[str, Any]:
+    data = row_to_dict(row)
+    data["created_at_formatted"] = format_china_time(data.get("created_at"))
+    return data
+
+
+def log_page_payload(page: int, page_size: int) -> dict[str, Any]:
+    page = max(1, page)
+    page_size = min(max(1, page_size), LOG_MAX_PAGE_SIZE)
+    total = db.count_logs()
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = min(page, total_pages)
+    logs = [public_log(row) for row in db.list_logs(limit=page_size, offset=(page - 1) * page_size)]
+    return {
+        "logs": logs,
+        "pagination": {
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": total_pages,
+            "has_previous": page > 1,
+            "has_next": page < total_pages,
+            "previous_page": max(1, page - 1),
+            "next_page": min(total_pages, page + 1),
+        },
+    }
+
+
+def _positive_query_int(value: Any, default: int) -> int:
+    if value is None or value == "":
+        return default
+    try:
+        return max(1, int(float(value)))
+    except (TypeError, ValueError):
+        return default
 
 
 def should_log_http_request(request: Request) -> bool:
@@ -573,10 +612,14 @@ async def logs_page(request: Request):
     redirect = redirect_if_needed(request)
     if redirect:
         return redirect
+    payload = log_page_payload(
+        _positive_query_int(request.query_params.get("page"), 1),
+        _positive_query_int(request.query_params.get("page_size"), LOG_PAGE_SIZE),
+    )
     return templates.TemplateResponse(
         request,
         "logs.html",
-        template_context(request, logs=[row_to_dict(row) for row in db.list_logs()]),
+        template_context(request, logs=payload["logs"], pagination=payload["pagination"]),
     )
 
 
@@ -693,7 +736,10 @@ async def api_accounts(request: Request):
 @app.get("/api/logs")
 async def api_logs(request: Request):
     require_user(request)
-    return {"logs": [row_to_dict(row) for row in db.list_logs()]}
+    return log_page_payload(
+        _positive_query_int(request.query_params.get("page"), 1),
+        _positive_query_int(request.query_params.get("page_size"), LOG_PAGE_SIZE),
+    )
 
 
 @app.get("/api/accounts/{account_id}/group-rates")
