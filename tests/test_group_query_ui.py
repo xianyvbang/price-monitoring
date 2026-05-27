@@ -37,7 +37,7 @@ def test_group_query_buttons_use_api_fetch(tmp_path, monkeypatch):
     assert dashboard.status_code == 200
     assert accounts.status_code == 200
     assert settings.status_code == 200
-    assert 'data-refresh-interval="30"' in dashboard.text
+    assert 'data-refresh-interval="300"' in dashboard.text
     assert "备注" in dashboard.text
     assert "monitor note" in dashboard.text
     assert "充值路径" in accounts.text

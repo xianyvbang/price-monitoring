@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from app.models import Database, format_china_time
+from app.models import BALANCE_QUERY_INTERVAL_SECONDS, GROUP_RATE_QUERY_INTERVAL_SECONDS, Database, format_china_time
 from app.security import decrypt_value
 
 
@@ -477,7 +477,9 @@ def test_group_rate_records_cascade_delete_and_settings_default(tmp_path):
     db.update_general_settings(2, 30, 5, 600)
     db.delete_account(account_id)
 
-    assert settings["group_rate_query_interval"] == 1200
+    assert settings["query_interval"] == BALANCE_QUERY_INTERVAL_SECONDS
+    assert settings["group_rate_query_interval"] == GROUP_RATE_QUERY_INTERVAL_SECONDS
+    assert db.get_general_settings()["query_interval"] == BALANCE_QUERY_INTERVAL_SECONDS
     assert db.get_general_settings()["group_rate_query_interval"] == 600
     assert db.list_group_rate_records(account_id) == []
 

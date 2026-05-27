@@ -16,6 +16,8 @@ def utc_now() -> str:
 
 CHINA_TZ = timezone(timedelta(hours=8))
 BALANCE_HISTORY_DAYS = 2
+BALANCE_QUERY_INTERVAL_SECONDS = 5 * 60
+GROUP_RATE_QUERY_INTERVAL_SECONDS = 20 * 60
 
 
 def format_china_time(value: Any) -> str:
@@ -161,8 +163,8 @@ class Database:
             self._migrate_accounts_group_rate_changed(conn)
             self._migrate_accounts_eliminated(conn)
             self._set_default(conn, "request_timeout", "15")
-            self._set_default(conn, "query_interval", "30")
-            self._set_default(conn, "group_rate_query_interval", "1200")
+            self._set_default(conn, "query_interval", str(BALANCE_QUERY_INTERVAL_SECONDS))
+            self._set_default(conn, "group_rate_query_interval", str(GROUP_RATE_QUERY_INTERVAL_SECONDS))
             self._set_default(conn, "default_threshold", "5")
             conn.execute(
                 """
@@ -318,8 +320,11 @@ class Database:
         values = {row["key"]: row["value"] for row in rows}
         return {
             "request_timeout": float(values.get("request_timeout", "15")),
-            "query_interval": int(float(values.get("query_interval", "30"))),
-            "group_rate_query_interval": int(float(values.get("group_rate_query_interval", "1200"))),
+            "query_interval": max(
+                BALANCE_QUERY_INTERVAL_SECONDS,
+                int(float(values.get("query_interval", str(BALANCE_QUERY_INTERVAL_SECONDS)))),
+            ),
+            "group_rate_query_interval": int(float(values.get("group_rate_query_interval", str(GROUP_RATE_QUERY_INTERVAL_SECONDS)))),
             "default_threshold": float(values.get("default_threshold", "5")),
         }
 
@@ -328,12 +333,12 @@ class Database:
         request_timeout: float,
         query_interval: int,
         default_threshold: float,
-        group_rate_query_interval: int = 1200,
+        group_rate_query_interval: int = GROUP_RATE_QUERY_INTERVAL_SECONDS,
     ) -> None:
         with self.connect() as conn:
             for key, value in {
                 "request_timeout": str(max(1.0, request_timeout)),
-                "query_interval": str(max(30, query_interval)),
+                "query_interval": str(max(BALANCE_QUERY_INTERVAL_SECONDS, query_interval)),
                 "group_rate_query_interval": str(max(60, group_rate_query_interval)),
                 "default_threshold": str(max(0.0, default_threshold)),
             }.items():

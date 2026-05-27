@@ -848,7 +848,7 @@
   });
   const refreshStatus = document.querySelector("[data-refresh-status]");
   const queryAllButton = document.querySelector("[data-query-all]");
-  const refreshInterval = Math.max(30, Number.parseInt(refreshStatus?.dataset.refreshInterval || "30", 10));
+  const refreshInterval = Math.max(300, Number.parseInt(refreshStatus?.dataset.refreshInterval || "300", 10));
   let refreshRemaining = refreshInterval;
   let refreshInFlight = false;
   let refreshTimer = null;

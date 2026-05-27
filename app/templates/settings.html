@@ -14,7 +14,7 @@
   <form class="panel" method="post" action="/settings/general">
     <h2>查询设置</h2>
     <label>请求超时时间（秒）<input name="request_timeout" type="number" min="1" step="0.5" value="{{ settings.request_timeout }}" required></label>
-    <label>自动查询间隔（秒）<input name="query_interval" type="number" min="30" step="1" value="{{ settings.query_interval }}" required></label>
+    <label>自动查询间隔（秒）<input name="query_interval" type="number" min="300" step="1" value="{{ settings.query_interval }}" required></label>
     <label>自动查询分组倍率间隔（秒）<input name="group_rate_query_interval" type="number" min="60" step="1" value="{{ settings.group_rate_query_interval }}" required></label>
     <label>全局默认低余额阈值<input name="default_threshold" type="number" min="0" step="0.01" value="{{ settings.default_threshold }}" required></label>
     <button class="primary" type="submit">保存查询设置</button>

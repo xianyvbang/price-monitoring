@@ -12,7 +12,7 @@ from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 
 from app.config import get_config, uses_default_app_secret
-from app.models import Database, format_china_time, row_to_dict
+from app.models import BALANCE_QUERY_INTERVAL_SECONDS, GROUP_RATE_QUERY_INTERVAL_SECONDS, Database, format_china_time, row_to_dict
 from app.security import decrypt_value
 from app.security import verify_password
 from app.services.balance import query_newapi_group_options
@@ -640,9 +640,9 @@ async def save_general_settings_form(request: Request):
     form = await request.form()
     db.update_general_settings(
         float(form.get("request_timeout") or 15),
-        int(float(form.get("query_interval") or 30)),
+        int(float(form.get("query_interval") or BALANCE_QUERY_INTERVAL_SECONDS)),
         float(form.get("default_threshold") or 5),
-        int(float(form.get("group_rate_query_interval") or 1200)),
+        int(float(form.get("group_rate_query_interval") or GROUP_RATE_QUERY_INTERVAL_SECONDS)),
     )
     db.add_log("info", "settings", "更新通用设置")
     return RedirectResponse("/settings", status_code=303)
@@ -920,9 +920,9 @@ async def api_general_settings(request: Request):
     payload = await request.json()
     db.update_general_settings(
         float(payload.get("request_timeout", 15)),
-        int(payload.get("query_interval", 30)),
+        int(payload.get("query_interval", BALANCE_QUERY_INTERVAL_SECONDS)),
         float(payload.get("default_threshold", 5)),
-        int(payload.get("group_rate_query_interval", payload.get("groupRateQueryInterval", 1200))),
+        int(payload.get("group_rate_query_interval", payload.get("groupRateQueryInterval", GROUP_RATE_QUERY_INTERVAL_SECONDS))),
     )
     db.add_log("info", "settings", "API 更新通用设置")
     return {"ok": True, "settings": db.get_general_settings()}
