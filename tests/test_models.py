@@ -479,9 +479,30 @@ def test_group_rate_records_cascade_delete_and_settings_default(tmp_path):
 
     assert settings["query_interval"] == BALANCE_QUERY_INTERVAL_SECONDS
     assert settings["group_rate_query_interval"] == GROUP_RATE_QUERY_INTERVAL_SECONDS
+    assert settings["monitor_paused"] is False
     assert db.get_general_settings()["query_interval"] == BALANCE_QUERY_INTERVAL_SECONDS
     assert db.get_general_settings()["group_rate_query_interval"] == 600
+    assert db.get_general_settings()["monitor_paused"] is False
     assert db.list_group_rate_records(account_id) == []
+
+
+def test_monitor_pause_setting_can_be_toggled(tmp_path):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+
+    assert db.get_general_settings()["monitor_paused"] is False
+
+    db.set_monitor_paused(True)
+
+    assert db.get_general_settings()["monitor_paused"] is True
+
+    db.update_general_settings(15, BALANCE_QUERY_INTERVAL_SECONDS, 5, GROUP_RATE_QUERY_INTERVAL_SECONDS)
+
+    assert db.get_general_settings()["monitor_paused"] is True
+
+    db.update_general_settings(15, BALANCE_QUERY_INTERVAL_SECONDS, 5, GROUP_RATE_QUERY_INTERVAL_SECONDS, False)
+
+    assert db.get_general_settings()["monitor_paused"] is False
 
 
 def test_default_accounts_only_seed_on_first_init(tmp_path):

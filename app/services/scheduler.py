@@ -16,6 +16,7 @@ class BalanceScheduler:
         self._task: asyncio.Task[None] | None = None
         self._group_rate_task: asyncio.Task[None] | None = None
         self._stopped = asyncio.Event()
+        self._settings_changed = asyncio.Event()
 
     def start(self) -> None:
         if self._task is None or self._task.done():
@@ -39,20 +40,47 @@ class BalanceScheduler:
     async def _run(self) -> None:
         while not self._stopped.is_set():
             settings = self.db.get_general_settings()
+            if settings["monitor_paused"]:
+                await self._wait_for_resume()
+                continue
             await query_all_accounts(self.db)
-            try:
-                await asyncio.wait_for(self._stopped.wait(), timeout=settings["query_interval"])
-            except asyncio.TimeoutError:
-                pass
+            await self._wait(settings["query_interval"])
 
     async def _run_group_rate_loop(self) -> None:
         while not self._stopped.is_set():
             settings = self.db.get_general_settings()
+            if settings["monitor_paused"]:
+                await self._wait_for_resume()
+                continue
             await query_all_group_rates(self.db, notify=True)
-            try:
-                await asyncio.wait_for(self._stopped.wait(), timeout=settings["group_rate_query_interval"])
-            except asyncio.TimeoutError:
-                pass
+            await self._wait(settings["group_rate_query_interval"])
+
+    def notify_settings_changed(self) -> None:
+        self._settings_changed.set()
+
+    async def _wait_for_resume(self) -> None:
+        while not self._stopped.is_set() and self.db.get_general_settings()["monitor_paused"]:
+            await self._wait(None)
+
+    async def _wait(self, timeout: float | None) -> None:
+        stopped_wait = asyncio.create_task(self._stopped.wait())
+        settings_wait = asyncio.create_task(self._settings_changed.wait())
+        waits = [stopped_wait, settings_wait]
+        try:
+            done, pending = await asyncio.wait(waits, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            for task in pending:
+                with suppress(asyncio.CancelledError):
+                    await task
+            for task in done:
+                task.result()
+            if settings_wait in done:
+                self._settings_changed.clear()
+        finally:
+            for task in waits:
+                if not task.done():
+                    task.cancel()
 
 
 async def query_one_account(db: Database, account_id: int) -> dict:

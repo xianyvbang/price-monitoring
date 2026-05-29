@@ -166,6 +166,7 @@ class Database:
             self._set_default(conn, "query_interval", str(BALANCE_QUERY_INTERVAL_SECONDS))
             self._set_default(conn, "group_rate_query_interval", str(GROUP_RATE_QUERY_INTERVAL_SECONDS))
             self._set_default(conn, "default_threshold", "5")
+            self._set_default(conn, "monitor_paused", "0")
             conn.execute(
                 """
                 INSERT OR IGNORE INTO smtp_settings (id, updated_at)
@@ -326,6 +327,7 @@ class Database:
             ),
             "group_rate_query_interval": int(float(values.get("group_rate_query_interval", str(GROUP_RATE_QUERY_INTERVAL_SECONDS)))),
             "default_threshold": float(values.get("default_threshold", "5")),
+            "monitor_paused": str(values.get("monitor_paused", "0")).strip().lower() in {"1", "true", "yes", "on"},
         }
 
     def update_general_settings(
@@ -334,18 +336,29 @@ class Database:
         query_interval: int,
         default_threshold: float,
         group_rate_query_interval: int = GROUP_RATE_QUERY_INTERVAL_SECONDS,
+        monitor_paused: bool | None = None,
     ) -> None:
         with self.connect() as conn:
-            for key, value in {
+            values = {
                 "request_timeout": str(max(1.0, request_timeout)),
                 "query_interval": str(max(BALANCE_QUERY_INTERVAL_SECONDS, query_interval)),
                 "group_rate_query_interval": str(max(60, group_rate_query_interval)),
                 "default_threshold": str(max(0.0, default_threshold)),
-            }.items():
+            }
+            if monitor_paused is not None:
+                values["monitor_paused"] = "1" if monitor_paused else "0"
+            for key, value in values.items():
                 conn.execute(
                     "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                     (key, value),
                 )
+
+    def set_monitor_paused(self, paused: bool) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES ('monitor_paused', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                ("1" if paused else "0",),
+            )
 
     def get_smtp_settings(self) -> sqlite3.Row:
         with self.connect() as conn:

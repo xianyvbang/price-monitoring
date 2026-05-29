@@ -6,10 +6,23 @@
     <h1>余额仪表盘</h1>
     <p>
       自动查询间隔 {{ settings.query_interval }} 秒，请求超时 {{ settings.request_timeout }} 秒。
-      <span data-refresh-status data-refresh-interval="{{ settings.query_interval }}">下次自动刷新 {{ settings.query_interval }} 秒</span>
+      <span
+        data-refresh-status
+        data-refresh-interval="{{ settings.query_interval }}"
+        data-monitor-paused="{{ 'true' if settings.monitor_paused else 'false' }}"
+      >{{ "自动监控已暂停" if settings.monitor_paused else "下次自动刷新 " ~ settings.query_interval ~ " 秒" }}</span>
     </p>
   </div>
-  <button class="primary" type="button" data-query-all>立即查询全部</button>
+  <div class="page-actions">
+    <button class="primary" type="button" data-query-all>立即查询全部</button>
+    <button
+      class="monitor-toggle {{ 'active' if settings.monitor_paused else '' }}"
+      type="button"
+      data-monitor-toggle
+      data-monitor-paused="{{ 'true' if settings.monitor_paused else 'false' }}"
+      aria-pressed="{{ 'true' if settings.monitor_paused else 'false' }}"
+    >{{ "恢复监控" if settings.monitor_paused else "暂停监控" }}</button>
+  </div>
 </section>
 
 {% for platform, accounts in grouped.items() %}
@@ -848,9 +861,11 @@
   });
   const refreshStatus = document.querySelector("[data-refresh-status]");
   const queryAllButton = document.querySelector("[data-query-all]");
+  const monitorToggleButton = document.querySelector("[data-monitor-toggle]");
   const refreshInterval = Math.max(300, Number.parseInt(refreshStatus?.dataset.refreshInterval || "300", 10));
   let refreshRemaining = refreshInterval;
   let refreshInFlight = false;
+  let monitorPaused = refreshStatus?.dataset.monitorPaused === "true";
   let refreshTimer = null;
   const setRefreshStatus = (text) => {
     if (refreshStatus) {
@@ -858,11 +873,32 @@
     }
   };
   const resetRefreshCountdown = () => {
+    if (monitorPaused) {
+      setRefreshStatus("自动监控已暂停");
+      return;
+    }
     refreshRemaining = refreshInterval;
     setRefreshStatus(`下次自动刷新 ${refreshRemaining} 秒`);
   };
+  const setMonitorPaused = (paused) => {
+    monitorPaused = paused;
+    if (refreshStatus) {
+      refreshStatus.dataset.monitorPaused = paused ? "true" : "false";
+    }
+    if (monitorToggleButton) {
+      monitorToggleButton.dataset.monitorPaused = paused ? "true" : "false";
+      monitorToggleButton.setAttribute("aria-pressed", paused ? "true" : "false");
+      monitorToggleButton.classList.toggle("active", paused);
+      monitorToggleButton.textContent = paused ? "恢复监控" : "暂停监控";
+    }
+    resetRefreshCountdown();
+  };
   const runQueryAll = async (trigger = "manual") => {
     if (refreshInFlight) {
+      return;
+    }
+    if (trigger === "auto" && monitorPaused) {
+      resetRefreshCountdown();
       return;
     }
     refreshInFlight = true;
@@ -894,10 +930,35 @@
   queryAllButton?.addEventListener("click", () => {
     runQueryAll("manual");
   });
+  monitorToggleButton?.addEventListener("click", async () => {
+    const nextPaused = monitorToggleButton.dataset.monitorPaused !== "true";
+    const originalText = monitorToggleButton.textContent;
+    monitorToggleButton.disabled = true;
+    monitorToggleButton.textContent = nextPaused ? "暂停中" : "恢复中";
+    try {
+      const response = await fetch("/api/monitor/pause", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({paused: nextPaused})
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.detail || "操作失败");
+      }
+      setMonitorPaused(Boolean(payload.settings?.monitor_paused ?? nextPaused));
+    } catch (error) {
+      monitorToggleButton.textContent = originalText;
+      monitorToggleButton.title = error.message || "操作失败";
+    } finally {
+      setTimeout(() => {
+        monitorToggleButton.disabled = false;
+      }, 600);
+    }
+  });
   if (refreshStatus) {
     resetRefreshCountdown();
     refreshTimer = setInterval(() => {
-      if (refreshInFlight) {
+      if (refreshInFlight || monitorPaused) {
         return;
       }
       refreshRemaining -= 1;

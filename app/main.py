@@ -576,6 +576,19 @@ async def query_all_form(request: Request):
     return RedirectResponse("/", status_code=303)
 
 
+@app.post("/monitor/pause")
+async def monitor_pause_form(request: Request):
+    redirect = redirect_if_needed(request)
+    if redirect:
+        return redirect
+    form = await request.form()
+    paused = _to_bool(form.get("paused", True))
+    db.set_monitor_paused(paused)
+    scheduler.notify_settings_changed()
+    db.add_log("info", "settings", "暂停自动监控" if paused else "恢复自动监控")
+    return RedirectResponse("/", status_code=303)
+
+
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request):
     redirect = redirect_if_needed(request)
@@ -644,6 +657,7 @@ async def save_general_settings_form(request: Request):
         float(form.get("default_threshold") or 5),
         int(float(form.get("group_rate_query_interval") or GROUP_RATE_QUERY_INTERVAL_SECONDS)),
     )
+    scheduler.notify_settings_changed()
     db.add_log("info", "settings", "更新通用设置")
     return RedirectResponse("/settings", status_code=303)
 
@@ -914,6 +928,17 @@ async def api_query_all(request: Request):
     return {"results": await query_all_accounts(db)}
 
 
+@app.post("/api/monitor/pause")
+async def api_monitor_pause(request: Request):
+    require_user(request)
+    payload = await request.json()
+    paused = _to_bool(payload.get("paused", True)) if isinstance(payload, dict) else True
+    db.set_monitor_paused(paused)
+    scheduler.notify_settings_changed()
+    db.add_log("info", "settings", "API 暂停自动监控" if paused else "API 恢复自动监控")
+    return {"ok": True, "settings": db.get_general_settings()}
+
+
 @app.post("/api/settings/general")
 async def api_general_settings(request: Request):
     require_user(request)
@@ -923,7 +948,9 @@ async def api_general_settings(request: Request):
         int(payload.get("query_interval", BALANCE_QUERY_INTERVAL_SECONDS)),
         float(payload.get("default_threshold", 5)),
         int(payload.get("group_rate_query_interval", payload.get("groupRateQueryInterval", GROUP_RATE_QUERY_INTERVAL_SECONDS))),
+        _optional_bool_payload(payload, "monitor_paused", "monitorPaused"),
     )
+    scheduler.notify_settings_changed()
     db.add_log("info", "settings", "API 更新通用设置")
     return {"ok": True, "settings": db.get_general_settings()}
 
@@ -1110,6 +1137,13 @@ def _to_bool(value: Any) -> bool:
     if value is None:
         return False
     return str(value).strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def _optional_bool_payload(payload: dict[str, Any], *keys: str) -> bool | None:
+    for key in keys:
+        if key in payload:
+            return _to_bool(payload.get(key))
+    return None
 
 
 def _optional_int(value: Any) -> int | None:

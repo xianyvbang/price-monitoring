@@ -1,9 +1,10 @@
 import json
+import asyncio
 
 import pytest
 
 from app.models import Database
-from app.services.scheduler import query_all_group_rates, query_group_rate_for_account
+from app.services.scheduler import BalanceScheduler, query_all_group_rates, query_group_rate_for_account
 
 
 def _sub2api_account(name: str, enabled: bool = True, credentials: bool = True) -> dict:
@@ -202,3 +203,38 @@ async def test_query_all_group_rates_queries_selected_newapi_group(tmp_path, mon
     assert called_new == [new_id]
     assert len(db.list_group_rate_records(new_id)) == 1
     assert any("自动查组跳过: 缺少 accessToken/userId/已选分组" in log["message"] for log in logs)
+
+
+@pytest.mark.asyncio
+async def test_scheduler_skips_automatic_queries_while_monitor_paused(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+    db.set_monitor_paused(True)
+    scheduler = BalanceScheduler(db)
+    balance_calls = []
+    group_calls = []
+
+    async def fake_query_all_accounts(target_db):
+        balance_calls.append(target_db)
+        return []
+
+    async def fake_query_all_group_rates(target_db, notify=True):
+        group_calls.append((target_db, notify))
+        return []
+
+    monkeypatch.setattr("app.services.scheduler.query_all_accounts", fake_query_all_accounts)
+    monkeypatch.setattr("app.services.scheduler.query_all_group_rates", fake_query_all_group_rates)
+
+    scheduler.start()
+    await asyncio.sleep(0.02)
+
+    assert balance_calls == []
+    assert group_calls == []
+
+    db.set_monitor_paused(False)
+    scheduler.notify_settings_changed()
+    await asyncio.sleep(0.02)
+    await scheduler.stop()
+
+    assert len(balance_calls) == 1
+    assert len(group_calls) == 1

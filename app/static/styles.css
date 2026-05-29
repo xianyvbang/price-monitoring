@@ -80,6 +80,14 @@ a {
   margin-bottom: 18px;
 }
 
+.page-actions {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 h1,
 h2 {
   margin: 0;
@@ -343,6 +351,13 @@ th {
   font-weight: 700;
 }
 
+.monitor-toggle.active {
+  background: #fffaeb;
+  border-color: #fdb022;
+  color: var(--warn);
+  font-weight: 700;
+}
+
 .log-message {
   white-space: normal;
 }
@@ -586,6 +601,7 @@ pre {
   }
 
   .page-head .primary,
+  .page-head .monitor-toggle,
   .page-head .button-link,
   .page-head .inline-form,
   .page-head .inline-form button {
@@ -594,6 +610,12 @@ pre {
 
   .page-head .primary {
     margin-top: 0;
+  }
+
+  .page-actions {
+    align-items: stretch;
+    flex-direction: column;
+    width: 100%;
   }
 
   h1 {

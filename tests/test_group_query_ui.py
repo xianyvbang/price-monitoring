@@ -38,6 +38,8 @@ def test_group_query_buttons_use_api_fetch(tmp_path, monkeypatch):
     assert accounts.status_code == 200
     assert settings.status_code == 200
     assert 'data-refresh-interval="300"' in dashboard.text
+    assert 'data-monitor-toggle' in dashboard.text
+    assert "暂停监控" in dashboard.text
     assert "备注" in dashboard.text
     assert "monitor note" in dashboard.text
     assert "充值路径" in accounts.text
@@ -57,6 +59,35 @@ def test_group_query_buttons_use_api_fetch(tmp_path, monkeypatch):
     assert "/api/accounts/${button.dataset.accountId}/group-query" in accounts.text
     assert f"/accounts/{account_id}/group-rates" in dashboard.text
     assert "group_rate_query_interval" in settings.text
+
+
+def test_monitor_pause_api_updates_dashboard(tmp_path, monkeypatch):
+    test_db = Database(str(tmp_path / "app.db"), "test-key")
+    test_db.init()
+    test_db.ensure_admin("admin", "password123")
+    monkeypatch.setattr("app.main.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
+    monkeypatch.setattr("app.main.scheduler.notify_settings_changed", lambda: None)
+
+    async def stop_scheduler():
+        return None
+
+    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+
+    with TestClient(app) as client:
+        client.post("/login", data={"username": "admin", "password": "password123"})
+        response = client.post("/api/monitor/pause", json={"paused": True})
+        dashboard = client.get("/")
+        resume = client.post("/api/monitor/pause", json={"paused": False})
+
+    assert response.status_code == 200
+    assert response.json()["settings"]["monitor_paused"] is True
+    assert dashboard.status_code == 200
+    assert "自动监控已暂停" in dashboard.text
+    assert "恢复监控" in dashboard.text
+    assert resume.status_code == 200
+    assert resume.json()["settings"]["monitor_paused"] is False
 
 
 def test_newapi_group_picker_ui_and_api_routes(tmp_path, monkeypatch):
