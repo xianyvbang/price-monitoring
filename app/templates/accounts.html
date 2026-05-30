@@ -114,7 +114,15 @@
             {% if platform == "newApi" %}accessToken: {{ "已配置" if account.has_access_token else "未配置" }} / userId: {{ "已配置" if account.has_user_id else "未配置" }} / 当前分组: {{ account.selected_group_id or "未选择" }}{% endif %}
           </td>
           <td data-label="阈值">{{ account.threshold if account.threshold is not none else settings.default_threshold }}</td>
-          <td data-label="启用">{{ "是" if account.is_enabled else "否" }}</td>
+          <td data-label="启用">
+            <div class="enable-state-actions">
+              <span class="enable-state {{ 'enabled' if account.is_enabled else 'disabled' }}">{{ "启用" if account.is_enabled else "不启用" }}</span>
+              <form method="post" action="/accounts/{{ account.id }}/enabled">
+                <input type="hidden" name="is_enabled" value="{{ 'false' if account.is_enabled else 'true' }}">
+                <button class="{{ 'danger' if account.is_enabled else '' }}" type="submit">{{ "不启用" if account.is_enabled else "启用" }}</button>
+              </form>
+            </div>
+          </td>
           <td data-label="操作">
             <div class="actions">
               <button

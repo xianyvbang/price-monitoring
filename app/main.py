@@ -380,9 +380,9 @@ def newapi_group_result_from_selection(group_id: str, group: dict[str, Any]) -> 
     return {"is_valid": True, "plan_name": title, "extra": extra}
 
 
-def grouped_accounts(eliminated_last: bool = False) -> dict[str, list[dict[str, Any]]]:
+def grouped_accounts(eliminated_last: bool = False, enabled_only: bool = False) -> dict[str, list[dict[str, Any]]]:
     grouped = {"newApi": [], "sub2Api": []}
-    for row in db.list_accounts():
+    for row in db.list_accounts(enabled_only=enabled_only):
         grouped[row["platform"]].append(public_account(row))
     if eliminated_last:
         for accounts in grouped.values():
@@ -414,7 +414,7 @@ async def dashboard(request: Request):
     return templates.TemplateResponse(
         request,
         "dashboard.html",
-        template_context(request, grouped=grouped_accounts(eliminated_last=True), settings=db.get_general_settings()),
+        template_context(request, grouped=grouped_accounts(eliminated_last=True, enabled_only=True), settings=db.get_general_settings()),
     )
 
 
@@ -543,6 +543,21 @@ async def delete_account_form(request: Request, account_id: int):
     db.delete_account(account_id)
     if account:
         db.add_log("warning", "account", f"删除账号: {account['platform']} / {account['name']}")
+    return RedirectResponse("/accounts", status_code=303)
+
+
+@app.post("/accounts/{account_id}/enabled")
+async def set_account_enabled_form(request: Request, account_id: int):
+    redirect = redirect_if_needed(request)
+    if redirect:
+        return redirect
+    account = db.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    form = await request.form()
+    is_enabled = _to_bool(form.get("is_enabled"))
+    db.update_account_enabled(account_id, is_enabled)
+    db.add_log("info", "account", f"{account['platform']} / {account['name']} 启用状态: {'启用' if is_enabled else '不启用'}")
     return RedirectResponse("/accounts", status_code=303)
 
 

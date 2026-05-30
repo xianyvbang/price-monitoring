@@ -339,6 +339,34 @@ th {
   padding: 4px 8px;
 }
 
+.enable-state-actions {
+  align-items: center;
+  display: inline-flex;
+  gap: 8px;
+}
+
+.enable-state-actions form {
+  margin: 0;
+}
+
+.enable-state {
+  border-radius: 999px;
+  display: inline-block;
+  font-size: 12px;
+  padding: 3px 8px;
+}
+
+.enable-state.enabled {
+  background: #ecfdf3;
+  color: var(--ok);
+}
+
+.enable-state.disabled {
+  background: #fef3f2;
+  color: var(--danger);
+  font-weight: 700;
+}
+
 .toggle-button {
   min-width: 76px;
   padding-inline: 10px;
@@ -777,6 +805,16 @@ pre {
   .change-status-actions {
     align-items: flex-start;
     flex-wrap: wrap;
+  }
+
+  .enable-state-actions {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+
+  .enable-state-actions form,
+  .enable-state-actions button {
+    width: 100%;
   }
 
   .change-status-reset {

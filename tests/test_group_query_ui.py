@@ -258,6 +258,69 @@ def test_dashboard_orders_eliminated_accounts_last(tmp_path, monkeypatch):
     assert dashboard.text.index("b-active-row") < dashboard.text.index("a-eliminated-row")
 
 
+def test_disabled_accounts_hide_from_dashboard_and_toggle_from_accounts(tmp_path, monkeypatch):
+    test_db = Database(str(tmp_path / "app.db"), "test-key")
+    test_db.init()
+    test_db.ensure_admin("admin", "password123")
+    for account in test_db.list_accounts():
+        test_db.delete_account(account["id"])
+    enabled_id = test_db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "enabled-row",
+            "base_url": "https://enabled.example",
+            "api_key": "secret",
+        }
+    )
+    disabled_id = test_db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "disabled-row",
+            "base_url": "https://disabled.example",
+            "api_key": "secret",
+            "is_enabled": False,
+        }
+    )
+    monkeypatch.setattr("app.main.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
+
+    async def stop_scheduler():
+        return None
+
+    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+
+    with TestClient(app) as client:
+        client.post("/login", data={"username": "admin", "password": "password123"})
+        dashboard = client.get("/")
+        accounts = client.get("/accounts")
+        disable_response = client.post(
+            f"/accounts/{enabled_id}/enabled",
+            data={"is_enabled": "false"},
+            follow_redirects=False,
+        )
+        enable_response = client.post(
+            f"/accounts/{disabled_id}/enabled",
+            data={"is_enabled": "true"},
+            follow_redirects=False,
+        )
+        dashboard_after_toggle = client.get("/")
+
+    assert dashboard.status_code == 200
+    assert accounts.status_code == 200
+    assert "enabled-row" in dashboard.text
+    assert "disabled-row" not in dashboard.text
+    assert "disabled-row" in accounts.text
+    assert f'action="/accounts/{disabled_id}/enabled"' in accounts.text
+    assert 'class="enable-state disabled"' in accounts.text
+    assert disable_response.status_code == 303
+    assert enable_response.status_code == 303
+    assert test_db.get_account(enabled_id)["is_enabled"] == 0
+    assert test_db.get_account(disabled_id)["is_enabled"] == 1
+    assert "enabled-row" not in dashboard_after_toggle.text
+    assert "disabled-row" in dashboard_after_toggle.text
+
+
 def test_group_rate_change_status_reset_api(tmp_path, monkeypatch):
     test_db = Database(str(tmp_path / "app.db"), "test-key")
     test_db.init()

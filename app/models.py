@@ -392,15 +392,20 @@ class Database:
                 (host, port, username, password_enc, sender, sender_name, receiver, security or None, utc_now()),
             )
 
-    def list_accounts(self, platform: Optional[str] = None) -> list[sqlite3.Row]:
+    def list_accounts(self, platform: Optional[str] = None, enabled_only: bool = False) -> list[sqlite3.Row]:
         query = "SELECT * FROM accounts"
-        params: tuple[Any, ...] = ()
+        conditions = []
+        params: list[Any] = []
         if platform:
-            query += " WHERE platform = ?"
-            params = (platform,)
+            conditions.append("platform = ?")
+            params.append(platform)
+        if enabled_only:
+            conditions.append("is_enabled = 1")
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY platform, name"
         with self.connect() as conn:
-            return conn.execute(query, params).fetchall()
+            return conn.execute(query, tuple(params)).fetchall()
 
     def get_account(self, account_id: int) -> Optional[sqlite3.Row]:
         with self.connect() as conn:
@@ -627,6 +632,18 @@ class Database:
                 WHERE id = ?
                 """,
                 (1 if changed else 0, utc_now(), account_id),
+            )
+
+    def update_account_enabled(self, account_id: int, is_enabled: bool) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE accounts
+                SET is_enabled = ?, low_balance_active = CASE WHEN ? THEN 0 ELSE low_balance_active END,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (1 if is_enabled else 0, 0 if is_enabled else 1, utc_now(), account_id),
             )
 
     def update_account_eliminated(self, account_id: int, is_eliminated: bool) -> None:
