@@ -1,10 +1,11 @@
 import json
 import asyncio
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from app.models import Database
-from app.services.scheduler import BalanceScheduler, query_all_group_rates, query_group_rate_for_account
+from app.services.scheduler import BalanceScheduler, query_all_group_rates, query_group_rate_for_account, query_one_account
 
 
 def _sub2api_account(name: str, enabled: bool = True, credentials: bool = True) -> dict:
@@ -56,6 +57,29 @@ def _group_result(plan_name: str, rate: float) -> dict:
         ensure_ascii=False,
     )
     return {"is_valid": True, "plan_name": f"{plan_name} 倍率 {rate}", "extra": extra}
+
+
+@pytest.mark.asyncio
+async def test_query_one_account_returns_today_consumption(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+    account_id = db.upsert_account(_sub2api_account("sub-balance"))
+    china_tz = timezone(timedelta(hours=8))
+    today_start = datetime.now(china_tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    first = (today_start + timedelta(hours=1)).astimezone(timezone.utc).isoformat(timespec="seconds")
+    second = (today_start + timedelta(hours=2)).astimezone(timezone.utc).isoformat(timespec="seconds")
+    db.update_account_result(account_id, {"is_valid": True, "remaining": 20, "unit": "USD", "checked_at": first})
+
+    async def fake_query(account, secret_key, timeout, log):
+        return {"is_valid": True, "remaining": 17.25, "unit": "USD"}
+
+    monkeypatch.setattr("app.services.scheduler.query_account", fake_query)
+    monkeypatch.setattr("app.services.scheduler.utc_now", lambda: second)
+
+    result = await query_one_account(db, account_id)
+
+    assert result["today_consumption"] == 2.75
+    assert result["todayConsumption"] == 2.75
 
 
 @pytest.mark.asyncio

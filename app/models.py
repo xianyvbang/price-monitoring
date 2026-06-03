@@ -776,6 +776,34 @@ class Database:
                 (account_id, cutoff),
             ).fetchall()
 
+    def get_today_consumption(self, account_id: int) -> Optional[float]:
+        self.cleanup_balance_history()
+        today_start = _today_start_utc()
+        with self.connect() as conn:
+            records = conn.execute(
+                """
+                SELECT remaining
+                FROM query_records
+                WHERE account_id = ?
+                    AND is_valid = 1
+                    AND remaining IS NOT NULL
+                    AND checked_at >= ?
+                ORDER BY checked_at ASC, id ASC
+                """,
+                (account_id, today_start),
+            ).fetchall()
+        if not records:
+            return None
+
+        previous = float(records[0]["remaining"])
+        consumed = 0.0
+        for record in records[1:]:
+            current = float(record["remaining"])
+            if current < previous:
+                consumed += previous - current
+            previous = current
+        return round(consumed, 6)
+
     def clear_balance_history(self, account_id: int) -> None:
         with self.connect() as conn:
             conn.execute("DELETE FROM query_records WHERE account_id = ?", (account_id,))
@@ -863,6 +891,11 @@ def _json_dumps(value: Any) -> str:
 
 def _days_ago(days: int) -> str:
     return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
+
+
+def _today_start_utc() -> str:
+    today_start_china = datetime.now(CHINA_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+    return today_start_china.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
 def _replace_name_rate_suffix(name: str, rate: float) -> str:

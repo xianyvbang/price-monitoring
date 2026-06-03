@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -215,6 +217,44 @@ def test_dashboard_shows_group_rate_column(tmp_path, monkeypatch):
     assert 'change-status changed' in dashboard.text
     assert "Basic Plan: 0.8" in dashboard.text
     assert "Pro Plan: 2.0" in dashboard.text
+
+
+def test_dashboard_shows_today_consumption_column(tmp_path, monkeypatch):
+    test_db = Database(str(tmp_path / "app.db"), "test-key")
+    test_db.init()
+    test_db.ensure_admin("admin", "password123")
+    account_id = test_db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "sub-consumption",
+            "base_url": "https://sub.example",
+            "api_key": "secret",
+        }
+    )
+    china_tz = timezone(timedelta(hours=8))
+    today_start = datetime.now(china_tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    first = (today_start + timedelta(hours=1)).astimezone(timezone.utc).isoformat(timespec="seconds")
+    second = (today_start + timedelta(hours=2)).astimezone(timezone.utc).isoformat(timespec="seconds")
+    third = (today_start + timedelta(hours=3)).astimezone(timezone.utc).isoformat(timespec="seconds")
+    test_db.update_account_result(account_id, {"is_valid": True, "remaining": 50, "unit": "USD", "checked_at": first})
+    test_db.update_account_result(account_id, {"is_valid": True, "remaining": 44.5, "unit": "USD", "checked_at": second})
+    test_db.update_account_result(account_id, {"is_valid": True, "remaining": 48, "unit": "USD", "checked_at": third})
+    monkeypatch.setattr("app.main.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
+
+    async def stop_scheduler():
+        return None
+
+    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+
+    with TestClient(app) as client:
+        client.post("/login", data={"username": "admin", "password": "password123"})
+        dashboard = client.get("/")
+
+    assert dashboard.status_code == 200
+    assert "今日消耗" in dashboard.text
+    assert "5.5 USD" in dashboard.text
 
 
 def test_dashboard_orders_eliminated_accounts_last(tmp_path, monkeypatch):

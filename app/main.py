@@ -288,6 +288,7 @@ def public_account(row: Any) -> dict[str, Any]:
     data["has_access_token"] = bool(data.pop("access_token_enc", None))
     data["has_user_id"] = bool(data.pop("user_id_enc", None))
     data["group_rates"] = group_rates_from_extra(data.get("last_extra"))
+    data["today_consumption"] = db.get_today_consumption(int(data["id"]))
     if data["platform"] == "newApi" and selected_group_id and not data["group_rates"]:
         data["group_rates"] = [{"plan_name": f"当前分组 {selected_group_id}", "rate_multiplier": None}]
     return data

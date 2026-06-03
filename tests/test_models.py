@@ -351,6 +351,36 @@ def test_balance_history_can_be_cleared_for_one_account(tmp_path):
     assert len(db.list_balance_history(second_account_id)) == 1
 
 
+def test_today_consumption_counts_today_decreases_and_ignores_recharges(tmp_path):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+    account_id = db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "sub-today-consumption",
+            "base_url": "https://example.com",
+            "email": "user@example.com",
+            "password": "login-password",
+            "api_key": "sk-test",
+        }
+    )
+    china_tz = timezone(timedelta(hours=8))
+    today_start = datetime.now(china_tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    yesterday = (today_start - timedelta(minutes=1)).astimezone(timezone.utc).isoformat(timespec="seconds")
+    today_1 = (today_start + timedelta(hours=1)).astimezone(timezone.utc).isoformat(timespec="seconds")
+    today_2 = (today_start + timedelta(hours=2)).astimezone(timezone.utc).isoformat(timespec="seconds")
+    today_3 = (today_start + timedelta(hours=3)).astimezone(timezone.utc).isoformat(timespec="seconds")
+    today_4 = (today_start + timedelta(hours=4)).astimezone(timezone.utc).isoformat(timespec="seconds")
+
+    db.update_account_result(account_id, {"is_valid": True, "remaining": 200, "checked_at": yesterday})
+    db.update_account_result(account_id, {"is_valid": True, "remaining": 100, "checked_at": today_1})
+    db.update_account_result(account_id, {"is_valid": True, "remaining": 92.5, "checked_at": today_2})
+    db.update_account_result(account_id, {"is_valid": True, "remaining": 110, "checked_at": today_3})
+    db.update_account_result(account_id, {"is_valid": True, "remaining": 104.25, "checked_at": today_4})
+
+    assert db.get_today_consumption(account_id) == 13.25
+
+
 def test_group_rate_records_only_insert_on_change(tmp_path):
     db = Database(str(tmp_path / "app.db"), "test-key")
     db.init()

@@ -43,6 +43,7 @@
           <th>倍率变化</th>
           {% endif %}
           <th>剩余</th>
+          <th>今日消耗</th>
           {% if platform != "sub2Api" %}
           <th>已用</th>
           <th>总额</th>
@@ -88,6 +89,7 @@
           </td>
           {% endif %}
           <td data-account-remaining data-account-remaining-value="{{ account.last_remaining if account.last_remaining is not none else '' }}" data-label="剩余">{{ account.last_remaining if account.last_remaining is not none else "-" }} {{ account.last_unit or "" }}</td>
+          <td data-account-today-consumption data-label="今日消耗">{{ account.today_consumption if account.today_consumption is not none else "-" }}{% if account.today_consumption is not none and account.last_unit %} {{ account.last_unit }}{% endif %}</td>
           {% if platform != "sub2Api" %}
           <td data-account-used data-label="已用">{{ account.last_used if account.last_used is not none else "-" }}</td>
           <td data-account-total data-label="总额">{{ account.last_total if account.last_total is not none else "-" }}</td>
@@ -135,11 +137,11 @@
         </tr>
         {% if account.last_error %}
         <tr class="detail-row">
-          <td colspan="{{ 11 if platform == 'sub2Api' else 13 if platform == 'newApi' else 12 }}">{{ account.last_error }}</td>
+          <td colspan="{{ 12 if platform == 'sub2Api' else 14 if platform == 'newApi' else 13 }}">{{ account.last_error }}</td>
         </tr>
         {% endif %}
         {% else %}
-        <tr class="empty-row"><td colspan="{{ 11 if platform == 'sub2Api' else 13 if platform == 'newApi' else 12 }}" class="empty">暂无账号</td></tr>
+        <tr class="empty-row"><td colspan="{{ 12 if platform == 'sub2Api' else 14 if platform == 'newApi' else 13 }}" class="empty">暂无账号</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -200,11 +202,11 @@
     const byType = Object.fromEntries(parts.map((part) => [part.type, part.value]));
     return `${byType.year}-${byType.month}-${byType.day} ${byType.hour}:${byType.minute}:${byType.second}`;
   };
-  const formatRemaining = (result) => {
-    const remaining = formatValue(result.remaining);
-    const unit = result.unit || "";
-    return unit && remaining !== "-" ? `${remaining} ${unit}` : remaining;
+  const formatAmountWithUnit = (value, unit = "") => {
+    const amount = formatValue(value);
+    return unit && amount !== "-" ? `${amount} ${unit}` : amount;
   };
+  const formatRemaining = (result) => formatAmountWithUnit(result.remaining, result.unit || "");
   const groupRatesFromResult = (result) => {
     if (!result || !result.extra) {
       return [];
@@ -696,6 +698,7 @@
     const status = row.querySelector("[data-account-status]");
     const plan = row.querySelector("[data-account-plan]");
     const remaining = row.querySelector("[data-account-remaining]");
+    const todayConsumption = row.querySelector("[data-account-today-consumption]");
     const used = row.querySelector("[data-account-used]");
     const total = row.querySelector("[data-account-total]");
     const low = row.querySelector("[data-account-low]");
@@ -711,6 +714,9 @@
     if (remaining) {
       remaining.textContent = formatRemaining(result);
       remaining.dataset.accountRemainingValue = result.remaining ?? "";
+    }
+    if (todayConsumption) {
+      todayConsumption.textContent = formatAmountWithUnit(result.today_consumption ?? result.todayConsumption, result.unit || "");
     }
     if (used) {
       used.textContent = formatValue(result.used);
