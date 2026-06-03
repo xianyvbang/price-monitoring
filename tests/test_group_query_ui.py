@@ -298,7 +298,7 @@ def test_dashboard_orders_eliminated_accounts_last(tmp_path, monkeypatch):
     assert dashboard.text.index("b-active-row") < dashboard.text.index("a-eliminated-row")
 
 
-def test_disabled_accounts_hide_from_dashboard_and_toggle_from_accounts(tmp_path, monkeypatch):
+def test_account_visibility_and_enabled_controls_are_separate(tmp_path, monkeypatch):
     test_db = Database(str(tmp_path / "app.db"), "test-key")
     test_db.init()
     test_db.ensure_admin("admin", "password123")
@@ -321,6 +321,15 @@ def test_disabled_accounts_hide_from_dashboard_and_toggle_from_accounts(tmp_path
             "is_enabled": False,
         }
     )
+    hidden_id = test_db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "hidden-row",
+            "base_url": "https://hidden.example",
+            "api_key": "secret",
+            "is_visible": False,
+        }
+    )
     monkeypatch.setattr("app.main.db", test_db)
     monkeypatch.setattr("app.main.scheduler.db", test_db)
     monkeypatch.setattr("app.main.scheduler.start", lambda: None)
@@ -339,9 +348,20 @@ def test_disabled_accounts_hide_from_dashboard_and_toggle_from_accounts(tmp_path
             data={"is_enabled": "false"},
             follow_redirects=False,
         )
+        dashboard_after_disable = client.get("/")
+        hide_response = client.post(
+            f"/accounts/{enabled_id}/visible",
+            data={"is_visible": "false"},
+            follow_redirects=False,
+        )
         enable_response = client.post(
             f"/accounts/{disabled_id}/enabled",
             data={"is_enabled": "true"},
+            follow_redirects=False,
+        )
+        show_response = client.post(
+            f"/accounts/{hidden_id}/visible",
+            data={"is_visible": "true"},
             follow_redirects=False,
         )
         dashboard_after_toggle = client.get("/")
@@ -349,16 +369,26 @@ def test_disabled_accounts_hide_from_dashboard_and_toggle_from_accounts(tmp_path
     assert dashboard.status_code == 200
     assert accounts.status_code == 200
     assert "enabled-row" in dashboard.text
-    assert "disabled-row" not in dashboard.text
+    assert "disabled-row" in dashboard.text
+    assert "hidden-row" not in dashboard.text
     assert "disabled-row" in accounts.text
+    assert "hidden-row" in accounts.text
     assert f'action="/accounts/{disabled_id}/enabled"' in accounts.text
+    assert f'action="/accounts/{hidden_id}/visible"' in accounts.text
     assert 'class="enable-state disabled"' in accounts.text
     assert disable_response.status_code == 303
+    assert hide_response.status_code == 303
     assert enable_response.status_code == 303
+    assert show_response.status_code == 303
     assert test_db.get_account(enabled_id)["is_enabled"] == 0
+    assert test_db.get_account(enabled_id)["is_visible"] == 0
     assert test_db.get_account(disabled_id)["is_enabled"] == 1
+    assert test_db.get_account(hidden_id)["is_visible"] == 1
+    assert test_db.get_account(hidden_id)["is_enabled"] == 0
+    assert "enabled-row" in dashboard_after_disable.text
     assert "enabled-row" not in dashboard_after_toggle.text
     assert "disabled-row" in dashboard_after_toggle.text
+    assert "hidden-row" in dashboard_after_toggle.text
 
 
 def test_group_rate_change_status_reset_api(tmp_path, monkeypatch):

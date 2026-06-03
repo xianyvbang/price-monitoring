@@ -5,16 +5,17 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.models import Database
-from app.services.scheduler import BalanceScheduler, query_all_group_rates, query_group_rate_for_account, query_one_account
+from app.services.scheduler import BalanceScheduler, query_all_accounts, query_all_group_rates, query_group_rate_for_account, query_one_account
 
 
-def _sub2api_account(name: str, enabled: bool = True, credentials: bool = True) -> dict:
+def _sub2api_account(name: str, enabled: bool = True, visible: bool = True, credentials: bool = True) -> dict:
     data = {
         "platform": "sub2Api",
         "name": name,
         "base_url": "https://sub.example",
         "api_key": "sk-test",
         "is_enabled": enabled,
+        "is_visible": visible,
     }
     if credentials:
         data.update({"email": "user@example.com", "password": "password"})
@@ -171,6 +172,7 @@ async def test_query_all_group_rates_only_queries_enabled_sub2api_with_credentia
     db.init()
     enabled_id = db.upsert_account(_sub2api_account("enabled"))
     db.upsert_account(_sub2api_account("disabled", enabled=False))
+    db.upsert_account(_sub2api_account("hidden", visible=False))
     db.upsert_account(_sub2api_account("missing-creds", credentials=False))
     db.upsert_account(
         {
@@ -196,6 +198,29 @@ async def test_query_all_group_rates_only_queries_enabled_sub2api_with_credentia
     assert called == [enabled_id]
     assert len(db.list_group_rate_records(enabled_id)) == 1
     assert any("自动查组跳过: 缺少 apiKey/email/password" in log["message"] for log in logs)
+
+
+@pytest.mark.asyncio
+async def test_query_all_accounts_only_queries_visible_enabled_accounts(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+    for account in db.list_accounts():
+        db.delete_account(account["id"])
+    enabled_id = db.upsert_account(_sub2api_account("enabled"))
+    db.upsert_account(_sub2api_account("disabled", enabled=False))
+    db.upsert_account(_sub2api_account("hidden", visible=False))
+    called = []
+
+    async def fake_query(account, secret_key, timeout, log):
+        called.append(account["id"])
+        return {"is_valid": True, "remaining": 10, "unit": "USD"}
+
+    monkeypatch.setattr("app.services.scheduler.query_account", fake_query)
+
+    results = await query_all_accounts(db)
+
+    assert [result["is_valid"] for result in results] == [True]
+    assert called == [enabled_id]
 
 
 @pytest.mark.asyncio

@@ -182,9 +182,7 @@ async def query_group_rate_for_account(db: Database, account_id: int, notify: bo
 
 async def query_all_group_rates(db: Database, notify: bool = True) -> list[dict]:
     results = []
-    for account in db.list_accounts():
-        if not account["is_enabled"]:
-            continue
+    for account in db.list_accounts(enabled_only=True, visible_only=True):
         if account["platform"] == "sub2Api" and (not account["api_key_enc"] or not account["email_enc"] or not account["password_enc"]):
             db.add_log("warning", "query", f"{account['platform']} / {account['name']} 自动查组跳过: 缺少 apiKey/email/password")
             continue
@@ -199,9 +197,8 @@ async def query_all_group_rates(db: Database, notify: bool = True) -> list[dict]
 
 async def query_all_accounts(db: Database) -> list[dict]:
     results = []
-    for account in db.list_accounts():
-        if account["is_enabled"]:
-            results.append(await query_one_account(db, account["id"]))
+    for account in db.list_accounts(enabled_only=True, visible_only=True):
+        results.append(await query_one_account(db, account["id"]))
     return results
 
 

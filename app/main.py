@@ -277,6 +277,7 @@ async def _body_iterator(body: bytes):
 
 def public_account(row: Any) -> dict[str, Any]:
     data = row_to_dict(row)
+    data["is_visible"] = bool(data.get("is_visible", True))
     data["is_eliminated"] = bool(data.get("is_eliminated"))
     key_id_enc = data.pop("key_id_enc", None)
     data["has_key_id"] = bool(key_id_enc)
@@ -381,9 +382,13 @@ def newapi_group_result_from_selection(group_id: str, group: dict[str, Any]) -> 
     return {"is_valid": True, "plan_name": title, "extra": extra}
 
 
-def grouped_accounts(eliminated_last: bool = False, enabled_only: bool = False) -> dict[str, list[dict[str, Any]]]:
+def grouped_accounts(
+    eliminated_last: bool = False,
+    enabled_only: bool = False,
+    visible_only: bool = False,
+) -> dict[str, list[dict[str, Any]]]:
     grouped = {"newApi": [], "sub2Api": []}
-    for row in db.list_accounts(enabled_only=enabled_only):
+    for row in db.list_accounts(enabled_only=enabled_only, visible_only=visible_only):
         grouped[row["platform"]].append(public_account(row))
     if eliminated_last:
         for accounts in grouped.values():
@@ -415,7 +420,7 @@ async def dashboard(request: Request):
     return templates.TemplateResponse(
         request,
         "dashboard.html",
-        template_context(request, grouped=grouped_accounts(eliminated_last=True, enabled_only=True), settings=db.get_general_settings()),
+        template_context(request, grouped=grouped_accounts(eliminated_last=True, visible_only=True), settings=db.get_general_settings()),
     )
 
 
@@ -558,7 +563,24 @@ async def set_account_enabled_form(request: Request, account_id: int):
     form = await request.form()
     is_enabled = _to_bool(form.get("is_enabled"))
     db.update_account_enabled(account_id, is_enabled)
-    db.add_log("info", "account", f"{account['platform']} / {account['name']} 启用状态: {'启用' if is_enabled else '不启用'}")
+    updated = db.get_account(account_id)
+    effective_enabled = bool(updated and updated["is_enabled"])
+    db.add_log("info", "account", f"{account['platform']} / {account['name']} 自动查询: {'启用' if effective_enabled else '不启用'}")
+    return RedirectResponse("/accounts", status_code=303)
+
+
+@app.post("/accounts/{account_id}/visible")
+async def set_account_visible_form(request: Request, account_id: int):
+    redirect = redirect_if_needed(request)
+    if redirect:
+        return redirect
+    account = db.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    form = await request.form()
+    is_visible = _to_bool(form.get("is_visible"))
+    db.update_account_visible(account_id, is_visible)
+    db.add_log("info", "account", f"{account['platform']} / {account['name']} 仪表盘显示: {'显示' if is_visible else '隐藏'}")
     return RedirectResponse("/accounts", status_code=303)
 
 
@@ -849,6 +871,49 @@ async def api_account_eliminated(request: Request, account_id: int):
     return {"ok": True, "account": public_account(updated)}
 
 
+@app.post("/api/accounts/{account_id}/enabled")
+async def api_account_enabled(request: Request, account_id: int):
+    require_user(request)
+    account = db.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    payload = await request.json()
+    is_enabled = False
+    if isinstance(payload, dict):
+        if "is_enabled" in payload:
+            is_enabled = _to_bool(payload.get("is_enabled"))
+        elif "isEnabled" in payload:
+            is_enabled = _to_bool(payload.get("isEnabled"))
+        elif "enabled" in payload:
+            is_enabled = _to_bool(payload.get("enabled"))
+    db.update_account_enabled(account_id, is_enabled)
+    updated = db.get_account(account_id)
+    effective_enabled = bool(updated and updated["is_enabled"])
+    db.add_log("info", "account", f"{account['platform']} / {account['name']} 自动查询: {'启用' if effective_enabled else '不启用'}")
+    return {"ok": True, "account": public_account(updated)}
+
+
+@app.post("/api/accounts/{account_id}/visible")
+async def api_account_visible(request: Request, account_id: int):
+    require_user(request)
+    account = db.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    payload = await request.json()
+    is_visible = False
+    if isinstance(payload, dict):
+        if "is_visible" in payload:
+            is_visible = _to_bool(payload.get("is_visible"))
+        elif "isVisible" in payload:
+            is_visible = _to_bool(payload.get("isVisible"))
+        elif "visible" in payload:
+            is_visible = _to_bool(payload.get("visible"))
+    db.update_account_visible(account_id, is_visible)
+    updated = db.get_account(account_id)
+    db.add_log("info", "account", f"{account['platform']} / {account['name']} 仪表盘显示: {'显示' if is_visible else '隐藏'}")
+    return {"ok": True, "account": public_account(updated)}
+
+
 @app.post("/api/accounts")
 async def api_create_account(request: Request):
     require_user(request)
@@ -1017,6 +1082,7 @@ def _account_from_form(form: Any) -> dict[str, Any]:
             "user_id": form.get("user_id"),
             "threshold": form.get("threshold"),
             "is_enabled": form.get("is_enabled") == "on",
+            "is_visible": form.get("is_visible") == "on",
         }
     )
 
@@ -1036,7 +1102,7 @@ def _account_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
         is_eliminated = _to_bool(payload.get("isEliminated"))
     elif "eliminated" in payload:
         is_eliminated = _to_bool(payload.get("eliminated"))
-    return {
+    account_data = {
         "platform": platform,
         "name": name,
         "base_url": base_url,
@@ -1049,9 +1115,13 @@ def _account_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "access_token": payload.get("access_token") or payload.get("accessToken"),
         "user_id": payload.get("user_id") or payload.get("userId"),
         "threshold": payload.get("threshold"),
-        "is_enabled": _to_bool(payload.get("is_enabled", payload.get("isEnabled", True))),
         "is_eliminated": is_eliminated,
     }
+    if "is_enabled" in payload or "isEnabled" in payload or "enabled" in payload:
+        account_data["is_enabled"] = _to_bool(payload.get("is_enabled", payload.get("isEnabled", payload.get("enabled"))))
+    if "is_visible" in payload or "isVisible" in payload or "visible" in payload:
+        account_data["is_visible"] = _to_bool(payload.get("is_visible", payload.get("isVisible", payload.get("visible"))))
+    return account_data
 
 
 def import_bulk_accounts(platform: str, bulk_text: str) -> int:

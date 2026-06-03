@@ -29,6 +29,7 @@
     data-initial-user-id="{{ edit_account.user_id if edit_account else '' }}"
     data-initial-threshold="{{ edit_account.threshold if edit_account.threshold is not none else '' }}"
     data-initial-is-enabled="{{ 'true' if edit_account.is_enabled else 'false' }}"
+    data-initial-is-visible="{{ 'true' if edit_account.is_visible else 'false' }}"
     {% endif %}
   >
     <h2 data-form-title>{{ "编辑账号" if edit_account else "新增账号" }}</h2>
@@ -52,6 +53,7 @@
     <label data-platform-field="newApi">newApi accessToken<input name="access_token" type="password" autocomplete="off"></label>
     <label data-platform-field="newApi">newApi userId<input name="user_id" autocomplete="off"></label>
     <label>预警阈值<input name="threshold" type="number" min="0" step="0.01"></label>
+    <label class="check"><input name="is_visible" type="checkbox" checked> 显示在仪表盘</label>
     <label class="check"><input name="is_enabled" type="checkbox" checked> 启用自动查询</label>
     <div class="button-row">
       <button class="primary" type="submit" data-submit-label>保存账号</button>
@@ -92,7 +94,8 @@
           <th>充值路径</th>
           <th>凭据</th>
           <th>阈值</th>
-          <th>启用</th>
+          <th>仪表盘显示</th>
+          <th>自动查询</th>
           <th>操作</th>
         </tr>
       </thead>
@@ -114,12 +117,21 @@
             {% if platform == "newApi" %}accessToken: {{ "已配置" if account.has_access_token else "未配置" }} / userId: {{ "已配置" if account.has_user_id else "未配置" }} / 当前分组: {{ account.selected_group_id or "未选择" }}{% endif %}
           </td>
           <td data-label="阈值">{{ account.threshold if account.threshold is not none else settings.default_threshold }}</td>
-          <td data-label="启用">
+          <td data-label="仪表盘显示">
             <div class="enable-state-actions">
-              <span class="enable-state {{ 'enabled' if account.is_enabled else 'disabled' }}">{{ "启用" if account.is_enabled else "不启用" }}</span>
+              <span class="enable-state {{ 'enabled' if account.is_visible else 'disabled' }}">{{ "显示" if account.is_visible else "隐藏" }}</span>
+              <form method="post" action="/accounts/{{ account.id }}/visible">
+                <input type="hidden" name="is_visible" value="{{ 'false' if account.is_visible else 'true' }}">
+                <button class="{{ 'danger' if account.is_visible else '' }}" type="submit">{{ "隐藏" if account.is_visible else "显示" }}</button>
+              </form>
+            </div>
+          </td>
+          <td data-label="自动查询">
+            <div class="enable-state-actions">
+              <span class="enable-state {{ 'enabled' if account.is_enabled else 'disabled' }}">{{ "启用" if account.is_enabled else "暂停" }}</span>
               <form method="post" action="/accounts/{{ account.id }}/enabled">
                 <input type="hidden" name="is_enabled" value="{{ 'false' if account.is_enabled else 'true' }}">
-                <button class="{{ 'danger' if account.is_enabled else '' }}" type="submit">{{ "不启用" if account.is_enabled else "启用" }}</button>
+                <button class="{{ 'danger' if account.is_enabled else '' }}" type="submit" {% if not account.is_visible and not account.is_enabled %}disabled title="隐藏时不会自动查询"{% endif %}>{{ "暂停" if account.is_enabled else "启用" }}</button>
               </form>
             </div>
           </td>
@@ -140,6 +152,7 @@
                 data-user-id="{{ account.user_id if account.user_id is defined else '' }}"
                 data-threshold="{{ account.threshold if account.threshold is not none else '' }}"
                 data-is-enabled="{{ 'true' if account.is_enabled else 'false' }}"
+                data-is-visible="{{ 'true' if account.is_visible else 'false' }}"
               >编辑</button>
               {% if platform == "sub2Api" %}
               <button type="button" data-group-query data-account-id="{{ account.id }}">查组</button>
@@ -154,7 +167,7 @@
           </td>
         </tr>
         {% else %}
-        <tr class="empty-row"><td colspan="8" class="empty">暂无账号</td></tr>
+        <tr class="empty-row"><td colspan="9" class="empty">暂无账号</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -269,6 +282,13 @@
     const setSubmitLabel = () => {
       submitLabel.textContent = accountId.value ? "保存修改" : "保存账号";
     };
+    const syncVisibilityControls = () => {
+      const isVisible = form.elements.is_visible.checked;
+      if (!isVisible) {
+        form.elements.is_enabled.checked = false;
+      }
+      form.elements.is_enabled.disabled = !isVisible;
+    };
     const syncFields = () => {
       fields.forEach((field) => {
         const visible = field.dataset.platformField === select.value;
@@ -285,6 +305,7 @@
       } else {
         selectedGroup.value = visibleSub2KeyId.value || "";
       }
+      syncVisibilityControls();
     };
     const enterEditMode = (account) => {
       accountId.value = account.id || "";
@@ -294,6 +315,7 @@
       form.elements.recharge_url.value = account.rechargeUrl || "";
       form.elements.note.value = account.note || "";
       form.elements.threshold.value = account.threshold || "";
+      form.elements.is_visible.checked = account.isVisible !== "false";
       form.elements.is_enabled.checked = account.isEnabled === "true";
       form.elements.key_id.value = account.selectedGroupId || account.keyId || "";
       visibleSub2KeyId.value = account.keyId || "";
@@ -309,6 +331,7 @@
       syncFields();
     };
     select.addEventListener("change", syncFields);
+    form.elements.is_visible.addEventListener("change", syncVisibilityControls);
     syncFields();
 
     form.addEventListener("submit", async (event) => {
@@ -318,6 +341,7 @@
       }
       const formData = new FormData(form);
       const payload = Object.fromEntries(formData.entries());
+      payload.is_visible = form.elements.is_visible.checked;
       payload.is_enabled = form.elements.is_enabled.checked;
       delete payload.account_id;
       delete payload.sub2_key_id;
@@ -383,7 +407,8 @@
         email: form.dataset.initialEmail,
         userId: form.dataset.initialUserId,
         threshold: form.dataset.initialThreshold,
-        isEnabled: form.dataset.initialIsEnabled
+        isEnabled: form.dataset.initialIsEnabled,
+        isVisible: form.dataset.initialIsVisible
       });
       form.scrollIntoView({ behavior: "auto", block: "start" });
     }

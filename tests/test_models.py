@@ -139,6 +139,72 @@ def test_account_eliminated_defaults_updates_and_survives_edit(tmp_path):
     assert db.get_account(account_id)["is_eliminated"] == 0
 
 
+def test_account_visibility_disables_but_does_not_restore_auto_query(tmp_path):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+    account_id = db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "sub-visible",
+            "base_url": "https://example.com",
+            "email": "user@example.com",
+            "password": "login-password",
+            "api_key": "sk-test",
+        }
+    )
+
+    assert db.get_account(account_id)["is_visible"] == 1
+    assert db.get_account(account_id)["is_enabled"] == 1
+
+    db.update_account_visible(account_id, False)
+
+    assert db.get_account(account_id)["is_visible"] == 0
+    assert db.get_account(account_id)["is_enabled"] == 0
+
+    db.update_account_enabled(account_id, True)
+
+    assert db.get_account(account_id)["is_visible"] == 0
+    assert db.get_account(account_id)["is_enabled"] == 0
+
+    db.update_account_visible(account_id, True)
+
+    assert db.get_account(account_id)["is_visible"] == 1
+    assert db.get_account(account_id)["is_enabled"] == 0
+
+    db.update_account_enabled(account_id, True)
+
+    assert db.get_account(account_id)["is_enabled"] == 1
+
+
+def test_upsert_preserves_visibility_when_updating_existing_account(tmp_path):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+    account_id = db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "sub-preserve",
+            "base_url": "https://example.com",
+            "email": "user@example.com",
+            "password": "login-password",
+            "api_key": "sk-test",
+        }
+    )
+    db.update_account_visible(account_id, False)
+
+    db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "sub-preserve",
+            "base_url": "https://updated.example.com",
+        }
+    )
+
+    account = db.get_account(account_id)
+    assert account["base_url"] == "https://updated.example.com"
+    assert account["is_visible"] == 0
+    assert account["is_enabled"] == 0
+
+
 def test_selected_group_can_be_replaced(tmp_path):
     db = Database(str(tmp_path / "app.db"), "test-key")
     db.init()

@@ -98,6 +98,7 @@ class Database:
                     user_id_enc TEXT,
                     threshold REAL,
                     is_enabled INTEGER NOT NULL DEFAULT 1,
+                    is_visible INTEGER NOT NULL DEFAULT 1,
                     is_eliminated INTEGER NOT NULL DEFAULT 0,
                     last_status TEXT NOT NULL DEFAULT 'never',
                     last_error TEXT,
@@ -161,6 +162,7 @@ class Database:
             self._migrate_accounts_note(conn)
             self._migrate_accounts_recharge_url(conn)
             self._migrate_accounts_group_rate_changed(conn)
+            self._migrate_accounts_visible(conn)
             self._migrate_accounts_eliminated(conn)
             self._set_default(conn, "request_timeout", "15")
             self._set_default(conn, "query_interval", str(BALANCE_QUERY_INTERVAL_SECONDS))
@@ -209,9 +211,9 @@ class Database:
             conn.execute(
                 """
                 INSERT INTO accounts (
-                    platform, name, base_url, threshold, is_enabled, created_at, updated_at
+                    platform, name, base_url, threshold, is_enabled, is_visible, created_at, updated_at
                 )
-                VALUES (?, ?, ?, NULL, 1, ?, ?)
+                VALUES (?, ?, ?, NULL, 1, 1, ?, ?)
                 """,
                 (account["platform"], account["name"], account["base_url"], now, now),
             )
@@ -296,6 +298,13 @@ class Database:
         column_names = {row["name"] for row in columns}
         if "last_group_rate_changed" not in column_names:
             conn.execute("ALTER TABLE accounts ADD COLUMN last_group_rate_changed INTEGER NOT NULL DEFAULT 0")
+
+    @staticmethod
+    def _migrate_accounts_visible(conn: sqlite3.Connection) -> None:
+        columns = conn.execute("PRAGMA table_info(accounts)").fetchall()
+        column_names = {row["name"] for row in columns}
+        if "is_visible" not in column_names:
+            conn.execute("ALTER TABLE accounts ADD COLUMN is_visible INTEGER NOT NULL DEFAULT 1")
 
     @staticmethod
     def _migrate_accounts_eliminated(conn: sqlite3.Connection) -> None:
@@ -392,7 +401,12 @@ class Database:
                 (host, port, username, password_enc, sender, sender_name, receiver, security or None, utc_now()),
             )
 
-    def list_accounts(self, platform: Optional[str] = None, enabled_only: bool = False) -> list[sqlite3.Row]:
+    def list_accounts(
+        self,
+        platform: Optional[str] = None,
+        enabled_only: bool = False,
+        visible_only: bool = False,
+    ) -> list[sqlite3.Row]:
         query = "SELECT * FROM accounts"
         conditions = []
         params: list[Any] = []
@@ -401,6 +415,8 @@ class Database:
             params.append(platform)
         if enabled_only:
             conditions.append("is_enabled = 1")
+        if visible_only:
+            conditions.append("is_visible = 1")
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY platform, name"
@@ -430,22 +446,23 @@ class Database:
         access_token_enc = encrypt_value(access_token, self.secret_key)
         user_id_enc = encrypt_value(data.get("user_id"), self.secret_key)
         threshold = _optional_float(data.get("threshold"))
-        is_enabled = 1 if data.get("is_enabled", True) else 0
         is_eliminated = _optional_bool(data.get("is_eliminated"))
         with self.connect() as conn:
             current = conn.execute(
-                "SELECT is_eliminated FROM accounts WHERE platform = ? AND name = ?",
+                "SELECT is_enabled, is_visible, is_eliminated FROM accounts WHERE platform = ? AND name = ?",
                 (platform, data["name"]),
             ).fetchone()
+            is_visible = 1 if data.get("is_visible", current["is_visible"] if current else True) else 0
+            is_enabled = 1 if data.get("is_enabled", current["is_enabled"] if current else True) and is_visible else 0
             effective_is_eliminated = is_eliminated if is_eliminated is not None else (current["is_eliminated"] if current else 0)
             conn.execute(
                 """
                 INSERT INTO accounts (
                     platform, name, base_url, note, recharge_url, key_id_enc, api_key_enc, email_enc, password_enc,
                     access_token_enc, user_id_enc,
-                    threshold, is_enabled, is_eliminated, created_at, updated_at
+                    threshold, is_enabled, is_visible, is_eliminated, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(platform, name) DO UPDATE SET
                     base_url = excluded.base_url,
                     note = excluded.note,
@@ -458,6 +475,7 @@ class Database:
                     user_id_enc = COALESCE(excluded.user_id_enc, accounts.user_id_enc),
                     threshold = excluded.threshold,
                     is_enabled = excluded.is_enabled,
+                    is_visible = excluded.is_visible,
                     is_eliminated = excluded.is_eliminated,
                     updated_at = excluded.updated_at
                 """,
@@ -475,6 +493,7 @@ class Database:
                     user_id_enc,
                     threshold,
                     is_enabled,
+                    is_visible,
                     effective_is_eliminated,
                     now,
                     now,
@@ -508,7 +527,8 @@ class Database:
         access_token_enc = encrypt_value(access_token, self.secret_key)
         user_id_enc = encrypt_value(data.get("user_id"), self.secret_key)
         threshold = _optional_float(data.get("threshold"))
-        is_enabled = 1 if data.get("is_enabled", True) else 0
+        is_visible = 1 if data.get("is_visible", current["is_visible"]) else 0
+        is_enabled = 1 if data.get("is_enabled", current["is_enabled"]) and is_visible else 0
         is_eliminated = _optional_bool(data.get("is_eliminated"))
         with self.connect() as conn:
             conn.execute(
@@ -521,7 +541,7 @@ class Database:
                     password_enc = COALESCE(?, password_enc),
                     access_token_enc = COALESCE(?, access_token_enc),
                     user_id_enc = COALESCE(?, user_id_enc),
-                    threshold = ?, is_enabled = ?, is_eliminated = COALESCE(?, is_eliminated), updated_at = ?
+                    threshold = ?, is_enabled = ?, is_visible = ?, is_eliminated = COALESCE(?, is_eliminated), updated_at = ?
                 WHERE id = ?
                 """,
                 (
@@ -538,6 +558,7 @@ class Database:
                     user_id_enc,
                     threshold,
                     is_enabled,
+                    is_visible,
                     is_eliminated,
                     now,
                     account_id,
@@ -635,15 +656,30 @@ class Database:
             )
 
     def update_account_enabled(self, account_id: int, is_enabled: bool) -> None:
+        account = self.get_account(account_id)
+        effective_enabled = bool(is_enabled and account and account["is_visible"])
         with self.connect() as conn:
             conn.execute(
                 """
                 UPDATE accounts
-                SET is_enabled = ?, low_balance_active = CASE WHEN ? THEN 0 ELSE low_balance_active END,
+                SET is_enabled = ?, low_balance_active = CASE WHEN ? THEN low_balance_active ELSE 0 END,
                     updated_at = ?
                 WHERE id = ?
                 """,
-                (1 if is_enabled else 0, 0 if is_enabled else 1, utc_now(), account_id),
+                (1 if effective_enabled else 0, 1 if effective_enabled else 0, utc_now(), account_id),
+            )
+
+    def update_account_visible(self, account_id: int, is_visible: bool) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE accounts
+                SET is_visible = ?, is_enabled = CASE WHEN ? THEN is_enabled ELSE 0 END,
+                    low_balance_active = CASE WHEN ? THEN low_balance_active ELSE 0 END,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (1 if is_visible else 0, 1 if is_visible else 0, 1 if is_visible else 0, utc_now(), account_id),
             )
 
     def update_account_eliminated(self, account_id: int, is_eliminated: bool) -> None:
