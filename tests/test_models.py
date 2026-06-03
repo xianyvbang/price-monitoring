@@ -538,9 +538,12 @@ def test_monitor_pause_setting_can_be_toggled(tmp_path):
 def test_default_accounts_only_seed_on_first_init(tmp_path):
     db = Database(str(tmp_path / "app.db"), "test-key")
     db.init()
-    assert len(db.list_accounts()) > 0
+    accounts = db.list_accounts()
+    assert [(account["platform"], account["name"], account["base_url"]) for account in accounts] == [
+        ("newApi", "cctq-0.15", "https://www.cctq.ai")
+    ]
 
-    for account in db.list_accounts():
+    for account in accounts:
         db.delete_account(account["id"])
 
     assert db.list_accounts() == []
