@@ -15,7 +15,7 @@ def utc_now() -> str:
 
 
 CHINA_TZ = timezone(timedelta(hours=8))
-BALANCE_HISTORY_DAYS = 2
+BALANCE_HISTORY_DAYS = 14
 BALANCE_QUERY_INTERVAL_SECONDS = 5 * 60
 GROUP_RATE_QUERY_INTERVAL_SECONDS = 20 * 60
 
@@ -812,9 +812,8 @@ class Database:
                 (account_id, cutoff),
             ).fetchall()
 
-    def get_today_consumption(self, account_id: int) -> Optional[float]:
+    def get_consumption_since(self, account_id: int, since: str) -> Optional[float]:
         self.cleanup_balance_history()
-        today_start = _today_start_utc()
         with self.connect() as conn:
             records = conn.execute(
                 """
@@ -826,19 +825,20 @@ class Database:
                     AND checked_at >= ?
                 ORDER BY checked_at ASC, id ASC
                 """,
-                (account_id, today_start),
+                (account_id, since),
             ).fetchall()
-        if not records:
-            return None
+        return _sum_consumption(records)
 
-        previous = float(records[0]["remaining"])
-        consumed = 0.0
-        for record in records[1:]:
-            current = float(record["remaining"])
-            if current < previous:
-                consumed += previous - current
-            previous = current
-        return round(consumed, 6)
+    def get_today_consumption(self, account_id: int) -> Optional[float]:
+        return self.get_consumption_since(account_id, _today_start_utc())
+
+    def get_consumption_stats(self, account_id: int) -> dict[str, Optional[float]]:
+        return {
+            "today": self.get_today_consumption(account_id),
+            "last_24h": self.get_consumption_since(account_id, _hours_ago(24)),
+            "last_7d": self.get_consumption_since(account_id, _days_ago(7)),
+            "last_14d": self.get_consumption_since(account_id, _days_ago(14)),
+        }
 
     def clear_balance_history(self, account_id: int) -> None:
         with self.connect() as conn:
@@ -901,6 +901,20 @@ class Database:
             conn.execute("DELETE FROM query_records WHERE checked_at < ?", (cutoff,))
 
 
+def _sum_consumption(records: list[sqlite3.Row]) -> Optional[float]:
+    if not records:
+        return None
+
+    previous = float(records[0]["remaining"])
+    consumed = 0.0
+    for record in records[1:]:
+        current = float(record["remaining"])
+        if current < previous:
+            consumed += previous - current
+        previous = current
+    return round(consumed, 6)
+
+
 def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {key: row[key] for key in row.keys()}
 
@@ -927,6 +941,10 @@ def _json_dumps(value: Any) -> str:
 
 def _days_ago(days: int) -> str:
     return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
+
+
+def _hours_ago(hours: int) -> str:
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat(timespec="seconds")
 
 
 def _today_start_utc() -> str:

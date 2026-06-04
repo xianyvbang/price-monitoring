@@ -26,17 +26,23 @@
 </section>
 
 <section class="dashboard-stats" aria-label="余额统计">
+  {% for summary in consumption_summaries %}
   <div class="dashboard-stat">
-    <span>今日消耗总余额</span>
-    <strong data-today-consumption-total>
-      {% if today_consumption_summary.totals %}
-      {% for item in today_consumption_summary.totals %}{{ item.amount }}{% if item.unit %} {{ item.unit }}{% endif %}{% if not loop.last %} / {% endif %}{% endfor %}
+    <span>{{ summary.label }}</span>
+    <strong data-consumption-total>{{ "" -}}
+      {%- if summary.totals -%}
+      {%- for item in summary.totals -%}{{ item.amount }}{% if item.unit %} {{ item.unit }}{% endif %}{% if not loop.last %} / {% endif %}{%- endfor -%}
       {% else %}
       -
-      {% endif %}
+      {%- endif -%}
     </strong>
-    <small data-today-consumption-count>{{ today_consumption_summary.account_count }} 个账号有今日记录</small>
+    <small
+      data-consumption-summary
+      data-consumption-period="{{ summary.key }}"
+      data-consumption-count-label="{{ summary.count_label }}"
+    >{{ summary.account_count }} {{ summary.count_label }}</small>
   </div>
+  {% endfor %}
 </section>
 
 {% for platform, accounts in grouped.items() %}
@@ -76,6 +82,11 @@
           data-account-row="{{ account.id }}"
           data-account-eliminated="{{ 'true' if account.is_eliminated else 'false' }}"
           data-account-enabled="{{ 'true' if account.is_enabled else 'false' }}"
+          data-account-consumption-unit="{{ account.last_unit or '' }}"
+          data-account-consumption-today="{{ account.consumption_stats.today if account.consumption_stats.today is not none else '' }}"
+          data-account-consumption-last-24h="{{ account.consumption_stats.last_24h if account.consumption_stats.last_24h is not none else '' }}"
+          data-account-consumption-last-7d="{{ account.consumption_stats.last_7d if account.consumption_stats.last_7d is not none else '' }}"
+          data-account-consumption-last-14d="{{ account.consumption_stats.last_14d if account.consumption_stats.last_14d is not none else '' }}"
         >
           <td data-label="名称">{{ account.name }}</td>
           <td class="note-cell" data-label="备注">{{ account.note or "-" }}</td>
@@ -198,7 +209,7 @@
     <div class="dialog-head">
       <div>
         <h2 data-balance-history-title>余额趋势</h2>
-        <p data-balance-history-message>最近 2 天</p>
+        <p data-balance-history-message>最近 14 天</p>
       </div>
       <div class="button-row">
         <button type="button" class="danger" data-balance-history-clear>清除</button>
@@ -242,32 +253,36 @@
   const formatRemaining = (result) => formatAmountWithUnit(result.remaining, result.unit || "");
   const roundAmount = (value) => Math.round((value + Number.EPSILON) * 1000000) / 1000000;
   const formatTotalAmount = (value) => String(roundAmount(value));
-  const updateTodayConsumptionSummary = () => {
-    const total = document.querySelector("[data-today-consumption-total]");
-    const count = document.querySelector("[data-today-consumption-count]");
-    if (!total || !count) {
-      return;
-    }
-    const totals = new Map();
-    let accountCount = 0;
-    document.querySelectorAll("[data-account-today-consumption]").forEach((cell) => {
-      const rawValue = cell.dataset.accountTodayConsumptionValue;
-      if (rawValue === null || rawValue === undefined || rawValue === "") {
+  const consumptionAttributeName = (period) => `data-account-consumption-${String(period).replaceAll("_", "-")}`;
+  const updateConsumptionSummaries = () => {
+    document.querySelectorAll("[data-consumption-summary]").forEach((count) => {
+      const period = count.dataset.consumptionPeriod || "";
+      const total = count.parentElement?.querySelector("[data-consumption-total]");
+      if (!period || !total) {
         return;
       }
-      const value = Number(rawValue);
-      if (!Number.isFinite(value)) {
-        return;
-      }
-      const unit = cell.dataset.accountTodayConsumptionUnit || "";
-      totals.set(unit, roundAmount((totals.get(unit) || 0) + value));
-      accountCount += 1;
+      const totals = new Map();
+      let accountCount = 0;
+      const attributeName = consumptionAttributeName(period);
+      document.querySelectorAll("[data-account-row]").forEach((row) => {
+        const rawValue = row.getAttribute(attributeName);
+        if (rawValue === null || rawValue === undefined || rawValue === "") {
+          return;
+        }
+        const value = Number(rawValue);
+        if (!Number.isFinite(value)) {
+          return;
+        }
+        const unit = row.getAttribute("data-account-consumption-unit") || "";
+        totals.set(unit, roundAmount((totals.get(unit) || 0) + value));
+        accountCount += 1;
+      });
+      const parts = Array.from(totals.entries()).map(([unit, amount]) => {
+        return unit ? `${formatTotalAmount(amount)} ${unit}` : formatTotalAmount(amount);
+      });
+      total.textContent = parts.length ? parts.join(" / ") : "-";
+      count.textContent = `${accountCount} ${count.dataset.consumptionCountLabel || "个账号有记录"}`;
     });
-    const parts = Array.from(totals.entries()).map(([unit, amount]) => {
-      return unit ? `${formatTotalAmount(amount)} ${unit}` : formatTotalAmount(amount);
-    });
-    total.textContent = parts.length ? parts.join(" / ") : "-";
-    count.textContent = `${accountCount} 个账号有今日记录`;
   };
   const groupRatesFromResult = (result) => {
     if (!result || !result.extra) {
@@ -630,7 +645,7 @@
       balanceHistoryEmpty.textContent = "暂无余额数据";
     }
     const unit = activeBalanceHistoryRecords.find((record) => record.unit)?.unit || account.last_unit || "";
-    setBalanceHistoryMessage(account, `最近 2 天${unit ? ` · 单位 ${unit}` : ""}`);
+    setBalanceHistoryMessage(account, `最近 14 天${unit ? ` · 单位 ${unit}` : ""}`);
     drawBalanceChart();
     return payload;
   };
@@ -686,7 +701,7 @@
         balanceHistoryEmpty.textContent = "暂无余额数据";
       }
       if (balanceHistoryMessage) {
-        balanceHistoryMessage.textContent = "最近 2 天 · 已清除";
+        balanceHistoryMessage.textContent = "最近 14 天 · 已清除";
       }
       drawBalanceChart();
     } catch (error) {
@@ -789,8 +804,16 @@
       remaining.dataset.accountRemainingValue = result.remaining ?? "";
     }
     if (todayConsumption) {
-      const consumption = result.today_consumption ?? result.todayConsumption;
-      const unit = result.unit || todayConsumption.dataset.accountTodayConsumptionUnit || "";
+      const stats = result.consumption_stats || result.consumptionStats || {};
+      const consumption = stats.today ?? result.today_consumption ?? result.todayConsumption;
+      const unit = result.unit || row.getAttribute("data-account-consumption-unit") || todayConsumption.dataset.accountTodayConsumptionUnit || "";
+      row.setAttribute("data-account-consumption-unit", unit);
+      ["today", "last_24h", "last_7d", "last_14d"].forEach((period) => {
+        const value = period === "today" ? consumption : stats[period];
+        if (value !== undefined) {
+          row.setAttribute(consumptionAttributeName(period), value ?? "");
+        }
+      });
       todayConsumption.textContent = formatAmountWithUnit(consumption, unit);
       todayConsumption.dataset.accountTodayConsumptionValue = consumption ?? "";
       todayConsumption.dataset.accountTodayConsumptionUnit = unit;
@@ -805,7 +828,7 @@
     if (checkedAt) {
       checkedAt.textContent = formatChinaTime(result.checked_at || result.checkedAt);
     }
-    updateTodayConsumptionSummary();
+    updateConsumptionSummaries();
   };
   const updateBalanceRows = (results) => {
     results.forEach((result) => {

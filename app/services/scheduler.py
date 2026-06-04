@@ -111,7 +111,10 @@ async def query_one_account(db: Database, account_id: int) -> dict:
         result["extra"] = f"告警发送失败: {exc}"
         db.update_account_result(account_id, result)
         db.add_log("error", "alert", f"{account['platform']} / {account['name']} 告警发送失败: {exc}")
-    result["today_consumption"] = db.get_today_consumption(account_id)
+    consumption_stats = db.get_consumption_stats(account_id)
+    result["consumption_stats"] = consumption_stats
+    result["consumptionStats"] = consumption_stats
+    result["today_consumption"] = consumption_stats["today"]
     result["todayConsumption"] = result["today_consumption"]
     return result
 

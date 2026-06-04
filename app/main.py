@@ -41,6 +41,12 @@ SENSITIVE_FIELD_NAMES = {
 LOG_VALUE_LIMIT = 2000
 LOG_PAGE_SIZE = 50
 LOG_MAX_PAGE_SIZE = 200
+CONSUMPTION_PERIODS = [
+    {"key": "today", "label": "今日消耗总余额", "count_label": "个账号有今日记录"},
+    {"key": "last_24h", "label": "近24小时消耗总余额", "count_label": "个账号有近24小时记录"},
+    {"key": "last_7d", "label": "近7天消耗总余额", "count_label": "个账号有近7天记录"},
+    {"key": "last_14d", "label": "近14天消耗总余额", "count_label": "个账号有近14天记录"},
+]
 
 
 @asynccontextmanager
@@ -277,6 +283,7 @@ async def _body_iterator(body: bytes):
 
 def public_account(row: Any) -> dict[str, Any]:
     data = row_to_dict(row)
+    data["is_enabled"] = bool(data.get("is_enabled", True))
     data["is_visible"] = bool(data.get("is_visible", True))
     data["is_eliminated"] = bool(data.get("is_eliminated"))
     key_id_enc = data.pop("key_id_enc", None)
@@ -289,7 +296,8 @@ def public_account(row: Any) -> dict[str, Any]:
     data["has_access_token"] = bool(data.pop("access_token_enc", None))
     data["has_user_id"] = bool(data.pop("user_id_enc", None))
     data["group_rates"] = group_rates_from_extra(data.get("last_extra"))
-    data["today_consumption"] = db.get_today_consumption(int(data["id"]))
+    data["consumption_stats"] = db.get_consumption_stats(int(data["id"]))
+    data["today_consumption"] = data["consumption_stats"]["today"]
     if data["platform"] == "newApi" and selected_group_id and not data["group_rates"]:
         data["group_rates"] = [{"plan_name": f"当前分组 {selected_group_id}", "rate_multiplier": None}]
     return data
@@ -396,19 +404,25 @@ def grouped_accounts(
     return grouped
 
 
-def summarize_today_consumption(grouped: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+def summarize_consumption_period(grouped: dict[str, list[dict[str, Any]]], period: dict[str, str]) -> dict[str, Any]:
     totals: dict[str, float] = {}
     account_count = 0
+    key = period["key"]
     for accounts in grouped.values():
         for account in accounts:
-            consumption = _optional_number(account.get("today_consumption"))
+            stats = account.get("consumption_stats") if isinstance(account.get("consumption_stats"), dict) else {}
+            consumption = _optional_number(stats.get(key))
             if consumption is None:
                 continue
             unit = str(account.get("last_unit") or "").strip()
             totals[unit] = round(totals.get(unit, 0.0) + consumption, 6)
             account_count += 1
     total_items = [{"amount": amount, "unit": unit} for unit, amount in totals.items()]
-    return {"totals": total_items, "account_count": account_count}
+    return {**period, "totals": total_items, "account_count": account_count}
+
+
+def summarize_consumption_periods(grouped: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    return [summarize_consumption_period(grouped, period) for period in CONSUMPTION_PERIODS]
 
 
 def public_edit_account(account_id: int | None) -> dict[str, Any] | None:
@@ -440,7 +454,7 @@ async def dashboard(request: Request):
             request,
             grouped=grouped,
             settings=db.get_general_settings(),
-            today_consumption_summary=summarize_today_consumption(grouped),
+            consumption_summaries=summarize_consumption_periods(grouped),
         ),
     )
 
@@ -941,7 +955,7 @@ async def api_create_account(request: Request):
     payload = await request.json()
     account_id = db.upsert_account(_account_from_payload(payload))
     db.add_log("info", "account", f"API 保存账号: {payload.get('platform')} / {payload.get('name')}")
-    return {"id": account_id, "ok": True}
+    return {"id": account_id, "ok": True, "account": public_edit_account(account_id)}
 
 
 @app.put("/api/accounts/{account_id}")
@@ -953,7 +967,7 @@ async def api_update_account(request: Request, account_id: int):
     except ValueError:
         raise HTTPException(status_code=404, detail="账号不存在") from None
     db.add_log("info", "account", f"API 更新账号: {payload.get('platform')} / {payload.get('name')}")
-    return {"id": account_id, "ok": True}
+    return {"id": account_id, "ok": True, "account": public_edit_account(account_id)}
 
 
 @app.post("/api/accounts/bulk")

@@ -265,6 +265,11 @@ def test_dashboard_shows_today_consumption_column(tmp_path, monkeypatch):
     assert dashboard.status_code == 200
     assert "今日消耗" in dashboard.text
     assert "今日消耗总余额" in dashboard.text
+    assert "近24小时消耗总余额" in dashboard.text
+    assert "近7天消耗总余额" in dashboard.text
+    assert "近14天消耗总余额" in dashboard.text
+    assert 'data-consumption-period="last_24h"' in dashboard.text
+    assert 'data-account-consumption-last-14d' in dashboard.text
     assert "5.5 USD" in dashboard.text
     assert "6.75 USD" in dashboard.text
 
@@ -385,6 +390,14 @@ def test_account_visibility_and_enabled_controls_are_separate(tmp_path, monkeypa
     assert "hidden-row" not in dashboard.text
     assert "disabled-row" in accounts.text
     assert "hidden-row" in accounts.text
+    assert f'data-account-row="{disabled_id}"' in accounts.text
+    assert 'data-form-status' in accounts.text
+    assert 'data-account-action-status' in accounts.text
+    assert 'data-visible-form' in accounts.text
+    assert 'data-enabled-form' in accounts.text
+    assert "/api/accounts/${accountId}/visible" in accounts.text
+    assert "/api/accounts/${accountId}/enabled" in accounts.text
+    assert 'window.location.href = "/accounts"' not in accounts.text
     assert f'action="/accounts/{disabled_id}/enabled"' in accounts.text
     assert f'action="/accounts/{hidden_id}/visible"' in accounts.text
     assert 'class="enable-state disabled"' in accounts.text

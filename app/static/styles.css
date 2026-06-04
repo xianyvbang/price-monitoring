@@ -91,17 +91,17 @@ a {
 .dashboard-stats {
   display: grid;
   gap: 12px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   margin-bottom: 18px;
 }
 
 .dashboard-stat {
-  align-items: center;
+  align-items: flex-start;
   background: #ffffff;
   border: 1px solid var(--line);
   border-radius: 8px;
   display: grid;
-  gap: 4px 18px;
-  grid-template-columns: minmax(130px, auto) minmax(160px, 1fr) auto;
+  gap: 6px;
   padding: 14px 18px;
 }
 
@@ -111,13 +111,19 @@ a {
 }
 
 .dashboard-stat strong {
-  font-size: 24px;
+  font-size: 22px;
   line-height: 1.2;
+  word-break: break-word;
 }
 
 .dashboard-stat small {
   color: var(--muted);
-  text-align: right;
+}
+
+@media (max-width: 1180px) {
+  .dashboard-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 h1,
@@ -493,6 +499,27 @@ th {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.inline-status {
+  color: var(--muted);
+  display: inline-flex;
+  font-size: 12px;
+  min-height: 18px;
+  white-space: nowrap;
+}
+
+.inline-status.is-pending {
+  color: var(--warn);
+}
+
+.inline-status.is-success {
+  color: var(--ok);
+}
+
+.inline-status.is-error {
+  color: var(--danger);
+  font-weight: 700;
 }
 
 .actions {

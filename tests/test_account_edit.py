@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.main import config
 from app.models import Database
 from app.security import decrypt_value
 
@@ -79,6 +80,68 @@ def test_api_update_missing_account_returns_404(tmp_path, monkeypatch):
 
     assert response.status_code == 404
     assert response.json()["detail"] == "账号不存在"
+
+
+def test_api_update_returns_account_for_local_row_refresh(tmp_path, monkeypatch):
+    test_db = Database(str(tmp_path / "app.db"), config.app_secret_key)
+    test_db.init()
+    test_db.ensure_admin("admin", "password123")
+    account_id = test_db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "old",
+            "base_url": "https://old.example",
+            "api_key": "old-secret",
+            "email": "old@example.com",
+            "password": "old-password",
+        }
+    )
+    monkeypatch.setattr("app.main.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
+
+    async def stop_scheduler():
+        return None
+
+    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+
+    with TestClient(app) as client:
+        client.post("/login", data={"username": "admin", "password": "password123"})
+        response = client.put(
+            f"/api/accounts/{account_id}",
+            json={
+                "platform": "sub2Api",
+                "name": "new",
+                "base_url": "https://new.example",
+                "key_id": "group-2",
+                "api_key": "new-secret",
+                "email": "new@example.com",
+                "password": "new-password",
+                "threshold": 3.5,
+                "note": "new note",
+                "recharge_url": "https://new.example/topup",
+                "is_visible": False,
+                "is_enabled": True,
+            },
+        )
+
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["id"] == account_id
+    assert payload["account"]["id"] == account_id
+    assert payload["account"]["name"] == "new"
+    assert payload["account"]["base_url"] == "https://new.example"
+    assert payload["account"]["recharge_url"] == "https://new.example/topup"
+    assert payload["account"]["note"] == "new note"
+    assert payload["account"]["threshold"] == 3.5
+    assert payload["account"]["is_visible"] is False
+    assert payload["account"]["is_enabled"] is False
+    assert payload["account"]["key_id"] == "group-2"
+    assert payload["account"]["email"] == "new@example.com"
+    assert payload["account"]["has_api_key"] is True
+    assert payload["account"]["has_password"] is True
 
 
 def test_form_update_missing_account_returns_404(tmp_path, monkeypatch):

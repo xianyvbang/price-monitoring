@@ -81,6 +81,8 @@ async def test_query_one_account_returns_today_consumption(tmp_path, monkeypatch
 
     assert result["today_consumption"] == 2.75
     assert result["todayConsumption"] == 2.75
+    assert result["consumption_stats"]["today"] == 2.75
+    assert result["consumptionStats"]["last_24h"] == 2.75
 
 
 @pytest.mark.asyncio

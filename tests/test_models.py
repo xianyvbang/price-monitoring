@@ -358,7 +358,7 @@ def test_account_result_keeps_group_result_even_with_extra(tmp_path):
     assert account["last_extra"] == "group-extra"
 
 
-def test_balance_history_keeps_recent_two_days_and_valid_balances(tmp_path):
+def test_balance_history_keeps_recent_fourteen_days_and_valid_balances(tmp_path):
     db = Database(str(tmp_path / "app.db"), "test-key")
     db.init()
     account_id = db.upsert_account(
@@ -371,18 +371,19 @@ def test_balance_history_keeps_recent_two_days_and_valid_balances(tmp_path):
             "api_key": "sk-test",
         }
     )
-    old_time = (datetime.now(timezone.utc) - timedelta(days=2, minutes=1)).isoformat(timespec="seconds")
+    old_time = (datetime.now(timezone.utc) - timedelta(days=14, minutes=1)).isoformat(timespec="seconds")
+    retained_time = (datetime.now(timezone.utc) - timedelta(days=13, hours=23)).isoformat(timespec="seconds")
     recent_time = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(timespec="seconds")
 
     db.update_account_result(account_id, {"is_valid": True, "remaining": 4, "checked_at": old_time})
+    db.update_account_result(account_id, {"is_valid": True, "remaining": 6.5, "unit": "USD", "checked_at": retained_time})
     db.update_account_result(account_id, {"is_valid": False, "remaining": 5, "checked_at": recent_time})
     db.update_account_result(account_id, {"is_valid": True, "remaining": 7.5, "unit": "USD", "checked_at": recent_time})
 
     records = db.list_balance_history(account_id)
 
-    assert len(records) == 1
-    assert records[0]["remaining"] == 7.5
-    assert records[0]["unit"] == "USD"
+    assert [record["remaining"] for record in records] == [6.5, 7.5]
+    assert [record["unit"] for record in records] == ["USD", "USD"]
 
 
 def test_balance_history_can_be_cleared_for_one_account(tmp_path):
@@ -445,6 +446,41 @@ def test_today_consumption_counts_today_decreases_and_ignores_recharges(tmp_path
     db.update_account_result(account_id, {"is_valid": True, "remaining": 104.25, "checked_at": today_4})
 
     assert db.get_today_consumption(account_id) == 13.25
+
+
+def test_consumption_stats_cover_24h_7d_and_14d_windows(tmp_path):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+    account_id = db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "sub-period-consumption",
+            "base_url": "https://example.com",
+            "email": "user@example.com",
+            "password": "login-password",
+            "api_key": "sk-test",
+        }
+    )
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    records = [
+        (now - timedelta(days=13), 100),
+        (now - timedelta(days=13) + timedelta(hours=1), 95),
+        (now - timedelta(days=6), 80),
+        (now - timedelta(days=6) + timedelta(hours=1), 76),
+        (now - timedelta(hours=23), 50),
+        (now - timedelta(hours=22), 45),
+    ]
+    for checked_at, remaining in records:
+        db.update_account_result(
+            account_id,
+            {"is_valid": True, "remaining": remaining, "checked_at": checked_at.isoformat(timespec="seconds")},
+        )
+
+    stats = db.get_consumption_stats(account_id)
+
+    assert stats["last_24h"] == 5
+    assert stats["last_7d"] == 35
+    assert stats["last_14d"] == 55
 
 
 def test_group_rate_records_only_insert_on_change(tmp_path):
