@@ -6,13 +6,17 @@
     <h1>平台配置</h1>
     <p>按平台新增或批量导入账号，名称相同会更新已有配置。</p>
   </div>
+  <div class="page-actions">
+    <button class="primary" type="button" data-open-account-dialog>添加账号</button>
+    <button type="button" data-open-bulk-dialog>批量导入</button>
+  </div>
 </section>
 
 {% if message %}<p class="notice">{{ message }}</p>{% endif %}
 
-<section class="grid two">
+<dialog class="account-dialog" data-account-dialog>
   <form
-    class="panel"
+    class="dialog-shell"
     method="post"
     action="/accounts"
     data-account-form
@@ -32,7 +36,13 @@
     data-initial-is-visible="{{ 'true' if edit_account.is_visible else 'false' }}"
     {% endif %}
   >
-    <h2 data-form-title>{{ "编辑账号" if edit_account else "新增账号" }}</h2>
+    <div class="dialog-head">
+      <div>
+        <h2 data-form-title>{{ "编辑账号" if edit_account else "新增账号" }}</h2>
+        <p>保存后会按平台获取可选分组。</p>
+      </div>
+      <button type="button" data-close-account-dialog>关闭</button>
+    </div>
     <input name="account_id" type="hidden" data-account-id value="{{ edit_account.id if edit_account else '' }}">
     <label>
       平台
@@ -61,9 +71,17 @@
       <small class="inline-status" data-form-status></small>
     </div>
   </form>
+</dialog>
 
-  <form class="panel" method="post" action="/accounts/bulk" data-bulk-form>
-    <h2>批量导入</h2>
+<dialog class="bulk-dialog" data-bulk-dialog>
+  <form class="dialog-shell" method="post" action="/accounts/bulk" data-bulk-form>
+    <div class="dialog-head">
+      <div>
+        <h2>批量导入</h2>
+        <p>支持 README 中的 JSON 数组或 CSV 行格式。</p>
+      </div>
+      <button type="button" data-close-bulk-dialog>关闭</button>
+    </div>
     <label>
       平台
       <select name="platform" required data-platform-select>
@@ -77,7 +95,7 @@
     </label>
     <button class="primary" type="submit">导入</button>
   </form>
-</section>
+</dialog>
 
 {% for platform, accounts in grouped.items() %}
 <section class="panel" data-platform-panel="{{ platform }}">
@@ -539,8 +557,21 @@
   const fetchGroupsByAccountId = async (accountId, platform) => (
     platform === "sub2Api" ? fetchSub2apiGroupsByAccountId(accountId) : fetchNewapiGroupsByAccountId(accountId)
   );
+  const openModalDialog = (dialog) => {
+    if (!dialog || dialog.open) {
+      return;
+    }
+    dialog.showModal();
+  };
+  const closeModalDialog = (dialog) => {
+    if (!dialog || !dialog.open) {
+      return;
+    }
+    dialog.close();
+  };
 
   document.querySelectorAll("[data-account-form]").forEach((form) => {
+    const accountDialog = form.closest("[data-account-dialog]");
     const select = form.querySelector("[data-platform-select]");
     const fields = form.querySelectorAll("[data-platform-field]");
     const title = form.querySelector("[data-form-title]");
@@ -576,6 +607,7 @@
       submitLabel.textContent = "已保存";
       setInlineStatus(formStatus, "已保存", "success");
       setAccountActionStatus(savedAccountId, "已保存", "success");
+      closeModalDialog(accountDialog);
       restoreSubmitLabelSoon();
     };
     const syncVisibilityControls = () => {
@@ -631,6 +663,16 @@
     form.elements.is_visible.addEventListener("change", syncVisibilityControls);
     syncFields();
 
+    document.querySelector("[data-open-account-dialog]")?.addEventListener("click", () => {
+      resetAccountForm();
+      openModalDialog(accountDialog);
+      setTimeout(() => form.elements.name?.focus(), 0);
+    });
+
+    form.querySelector("[data-close-account-dialog]")?.addEventListener("click", () => {
+      closeModalDialog(accountDialog);
+    });
+
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       if (select.value === "sub2Api") {
@@ -669,6 +711,7 @@
           setInlineStatus(formStatus, "获取分组中", "pending");
           try {
             const groupResult = await fetchGroupsByAccountId(result.id, select.value);
+            closeModalDialog(accountDialog);
             showGroupPicker(
               result.id,
               groupResult.groups || [],
@@ -712,7 +755,8 @@
       }
       enterEditMode(button.dataset);
       setInlineStatus(formStatus, "");
-      form.scrollIntoView({ behavior: "smooth", block: "start" });
+      openModalDialog(accountDialog);
+      setTimeout(() => form.elements.name?.focus(), 0);
     });
 
     if (form.dataset.initialEdit === "true") {
@@ -731,7 +775,7 @@
         isEnabled: form.dataset.initialIsEnabled,
         isVisible: form.dataset.initialIsVisible
       });
-      form.scrollIntoView({ behavior: "auto", block: "start" });
+      openModalDialog(accountDialog);
     }
   });
 
@@ -783,6 +827,7 @@
   });
 
   document.querySelectorAll("[data-bulk-form]").forEach((form) => {
+    const bulkDialog = form.closest("[data-bulk-dialog]");
     const select = form.querySelector("[data-platform-select]");
     const textarea = form.querySelector("[data-bulk-textarea]");
     const syncPlaceholder = () => {
@@ -793,6 +838,15 @@
       syncPlaceholder();
     });
     syncPlaceholder();
+    document.querySelector("[data-open-bulk-dialog]")?.addEventListener("click", () => {
+      form.reset();
+      syncPlaceholder();
+      openModalDialog(bulkDialog);
+      setTimeout(() => textarea.focus(), 0);
+    });
+    form.querySelector("[data-close-bulk-dialog]")?.addEventListener("click", () => {
+      closeModalDialog(bulkDialog);
+    });
   });
 
   const temporaryButtonStatus = (button, text, title = "") => {

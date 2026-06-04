@@ -88,6 +88,10 @@ a {
   justify-content: flex-end;
 }
 
+.page-actions .primary {
+  margin-top: 0;
+}
+
 .consumption-filter {
   margin-bottom: 12px;
 }
@@ -567,9 +571,22 @@ th {
 dialog {
   border: 1px solid var(--line);
   border-radius: 8px;
+  max-height: calc(100dvh - 48px);
   max-width: min(760px, calc(100% - 32px));
   padding: 0;
   width: 760px;
+}
+
+dialog::backdrop {
+  background: rgba(24, 32, 47, 0.36);
+}
+
+.account-dialog {
+  width: 720px;
+}
+
+.bulk-dialog {
+  width: 720px;
 }
 
 .balance-history-dialog {
@@ -583,6 +600,8 @@ dialog {
 
 .dialog-shell {
   margin: 0;
+  max-height: calc(100dvh - 48px);
+  overflow: auto;
   padding: 18px;
 }
 
@@ -592,6 +611,14 @@ dialog {
   gap: 16px;
   justify-content: space-between;
   margin-bottom: 14px;
+}
+
+.account-dialog textarea {
+  min-height: 96px;
+}
+
+.bulk-dialog textarea {
+  min-height: 320px;
 }
 
 .group-option-list {
