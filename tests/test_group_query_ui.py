@@ -231,6 +231,14 @@ def test_dashboard_shows_today_consumption_column(tmp_path, monkeypatch):
             "api_key": "secret",
         }
     )
+    second_account_id = test_db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "sub-consumption-2",
+            "base_url": "https://sub2.example",
+            "api_key": "secret",
+        }
+    )
     china_tz = timezone(timedelta(hours=8))
     today_start = datetime.now(china_tz).replace(hour=0, minute=0, second=0, microsecond=0)
     first = (today_start + timedelta(hours=1)).astimezone(timezone.utc).isoformat(timespec="seconds")
@@ -239,6 +247,8 @@ def test_dashboard_shows_today_consumption_column(tmp_path, monkeypatch):
     test_db.update_account_result(account_id, {"is_valid": True, "remaining": 50, "unit": "USD", "checked_at": first})
     test_db.update_account_result(account_id, {"is_valid": True, "remaining": 44.5, "unit": "USD", "checked_at": second})
     test_db.update_account_result(account_id, {"is_valid": True, "remaining": 48, "unit": "USD", "checked_at": third})
+    test_db.update_account_result(second_account_id, {"is_valid": True, "remaining": 10, "unit": "USD", "checked_at": first})
+    test_db.update_account_result(second_account_id, {"is_valid": True, "remaining": 8.75, "unit": "USD", "checked_at": second})
     monkeypatch.setattr("app.main.db", test_db)
     monkeypatch.setattr("app.main.scheduler.db", test_db)
     monkeypatch.setattr("app.main.scheduler.start", lambda: None)
@@ -254,7 +264,9 @@ def test_dashboard_shows_today_consumption_column(tmp_path, monkeypatch):
 
     assert dashboard.status_code == 200
     assert "今日消耗" in dashboard.text
+    assert "今日消耗总余额" in dashboard.text
     assert "5.5 USD" in dashboard.text
+    assert "6.75 USD" in dashboard.text
 
 
 def test_dashboard_orders_eliminated_accounts_last(tmp_path, monkeypatch):

@@ -396,6 +396,21 @@ def grouped_accounts(
     return grouped
 
 
+def summarize_today_consumption(grouped: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    totals: dict[str, float] = {}
+    account_count = 0
+    for accounts in grouped.values():
+        for account in accounts:
+            consumption = _optional_number(account.get("today_consumption"))
+            if consumption is None:
+                continue
+            unit = str(account.get("last_unit") or "").strip()
+            totals[unit] = round(totals.get(unit, 0.0) + consumption, 6)
+            account_count += 1
+    total_items = [{"amount": amount, "unit": unit} for unit, amount in totals.items()]
+    return {"totals": total_items, "account_count": account_count}
+
+
 def public_edit_account(account_id: int | None) -> dict[str, Any] | None:
     if not account_id:
         return None
@@ -417,10 +432,16 @@ async def dashboard(request: Request):
     redirect = redirect_if_needed(request)
     if redirect:
         return redirect
+    grouped = grouped_accounts(eliminated_last=True, visible_only=True)
     return templates.TemplateResponse(
         request,
         "dashboard.html",
-        template_context(request, grouped=grouped_accounts(eliminated_last=True, visible_only=True), settings=db.get_general_settings()),
+        template_context(
+            request,
+            grouped=grouped,
+            settings=db.get_general_settings(),
+            today_consumption_summary=summarize_today_consumption(grouped),
+        ),
     )
 
 

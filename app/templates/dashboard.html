@@ -25,6 +25,20 @@
   </div>
 </section>
 
+<section class="dashboard-stats" aria-label="余额统计">
+  <div class="dashboard-stat">
+    <span>今日消耗总余额</span>
+    <strong data-today-consumption-total>
+      {% if today_consumption_summary.totals %}
+      {% for item in today_consumption_summary.totals %}{{ item.amount }}{% if item.unit %} {{ item.unit }}{% endif %}{% if not loop.last %} / {% endif %}{% endfor %}
+      {% else %}
+      -
+      {% endif %}
+    </strong>
+    <small data-today-consumption-count>{{ today_consumption_summary.account_count }} 个账号有今日记录</small>
+  </div>
+</section>
+
 {% for platform, accounts in grouped.items() %}
 <section class="panel">
   <div class="panel-title">
@@ -94,7 +108,12 @@
           </td>
           {% endif %}
           <td data-account-remaining data-account-remaining-value="{{ account.last_remaining if account.last_remaining is not none else '' }}" data-label="剩余">{{ account.last_remaining if account.last_remaining is not none else "-" }} {{ account.last_unit or "" }}</td>
-          <td data-account-today-consumption data-label="今日消耗">{{ account.today_consumption if account.today_consumption is not none else "-" }}{% if account.today_consumption is not none and account.last_unit %} {{ account.last_unit }}{% endif %}</td>
+          <td
+            data-account-today-consumption
+            data-account-today-consumption-value="{{ account.today_consumption if account.today_consumption is not none else '' }}"
+            data-account-today-consumption-unit="{{ account.last_unit or '' }}"
+            data-label="今日消耗"
+          >{{ account.today_consumption if account.today_consumption is not none else "-" }}{% if account.today_consumption is not none and account.last_unit %} {{ account.last_unit }}{% endif %}</td>
           {% if platform != "sub2Api" %}
           <td data-account-used data-label="已用">{{ account.last_used if account.last_used is not none else "-" }}</td>
           <td data-account-total data-label="总额">{{ account.last_total if account.last_total is not none else "-" }}</td>
@@ -221,6 +240,35 @@
     return unit && amount !== "-" ? `${amount} ${unit}` : amount;
   };
   const formatRemaining = (result) => formatAmountWithUnit(result.remaining, result.unit || "");
+  const roundAmount = (value) => Math.round((value + Number.EPSILON) * 1000000) / 1000000;
+  const formatTotalAmount = (value) => String(roundAmount(value));
+  const updateTodayConsumptionSummary = () => {
+    const total = document.querySelector("[data-today-consumption-total]");
+    const count = document.querySelector("[data-today-consumption-count]");
+    if (!total || !count) {
+      return;
+    }
+    const totals = new Map();
+    let accountCount = 0;
+    document.querySelectorAll("[data-account-today-consumption]").forEach((cell) => {
+      const rawValue = cell.dataset.accountTodayConsumptionValue;
+      if (rawValue === null || rawValue === undefined || rawValue === "") {
+        return;
+      }
+      const value = Number(rawValue);
+      if (!Number.isFinite(value)) {
+        return;
+      }
+      const unit = cell.dataset.accountTodayConsumptionUnit || "";
+      totals.set(unit, roundAmount((totals.get(unit) || 0) + value));
+      accountCount += 1;
+    });
+    const parts = Array.from(totals.entries()).map(([unit, amount]) => {
+      return unit ? `${formatTotalAmount(amount)} ${unit}` : formatTotalAmount(amount);
+    });
+    total.textContent = parts.length ? parts.join(" / ") : "-";
+    count.textContent = `${accountCount} 个账号有今日记录`;
+  };
   const groupRatesFromResult = (result) => {
     if (!result || !result.extra) {
       return [];
@@ -741,7 +789,11 @@
       remaining.dataset.accountRemainingValue = result.remaining ?? "";
     }
     if (todayConsumption) {
-      todayConsumption.textContent = formatAmountWithUnit(result.today_consumption ?? result.todayConsumption, result.unit || "");
+      const consumption = result.today_consumption ?? result.todayConsumption;
+      const unit = result.unit || todayConsumption.dataset.accountTodayConsumptionUnit || "";
+      todayConsumption.textContent = formatAmountWithUnit(consumption, unit);
+      todayConsumption.dataset.accountTodayConsumptionValue = consumption ?? "";
+      todayConsumption.dataset.accountTodayConsumptionUnit = unit;
     }
     if (used) {
       used.textContent = formatValue(result.used);
@@ -753,6 +805,7 @@
     if (checkedAt) {
       checkedAt.textContent = formatChinaTime(result.checked_at || result.checkedAt);
     }
+    updateTodayConsumptionSummary();
   };
   const updateBalanceRows = (results) => {
     results.forEach((result) => {
