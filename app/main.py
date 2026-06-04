@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import parse_qs
 
@@ -12,10 +13,18 @@ from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 
 from app.config import get_config, uses_default_app_secret
-from app.models import BALANCE_QUERY_INTERVAL_SECONDS, GROUP_RATE_QUERY_INTERVAL_SECONDS, Database, format_china_time, row_to_dict
+from app.models import (
+    BALANCE_QUERY_INTERVAL_SECONDS,
+    CHINA_TZ,
+    DEFAULT_BALANCE_UNIT,
+    GROUP_RATE_QUERY_INTERVAL_SECONDS,
+    Database,
+    format_china_time,
+    row_to_dict,
+)
 from app.security import decrypt_value
 from app.security import verify_password
-from app.services.balance import query_newapi_group_options
+from app.services.balance import query_newapi_group_options, query_sub2api_group_options
 from app.services.emailer import send_email
 from app.services.scheduler import BalanceScheduler, query_all_accounts, query_group_rate_for_account, query_one_account, query_sub2api_group_for_account
 
@@ -43,9 +52,12 @@ LOG_PAGE_SIZE = 50
 LOG_MAX_PAGE_SIZE = 200
 CONSUMPTION_PERIODS = [
     {"key": "today", "label": "今日消耗总余额", "count_label": "个账号有今日记录"},
+    {"key": "yesterday", "label": "昨日消耗总余额", "count_label": "个账号有昨日记录"},
     {"key": "last_24h", "label": "近24小时消耗总余额", "count_label": "个账号有近24小时记录"},
     {"key": "last_7d", "label": "近7天消耗总余额", "count_label": "个账号有近7天记录"},
     {"key": "last_14d", "label": "近14天消耗总余额", "count_label": "个账号有近14天记录"},
+    {"key": "this_month", "label": "本月消耗总余额", "count_label": "个账号有本月记录"},
+    {"key": "last_month", "label": "上月消耗总余额", "count_label": "个账号有上月记录"},
 ]
 
 
@@ -286,9 +298,10 @@ def public_account(row: Any) -> dict[str, Any]:
     data["is_enabled"] = bool(data.get("is_enabled", True))
     data["is_visible"] = bool(data.get("is_visible", True))
     data["is_eliminated"] = bool(data.get("is_eliminated"))
+    data["last_unit"] = str(data.get("last_unit") or DEFAULT_BALANCE_UNIT).strip() or DEFAULT_BALANCE_UNIT
     key_id_enc = data.pop("key_id_enc", None)
     data["has_key_id"] = bool(key_id_enc)
-    selected_group_id = decrypt_value(key_id_enc, config.app_secret_key) if data["platform"] == "newApi" and key_id_enc else None
+    selected_group_id = decrypt_value(key_id_enc, config.app_secret_key) if data["platform"] in {"newApi", "sub2Api"} and key_id_enc else None
     data["selected_group_id"] = selected_group_id
     data["has_api_key"] = bool(data.pop("api_key_enc", None))
     data["has_email"] = bool(data.pop("email_enc", None))
@@ -298,7 +311,7 @@ def public_account(row: Any) -> dict[str, Any]:
     data["group_rates"] = group_rates_from_extra(data.get("last_extra"))
     data["consumption_stats"] = db.get_consumption_stats(int(data["id"]))
     data["today_consumption"] = data["consumption_stats"]["today"]
-    if data["platform"] == "newApi" and selected_group_id and not data["group_rates"]:
+    if data["platform"] in {"newApi", "sub2Api"} and selected_group_id and not data["group_rates"]:
         data["group_rates"] = [{"plan_name": f"当前分组 {selected_group_id}", "rate_multiplier": None}]
     return data
 
@@ -338,7 +351,7 @@ def group_rates_from_extra(extra: Any) -> list[dict[str, Any]]:
     return group_rates
 
 
-def newapi_group_result_from_selection(group_id: str, group: dict[str, Any]) -> dict[str, Any]:
+def account_group_result_from_selection(platform: str, group_id: str, group: dict[str, Any]) -> dict[str, Any]:
     selected_id = str(group.get("id") or group.get("name") or group_id)
     if selected_id != group_id:
         raise HTTPException(status_code=400, detail="分组信息与选择的分组不一致")
@@ -369,7 +382,7 @@ def newapi_group_result_from_selection(group_id: str, group: dict[str, Any]) -> 
         "id": group_id,
         "name": group.get("name") or plan_name,
         "plan_name": plan_name,
-        "platform": "newApi",
+        "platform": group.get("platform") or platform,
         "status": group.get("status"),
         "default_rate_multiplier": default_rate,
         "user_rate_multiplier": user_rate,
@@ -404,25 +417,66 @@ def grouped_accounts(
     return grouped
 
 
-def summarize_consumption_period(grouped: dict[str, list[dict[str, Any]]], period: dict[str, str]) -> dict[str, Any]:
+def summarize_consumption_period(grouped: dict[str, list[dict[str, Any]]], period: dict[str, Any]) -> dict[str, Any]:
     totals: dict[str, float] = {}
     account_count = 0
     key = period["key"]
     for accounts in grouped.values():
         for account in accounts:
-            stats = account.get("consumption_stats") if isinstance(account.get("consumption_stats"), dict) else {}
-            consumption = _optional_number(stats.get(key))
+            if period.get("since"):
+                consumption = db.get_consumption_between(int(account["id"]), str(period["since"]), period.get("until"))
+            else:
+                stats = account.get("consumption_stats") if isinstance(account.get("consumption_stats"), dict) else {}
+                consumption = _optional_number(stats.get(key))
             if consumption is None:
                 continue
-            unit = str(account.get("last_unit") or "").strip()
+            unit = str(account.get("last_unit") or DEFAULT_BALANCE_UNIT).strip() or DEFAULT_BALANCE_UNIT
             totals[unit] = round(totals.get(unit, 0.0) + consumption, 6)
             account_count += 1
     total_items = [{"amount": amount, "unit": unit} for unit, amount in totals.items()]
     return {**period, "totals": total_items, "account_count": account_count}
 
 
-def summarize_consumption_periods(grouped: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
-    return [summarize_consumption_period(grouped, period) for period in CONSUMPTION_PERIODS]
+def summarize_consumption_periods(grouped: dict[str, list[dict[str, Any]]], custom_range: dict[str, Any]) -> list[dict[str, Any]]:
+    summaries = [summarize_consumption_period(grouped, period) for period in CONSUMPTION_PERIODS]
+    custom_period = {
+        "key": "custom",
+        "label": "筛选区间消耗总余额",
+        "count_label": "个账号有筛选区间记录",
+        "static": True,
+    }
+    if custom_range.get("active"):
+        custom_period = {**custom_period, "since": custom_range["since"], "until": custom_range["until"]}
+        summaries.append(summarize_consumption_period(grouped, custom_period))
+    else:
+        summaries.append({**custom_period, "totals": [], "account_count": 0})
+    return summaries
+
+
+def consumption_date_range_from_query(request: Request) -> dict[str, Any]:
+    start_raw = str(request.query_params.get("consumption_start") or "").strip()
+    end_raw = str(request.query_params.get("consumption_end") or "").strip()
+    result: dict[str, Any] = {"start": start_raw, "end": end_raw, "active": False}
+    if not start_raw or not end_raw:
+        return result
+    try:
+        start_date = datetime.strptime(start_raw, "%Y-%m-%d").date()
+        end_date = datetime.strptime(end_raw, "%Y-%m-%d").date()
+    except ValueError:
+        return result
+    if end_date < start_date:
+        start_date, end_date = end_date, start_date
+        start_raw, end_raw = end_raw, start_raw
+    since = datetime(start_date.year, start_date.month, start_date.day, tzinfo=CHINA_TZ)
+    until_date = end_date + timedelta(days=1)
+    until = datetime(until_date.year, until_date.month, until_date.day, tzinfo=CHINA_TZ)
+    return {
+        "start": start_raw,
+        "end": end_raw,
+        "active": True,
+        "since": since.astimezone(timezone.utc).isoformat(timespec="seconds"),
+        "until": until.astimezone(timezone.utc).isoformat(timespec="seconds"),
+    }
 
 
 def public_edit_account(account_id: int | None) -> dict[str, Any] | None:
@@ -447,6 +501,7 @@ async def dashboard(request: Request):
     if redirect:
         return redirect
     grouped = grouped_accounts(eliminated_last=True, visible_only=True)
+    consumption_filter = consumption_date_range_from_query(request)
     return templates.TemplateResponse(
         request,
         "dashboard.html",
@@ -454,7 +509,8 @@ async def dashboard(request: Request):
             request,
             grouped=grouped,
             settings=db.get_general_settings(),
-            consumption_summaries=summarize_consumption_periods(grouped),
+            consumption_summaries=summarize_consumption_periods(grouped, consumption_filter),
+            consumption_filter=consumption_filter,
         ),
     )
 
@@ -1016,24 +1072,39 @@ async def api_newapi_groups(request: Request, account_id: int):
     return result
 
 
+@app.get("/api/accounts/{account_id}/sub2api-groups")
+async def api_sub2api_groups(request: Request, account_id: int):
+    require_user(request)
+    account = db.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    if account["platform"] != "sub2Api":
+        raise HTTPException(status_code=400, detail="仅支持 sub2Api")
+    settings = db.get_general_settings()
+    result = await query_sub2api_group_options(account, db.secret_key, settings["request_timeout"], db.add_log)
+    if not result.get("is_valid"):
+        return JSONResponse(result, status_code=400)
+    return result
+
+
 @app.post("/api/accounts/{account_id}/selected-group")
 async def api_select_account_group(request: Request, account_id: int):
     require_user(request)
     account = db.get_account(account_id)
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")
-    if account["platform"] != "newApi":
-        raise HTTPException(status_code=400, detail="仅支持 newApi")
+    if account["platform"] not in {"newApi", "sub2Api"}:
+        raise HTTPException(status_code=400, detail="仅支持 newApi 或 sub2Api")
     payload = await request.json()
     group_id = str(payload.get("group_id") or payload.get("groupId") or "").strip()
     if not group_id:
         raise HTTPException(status_code=400, detail="请选择分组")
     group = payload.get("group")
-    group_result = newapi_group_result_from_selection(group_id, group) if isinstance(group, dict) else None
+    group_result = account_group_result_from_selection(account["platform"], group_id, group) if isinstance(group, dict) else None
     db.update_account_selected_group(account_id, group_id)
     db.update_account_group_result(account_id, group_result or {"extra": None})
     updated = db.get_account(account_id)
-    db.add_log("info", "account", f"newApi / {account['name']} 选择分组: {group_id}")
+    db.add_log("info", "account", f"{account['platform']} / {account['name']} 选择分组: {group_id}")
     return {"ok": True, "account": public_account(updated), "group_result": group_result}
 
 

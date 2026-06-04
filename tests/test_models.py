@@ -358,7 +358,7 @@ def test_account_result_keeps_group_result_even_with_extra(tmp_path):
     assert account["last_extra"] == "group-extra"
 
 
-def test_balance_history_keeps_recent_fourteen_days_and_valid_balances(tmp_path):
+def test_balance_history_keeps_nine_months_but_trend_lists_recent_three_days(tmp_path):
     db = Database(str(tmp_path / "app.db"), "test-key")
     db.init()
     account_id = db.upsert_account(
@@ -371,19 +371,26 @@ def test_balance_history_keeps_recent_fourteen_days_and_valid_balances(tmp_path)
             "api_key": "sk-test",
         }
     )
-    old_time = (datetime.now(timezone.utc) - timedelta(days=14, minutes=1)).isoformat(timespec="seconds")
-    retained_time = (datetime.now(timezone.utc) - timedelta(days=13, hours=23)).isoformat(timespec="seconds")
-    recent_time = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(timespec="seconds")
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    expired_time = (now - timedelta(days=310)).isoformat(timespec="seconds")
+    stored_but_not_trend_time = (now - timedelta(days=4)).isoformat(timespec="seconds")
+    recent_time = (now - timedelta(hours=2)).isoformat(timespec="seconds")
 
-    db.update_account_result(account_id, {"is_valid": True, "remaining": 4, "checked_at": old_time})
-    db.update_account_result(account_id, {"is_valid": True, "remaining": 6.5, "unit": "USD", "checked_at": retained_time})
+    db.update_account_result(account_id, {"is_valid": True, "remaining": 4, "checked_at": expired_time})
+    db.update_account_result(account_id, {"is_valid": True, "remaining": 6.5, "unit": "USD", "checked_at": stored_but_not_trend_time})
     db.update_account_result(account_id, {"is_valid": False, "remaining": 5, "checked_at": recent_time})
     db.update_account_result(account_id, {"is_valid": True, "remaining": 7.5, "unit": "USD", "checked_at": recent_time})
 
     records = db.list_balance_history(account_id)
+    with db.connect() as conn:
+        stored = conn.execute(
+            "SELECT remaining FROM query_records WHERE account_id = ? ORDER BY checked_at ASC, id ASC",
+            (account_id,),
+        ).fetchall()
 
-    assert [record["remaining"] for record in records] == [6.5, 7.5]
-    assert [record["unit"] for record in records] == ["USD", "USD"]
+    assert [record["remaining"] for record in records] == [7.5]
+    assert [record["unit"] for record in records] == ["USD"]
+    assert [record["remaining"] for record in stored] == [6.5, 5, 7.5]
 
 
 def test_balance_history_can_be_cleared_for_one_account(tmp_path):
@@ -481,6 +488,54 @@ def test_consumption_stats_cover_24h_7d_and_14d_windows(tmp_path):
     assert stats["last_24h"] == 5
     assert stats["last_7d"] == 35
     assert stats["last_14d"] == 55
+
+
+def test_consumption_stats_cover_calendar_windows(tmp_path):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+
+    def make_account(name: str) -> int:
+        return db.upsert_account(
+            {
+                "platform": "sub2Api",
+                "name": name,
+                "base_url": "https://example.com",
+                "email": "user@example.com",
+                "password": "login-password",
+                "api_key": "sk-test",
+            }
+        )
+
+    def utc_text(value: datetime) -> str:
+        return value.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+    china_tz = timezone(timedelta(hours=8))
+    today_start = datetime.now(china_tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    yesterday_start = today_start - timedelta(days=1)
+    this_month_start = today_start.replace(day=1)
+    if this_month_start.month == 1:
+        last_month_start = this_month_start.replace(year=this_month_start.year - 1, month=12)
+    else:
+        last_month_start = this_month_start.replace(month=this_month_start.month - 1)
+
+    yesterday_account = make_account("sub-yesterday-consumption")
+    db.update_account_result(yesterday_account, {"is_valid": True, "remaining": 40, "checked_at": utc_text(yesterday_start + timedelta(hours=1))})
+    db.update_account_result(yesterday_account, {"is_valid": True, "remaining": 35, "checked_at": utc_text(yesterday_start + timedelta(hours=2))})
+
+    this_month_account = make_account("sub-this-month-consumption")
+    db.update_account_result(this_month_account, {"is_valid": True, "remaining": 90, "checked_at": utc_text(this_month_start + timedelta(hours=1))})
+    db.update_account_result(this_month_account, {"is_valid": True, "remaining": 86, "checked_at": utc_text(this_month_start + timedelta(hours=2))})
+
+    last_month_account = make_account("sub-last-month-consumption")
+    db.update_account_result(last_month_account, {"is_valid": True, "remaining": 70, "checked_at": utc_text(last_month_start + timedelta(hours=1))})
+    db.update_account_result(last_month_account, {"is_valid": True, "remaining": 63, "checked_at": utc_text(last_month_start + timedelta(hours=2))})
+    db.update_account_result(last_month_account, {"is_valid": True, "remaining": 80, "checked_at": utc_text(last_month_start + timedelta(hours=3))})
+    db.update_account_result(last_month_account, {"is_valid": True, "remaining": 78, "checked_at": utc_text(last_month_start + timedelta(hours=4))})
+
+    assert db.get_consumption_stats(yesterday_account)["yesterday"] == 5
+    assert db.get_consumption_stats(this_month_account)["this_month"] == 4
+    assert db.get_consumption_stats(last_month_account)["last_month"] == 9
+    assert db.get_consumption_between(last_month_account, utc_text(last_month_start), utc_text(this_month_start)) == 9
 
 
 def test_group_rate_records_only_insert_on_change(tmp_path):

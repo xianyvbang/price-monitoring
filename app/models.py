@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import calendar
 import os
 import sqlite3
 from contextlib import contextmanager
@@ -15,7 +16,9 @@ def utc_now() -> str:
 
 
 CHINA_TZ = timezone(timedelta(hours=8))
-BALANCE_HISTORY_DAYS = 14
+DEFAULT_BALANCE_UNIT = "USD"
+BALANCE_HISTORY_MONTHS = 9
+BALANCE_TREND_DAYS = 3
 BALANCE_QUERY_INTERVAL_SECONDS = 5 * 60
 GROUP_RATE_QUERY_INTERVAL_SECONDS = 20 * 60
 
@@ -573,7 +576,7 @@ class Database:
     def update_account_result(self, account_id: int, result: dict[str, Any]) -> None:
         status = "valid" if result.get("is_valid") else "invalid"
         checked_at = result.get("checked_at") or utc_now()
-        history_cutoff = _days_ago(BALANCE_HISTORY_DAYS)
+        history_cutoff = _months_ago(BALANCE_HISTORY_MONTHS)
         with self.connect() as conn:
             conn.execute(
                 """
@@ -797,7 +800,7 @@ class Database:
 
     def list_balance_history(self, account_id: int) -> list[sqlite3.Row]:
         self.cleanup_balance_history()
-        cutoff = _days_ago(BALANCE_HISTORY_DAYS)
+        cutoff = _days_ago(BALANCE_TREND_DAYS)
         with self.connect() as conn:
             return conn.execute(
                 """
@@ -812,32 +815,44 @@ class Database:
                 (account_id, cutoff),
             ).fetchall()
 
-    def get_consumption_since(self, account_id: int, since: str) -> Optional[float]:
+    def get_consumption_between(self, account_id: int, since: str, until: str | None = None) -> Optional[float]:
         self.cleanup_balance_history()
+        date_filter = "AND checked_at < ?" if until else ""
+        params: tuple[Any, ...] = (account_id, since, until) if until else (account_id, since)
         with self.connect() as conn:
             records = conn.execute(
-                """
+                f"""
                 SELECT remaining
                 FROM query_records
                 WHERE account_id = ?
                     AND is_valid = 1
                     AND remaining IS NOT NULL
                     AND checked_at >= ?
+                    {date_filter}
                 ORDER BY checked_at ASC, id ASC
                 """,
-                (account_id, since),
+                params,
             ).fetchall()
         return _sum_consumption(records)
+
+    def get_consumption_since(self, account_id: int, since: str) -> Optional[float]:
+        return self.get_consumption_between(account_id, since)
 
     def get_today_consumption(self, account_id: int) -> Optional[float]:
         return self.get_consumption_since(account_id, _today_start_utc())
 
     def get_consumption_stats(self, account_id: int) -> dict[str, Optional[float]]:
+        today_start = _today_start_utc()
+        this_month_start = _this_month_start_utc()
+        last_month_start = _last_month_start_utc()
         return {
             "today": self.get_today_consumption(account_id),
+            "yesterday": self.get_consumption_between(account_id, _yesterday_start_utc(), today_start),
             "last_24h": self.get_consumption_since(account_id, _hours_ago(24)),
             "last_7d": self.get_consumption_since(account_id, _days_ago(7)),
             "last_14d": self.get_consumption_since(account_id, _days_ago(14)),
+            "this_month": self.get_consumption_since(account_id, this_month_start),
+            "last_month": self.get_consumption_between(account_id, last_month_start, this_month_start),
         }
 
     def clear_balance_history(self, account_id: int) -> None:
@@ -896,7 +911,7 @@ class Database:
             conn.execute("DELETE FROM app_logs WHERE created_at < ?", (cutoff,))
 
     def cleanup_balance_history(self) -> None:
-        cutoff = _days_ago(BALANCE_HISTORY_DAYS)
+        cutoff = _months_ago(BALANCE_HISTORY_MONTHS)
         with self.connect() as conn:
             conn.execute("DELETE FROM query_records WHERE checked_at < ?", (cutoff,))
 
@@ -943,13 +958,47 @@ def _days_ago(days: int) -> str:
     return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
 
 
+def _months_ago(months: int) -> str:
+    now_china = datetime.now(CHINA_TZ)
+    month_index = now_china.month - months
+    year = now_china.year + (month_index - 1) // 12
+    month = (month_index - 1) % 12 + 1
+    day = min(now_china.day, calendar.monthrange(year, month)[1])
+    cutoff_china = now_china.replace(year=year, month=month, day=day)
+    return cutoff_china.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
 def _hours_ago(hours: int) -> str:
     return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat(timespec="seconds")
 
 
 def _today_start_utc() -> str:
-    today_start_china = datetime.now(CHINA_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
-    return today_start_china.astimezone(timezone.utc).isoformat(timespec="seconds")
+    return _china_day_start_utc(datetime.now(CHINA_TZ))
+
+
+def _yesterday_start_utc() -> str:
+    return _china_day_start_utc(datetime.now(CHINA_TZ) - timedelta(days=1))
+
+
+def _this_month_start_utc() -> str:
+    now_china = datetime.now(CHINA_TZ)
+    month_start = now_china.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    return month_start.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
+def _last_month_start_utc() -> str:
+    now_china = datetime.now(CHINA_TZ)
+    this_month_start = now_china.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if this_month_start.month == 1:
+        last_month_start = this_month_start.replace(year=this_month_start.year - 1, month=12)
+    else:
+        last_month_start = this_month_start.replace(month=this_month_start.month - 1)
+    return last_month_start.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
+def _china_day_start_utc(value: datetime) -> str:
+    day_start_china = value.astimezone(CHINA_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+    return day_start_china.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
 def _replace_name_rate_suffix(name: str, rate: float) -> str:

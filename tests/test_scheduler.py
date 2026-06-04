@@ -72,7 +72,7 @@ async def test_query_one_account_returns_today_consumption(tmp_path, monkeypatch
     db.update_account_result(account_id, {"is_valid": True, "remaining": 20, "unit": "USD", "checked_at": first})
 
     async def fake_query(account, secret_key, timeout, log):
-        return {"is_valid": True, "remaining": 17.25, "unit": "USD"}
+        return {"is_valid": True, "remaining": 17.25}
 
     monkeypatch.setattr("app.services.scheduler.query_account", fake_query)
     monkeypatch.setattr("app.services.scheduler.utc_now", lambda: second)
@@ -83,6 +83,8 @@ async def test_query_one_account_returns_today_consumption(tmp_path, monkeypatch
     assert result["todayConsumption"] == 2.75
     assert result["consumption_stats"]["today"] == 2.75
     assert result["consumptionStats"]["last_24h"] == 2.75
+    assert result["unit"] == "USD"
+    assert db.get_account(account_id)["last_unit"] == "USD"
 
 
 @pytest.mark.asyncio

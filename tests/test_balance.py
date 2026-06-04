@@ -2,7 +2,15 @@ import pytest
 import httpx
 
 from app.services.balance import _SUB2API_TOKEN_CACHE
-from app.services.balance import normalize_result, query_newapi, query_newapi_group, query_newapi_group_options, query_sub2api, query_sub2api_group
+from app.services.balance import (
+    normalize_result,
+    query_newapi,
+    query_newapi_group,
+    query_newapi_group_options,
+    query_sub2api,
+    query_sub2api_group,
+    query_sub2api_group_options,
+)
 from app.models import Database
 from app.security import encrypt_value
 
@@ -119,6 +127,44 @@ async def test_sub2api_group_query_uses_key_id(monkeypatch):
     assert DummyClient.requests[2]["url"] == "https://sub.example/api/v1/groups/available"
     assert DummyClient.requests[3]["url"] == "https://sub.example/api/v1/groups/rates"
     assert DummyClient.requests[2]["headers"]["Authorization"] == "Bearer jwt"
+
+
+@pytest.mark.asyncio
+async def test_sub2api_group_options_fetches_available_groups(monkeypatch):
+    monkeypatch.setattr("app.services.balance.httpx.AsyncClient", DummyClient)
+    DummyClient.post_payload = {"data": {"access_token": "jwt"}}
+    DummyClient.get_payloads = [
+        {
+            "data": [
+                {"id": "basic", "plan_name": "Basic Plan", "rate_multiplier": 1.2},
+                {"id": "pro", "name": "Pro Plan", "rate_multiplier": 2.0},
+            ]
+        },
+        {"data": {"basic": 0.8, "pro": 1.5}},
+    ]
+    DummyClient.requests = []
+    account = {
+        "platform": "sub2Api",
+        "name": "sub",
+        "base_url": "https://sub.example",
+        "key_id_enc": encrypt_value("pro", "test-key"),
+        "email_enc": encrypt_value("user@example.com", "test-key"),
+        "password_enc": encrypt_value("password", "test-key"),
+    }
+
+    result = await query_sub2api_group_options(account, "test-key", 3)
+
+    assert result["is_valid"] is True
+    assert result["selected_group_id"] == "pro"
+    assert result["groups"][0]["id"] == "basic"
+    assert result["groups"][0]["plan_name"] == "Basic Plan"
+    assert result["groups"][0]["effective_rate_multiplier"] == 0.8
+    assert result["groups"][1]["id"] == "pro"
+    assert result["groups"][1]["effective_rate_multiplier"] == 1.5
+    assert DummyClient.requests[0]["url"] == "https://sub.example/api/v1/auth/login"
+    assert DummyClient.requests[1]["url"] == "https://sub.example/api/v1/groups/available"
+    assert DummyClient.requests[2]["url"] == "https://sub.example/api/v1/groups/rates"
+    assert DummyClient.requests[1]["headers"]["Authorization"] == "Bearer jwt"
 
 
 @pytest.mark.asyncio

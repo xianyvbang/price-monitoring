@@ -114,7 +114,7 @@
             {% endif %}
           </td>
           <td data-account-credentials data-label="凭据">
-            {% if platform == "sub2Api" %}groupId筛选: {{ "已配置" if account.has_key_id else "未配置" }} / apiKey: {{ "已配置" if account.has_api_key else "未配置" }} / email: {{ "已配置" if account.has_email else "未配置" }} / password: {{ "已配置" if account.has_password else "未配置" }}{% endif %}
+            {% if platform == "sub2Api" %}当前分组: {{ account.selected_group_id or "未选择" }} / apiKey: {{ "已配置" if account.has_api_key else "未配置" }} / email: {{ "已配置" if account.has_email else "未配置" }} / password: {{ "已配置" if account.has_password else "未配置" }}{% endif %}
             {% if platform == "newApi" %}accessToken: {{ "已配置" if account.has_access_token else "未配置" }} / userId: {{ "已配置" if account.has_user_id else "未配置" }} / 当前分组: {{ account.selected_group_id or "未选择" }}{% endif %}
           </td>
           <td data-account-threshold-cell data-label="阈值">{{ account.threshold if account.threshold is not none else settings.default_threshold }}</td>
@@ -149,7 +149,7 @@
                 data-base-url="{{ account.base_url }}"
                 data-note="{{ account.note or '' }}"
                 data-recharge-url="{{ account.recharge_url or '' }}"
-                data-key-id="{{ account.key_id if account.key_id is defined else '' }}"
+                data-key-id="{{ account.key_id if account.key_id is defined else account.selected_group_id or '' }}"
                 data-selected-group-id="{{ account.selected_group_id or '' }}"
                 data-email="{{ account.email if account.email is defined else '' }}"
                 data-user-id="{{ account.user_id if account.user_id is defined else '' }}"
@@ -159,9 +159,10 @@
               >编辑</button>
               {% if platform == "sub2Api" %}
               <button type="button" data-group-query data-account-id="{{ account.id }}">查组</button>
+              <button type="button" data-sub2api-groups data-platform="sub2Api" data-account-id="{{ account.id }}">选择分组</button>
               {% endif %}
               {% if platform == "newApi" %}
-              <button type="button" data-newapi-groups data-account-id="{{ account.id }}">重新获取分组</button>
+              <button type="button" data-newapi-groups data-platform="newApi" data-account-id="{{ account.id }}">重新获取分组</button>
               {% endif %}
               <form method="post" action="/accounts/{{ account.id }}/delete">
                 <button class="danger" type="submit">删除</button>
@@ -270,10 +271,10 @@
   const configuredLabel = (value) => boolValue(value) ? "已配置" : "未配置";
   const renderCredentials = (account) => {
     const platform = fieldValue(account, "platform") || "newApi";
-    if (platform === "sub2Api") {
-      return `groupId筛选: ${configuredLabel(fieldValue(account, "has_key_id", "hasKeyId"))} / apiKey: ${configuredLabel(fieldValue(account, "has_api_key", "hasApiKey"))} / email: ${configuredLabel(fieldValue(account, "has_email", "hasEmail"))} / password: ${configuredLabel(fieldValue(account, "has_password", "hasPassword"))}`;
-    }
     const selectedGroupId = fieldValue(account, "selected_group_id", "selectedGroupId") || fieldValue(account, "key_id", "keyId");
+    if (platform === "sub2Api") {
+      return `当前分组: ${escapeHtml(displayText(selectedGroupId, "未选择"))} / apiKey: ${configuredLabel(fieldValue(account, "has_api_key", "hasApiKey"))} / email: ${configuredLabel(fieldValue(account, "has_email", "hasEmail"))} / password: ${configuredLabel(fieldValue(account, "has_password", "hasPassword"))}`;
+    }
     return `accessToken: ${configuredLabel(fieldValue(account, "has_access_token", "hasAccessToken"))} / userId: ${configuredLabel(fieldValue(account, "has_user_id", "hasUserId"))} / 当前分组: ${escapeHtml(displayText(selectedGroupId, "未选择"))}`;
   };
   const renderRechargeCell = (account) => {
@@ -338,6 +339,7 @@
     const note = fieldValue(account, "note");
     const keyId = fieldValue(account, "key_id", "keyId");
     const selectedGroupId = fieldValue(account, "selected_group_id", "selectedGroupId") || (platform === "newApi" ? keyId : "");
+    const effectiveKeyId = platform === "sub2Api" ? (fieldValue(account, "selected_group_id", "selectedGroupId") || keyId) : keyId;
     const email = fieldValue(account, "email");
     const userId = fieldValue(account, "user_id", "userId");
     const threshold = fieldValue(account, "threshold");
@@ -384,7 +386,7 @@
                 data-base-url="${escapeHtml(baseUrl)}"
                 data-note="${escapeHtml(note)}"
                 data-recharge-url="${escapeHtml(rechargeUrl)}"
-                data-key-id="${escapeHtml(keyId)}"
+                data-key-id="${escapeHtml(effectiveKeyId)}"
                 data-selected-group-id="${escapeHtml(selectedGroupId)}"
                 data-email="${escapeHtml(email)}"
                 data-user-id="${escapeHtml(userId)}"
@@ -392,8 +394,8 @@
                 data-is-enabled="${isEnabled ? "true" : "false"}"
                 data-is-visible="${isVisible ? "true" : "false"}"
               >编辑</button>
-              ${platform === "sub2Api" ? `<button type="button" data-group-query data-account-id="${escapeHtml(id)}">查组</button>` : ""}
-              ${platform === "newApi" ? `<button type="button" data-newapi-groups data-account-id="${escapeHtml(id)}">重新获取分组</button>` : ""}
+              ${platform === "sub2Api" ? `<button type="button" data-group-query data-account-id="${escapeHtml(id)}">查组</button><button type="button" data-sub2api-groups data-platform="sub2Api" data-account-id="${escapeHtml(id)}">选择分组</button>` : ""}
+              ${platform === "newApi" ? `<button type="button" data-newapi-groups data-platform="newApi" data-account-id="${escapeHtml(id)}">重新获取分组</button>` : ""}
               <form method="post" action="/accounts/${escapeHtml(id)}/delete">
                 <button class="danger" type="submit">删除</button>
               </form>
@@ -452,7 +454,7 @@
   document.querySelector("[data-group-picker-close]")?.addEventListener("click", () => {
     groupPicker?.close();
   });
-  const chooseNewapiGroup = async (accountId, groupId, group) => {
+  const chooseAccountGroup = async (accountId, groupId, group) => {
     const response = await fetch(`/api/accounts/${accountId}/selected-group`, {
       method: "POST",
       headers: {"Content-Type": "application/json"},
@@ -464,11 +466,11 @@
     }
     return result;
   };
-  const showGroupPicker = (accountId, groups, selectedGroupId, sourceButton, onSelected) => {
+  const showGroupPicker = (accountId, groups, selectedGroupId, sourceButton, onSelected, platform = sourceButton?.dataset?.platform || "newApi") => {
     if (!groupPicker || !groupPickerOptions) {
       return;
     }
-    groupPickerTitle.textContent = "选择 newApi 分组";
+    groupPickerTitle.textContent = `选择 ${platform} 分组`;
     groupPickerMessage.textContent = groups.length ? "选择后会替换当前使用的分组，后续查组只监测这个分组。" : "没有获取到可用分组。";
     groupPickerOptions.innerHTML = "";
     groups.forEach((group) => {
@@ -494,7 +496,7 @@
         setInlineStatus(formStatus, "保存分组中", "pending");
         setAccountActionStatus(accountId, "保存分组中", "pending");
         try {
-          const result = await chooseNewapiGroup(accountId, groupId, group);
+          const result = await chooseAccountGroup(accountId, groupId, group);
           if (result.account) {
             upsertAccountRow(result.account, {updateEditableFields: false});
           }
@@ -526,6 +528,17 @@
     }
     return result;
   };
+  const fetchSub2apiGroupsByAccountId = async (accountId) => {
+    const response = await fetch(`/api/accounts/${accountId}/sub2api-groups`);
+    const result = await parseJsonResponse(response);
+    if (!response.ok) {
+      throw new Error(result.detail || result.invalid_message || "获取分组失败");
+    }
+    return result;
+  };
+  const fetchGroupsByAccountId = async (accountId, platform) => (
+    platform === "sub2Api" ? fetchSub2apiGroupsByAccountId(accountId) : fetchNewapiGroupsByAccountId(accountId)
+  );
 
   document.querySelectorAll("[data-account-form]").forEach((form) => {
     const select = form.querySelector("[data-platform-select]");
@@ -600,8 +613,9 @@
       form.elements.threshold.value = account.threshold || "";
       form.elements.is_visible.checked = account.isVisible !== "false";
       form.elements.is_enabled.checked = account.isEnabled === "true";
-      form.elements.key_id.value = account.selectedGroupId || account.keyId || "";
-      visibleSub2KeyId.value = account.keyId || "";
+      const selectedGroupId = account.selectedGroupId || account.keyId || "";
+      form.elements.key_id.value = selectedGroupId;
+      visibleSub2KeyId.value = account.platform === "sub2Api" ? selectedGroupId : account.keyId || "";
       form.elements.api_key.value = "";
       form.elements.email.value = account.email || "";
       form.elements.password.value = "";
@@ -650,17 +664,18 @@
         accountId.value = result.id;
         upsertAccountRow(result.account || {...payload, id: result.id, platform: select.value}, {updateEditableFields: true});
         setAccountActionStatus(result.id, "保存中", "pending");
-        if (select.value === "newApi") {
+        if (select.value === "newApi" || select.value === "sub2Api") {
           submitLabel.textContent = "获取分组中";
           setInlineStatus(formStatus, "获取分组中", "pending");
           try {
-            const groupResult = await fetchNewapiGroupsByAccountId(result.id);
+            const groupResult = await fetchGroupsByAccountId(result.id, select.value);
             showGroupPicker(
               result.id,
               groupResult.groups || [],
               groupResult.selected_group_id ?? groupResult.selectedGroupId,
               submitLabel,
-              () => finishSuccessfulSave(result.id)
+              () => finishSuccessfulSave(result.id),
+              select.value
             );
             setInlineStatus(formStatus, "账号已保存，请选择分组", "pending");
             setAccountActionStatus(result.id, "已保存", "success");
@@ -812,18 +827,19 @@
   });
 
   document.addEventListener("click", async (event) => {
-    const button = event.target.closest("[data-newapi-groups]");
+    const button = event.target.closest("[data-newapi-groups], [data-sub2api-groups]");
     if (!button || button.disabled) {
       return;
     }
+    const platform = button.dataset.platform || (button.dataset.sub2apiGroups !== undefined ? "sub2Api" : "newApi");
     if (!button.dataset.originalText) {
       button.dataset.originalText = button.textContent;
     }
     button.disabled = true;
     button.textContent = "获取中";
     try {
-      const result = await fetchNewapiGroupsByAccountId(button.dataset.accountId);
-      showGroupPicker(button.dataset.accountId, result.groups || [], result.selected_group_id ?? result.selectedGroupId, button);
+      const result = await fetchGroupsByAccountId(button.dataset.accountId, platform);
+      showGroupPicker(button.dataset.accountId, result.groups || [], result.selected_group_id ?? result.selectedGroupId, button, undefined, platform);
       temporaryButtonStatus(button, "已获取");
     } catch (error) {
       temporaryButtonStatus(button, "失败", error.message || "获取分组失败");

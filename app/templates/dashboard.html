@@ -25,6 +25,25 @@
   </div>
 </section>
 
+<section class="consumption-filter" aria-label="消耗筛选">
+  <form class="consumption-filter-form" method="get" action="/">
+    <label>
+      开始日期
+      <input type="date" name="consumption_start" value="{{ consumption_filter.start }}">
+    </label>
+    <label>
+      结束日期
+      <input type="date" name="consumption_end" value="{{ consumption_filter.end }}">
+    </label>
+    <div class="consumption-filter-actions">
+      <button class="primary" type="submit">筛选</button>
+      {% if consumption_filter.active %}
+      <a class="button-link" href="/">清除筛选</a>
+      {% endif %}
+    </div>
+  </form>
+</section>
+
 <section class="dashboard-stats" aria-label="余额统计">
   {% for summary in consumption_summaries %}
   <div class="dashboard-stat">
@@ -40,6 +59,7 @@
       data-consumption-summary
       data-consumption-period="{{ summary.key }}"
       data-consumption-count-label="{{ summary.count_label }}"
+      data-consumption-static="{{ 'true' if summary.get('static') else 'false' }}"
     >{{ summary.account_count }} {{ summary.count_label }}</small>
   </div>
   {% endfor %}
@@ -82,11 +102,14 @@
           data-account-row="{{ account.id }}"
           data-account-eliminated="{{ 'true' if account.is_eliminated else 'false' }}"
           data-account-enabled="{{ 'true' if account.is_enabled else 'false' }}"
-          data-account-consumption-unit="{{ account.last_unit or '' }}"
+          data-account-consumption-unit="{{ account.last_unit or 'USD' }}"
           data-account-consumption-today="{{ account.consumption_stats.today if account.consumption_stats.today is not none else '' }}"
+          data-account-consumption-yesterday="{{ account.consumption_stats.yesterday if account.consumption_stats.yesterday is not none else '' }}"
           data-account-consumption-last-24h="{{ account.consumption_stats.last_24h if account.consumption_stats.last_24h is not none else '' }}"
           data-account-consumption-last-7d="{{ account.consumption_stats.last_7d if account.consumption_stats.last_7d is not none else '' }}"
           data-account-consumption-last-14d="{{ account.consumption_stats.last_14d if account.consumption_stats.last_14d is not none else '' }}"
+          data-account-consumption-this-month="{{ account.consumption_stats.this_month if account.consumption_stats.this_month is not none else '' }}"
+          data-account-consumption-last-month="{{ account.consumption_stats.last_month if account.consumption_stats.last_month is not none else '' }}"
         >
           <td data-label="名称">{{ account.name }}</td>
           <td class="note-cell" data-label="备注">{{ account.note or "-" }}</td>
@@ -118,13 +141,13 @@
             </div>
           </td>
           {% endif %}
-          <td data-account-remaining data-account-remaining-value="{{ account.last_remaining if account.last_remaining is not none else '' }}" data-label="剩余">{{ account.last_remaining if account.last_remaining is not none else "-" }} {{ account.last_unit or "" }}</td>
+          <td data-account-remaining data-account-remaining-value="{{ account.last_remaining if account.last_remaining is not none else '' }}" data-label="剩余">{{ account.last_remaining if account.last_remaining is not none else "-" }}{% if account.last_remaining is not none %} {{ account.last_unit or "USD" }}{% endif %}</td>
           <td
             data-account-today-consumption
             data-account-today-consumption-value="{{ account.today_consumption if account.today_consumption is not none else '' }}"
-            data-account-today-consumption-unit="{{ account.last_unit or '' }}"
+            data-account-today-consumption-unit="{{ account.last_unit or 'USD' }}"
             data-label="今日消耗"
-          >{{ account.today_consumption if account.today_consumption is not none else "-" }}{% if account.today_consumption is not none and account.last_unit %} {{ account.last_unit }}{% endif %}</td>
+          >{{ account.today_consumption if account.today_consumption is not none else "-" }}{% if account.today_consumption is not none %} {{ account.last_unit or "USD" }}{% endif %}</td>
           {% if platform != "sub2Api" %}
           <td data-account-used data-label="已用">{{ account.last_used if account.last_used is not none else "-" }}</td>
           <td data-account-total data-label="总额">{{ account.last_total if account.last_total is not none else "-" }}</td>
@@ -162,8 +185,11 @@
               {% if platform in ["sub2Api", "newApi"] %}
               <button type="button" data-group-query data-account-id="{{ account.id }}">查组</button>
               {% endif %}
+              {% if platform == "sub2Api" %}
+              <button type="button" data-sub2api-groups data-platform="sub2Api" data-account-id="{{ account.id }}">选择分组</button>
+              {% endif %}
               {% if platform == "newApi" %}
-              <button type="button" data-newapi-groups data-account-id="{{ account.id }}">重新获取分组</button>
+              <button type="button" data-newapi-groups data-platform="newApi" data-account-id="{{ account.id }}">重新获取分组</button>
               {% endif %}
               {% if platform in ["sub2Api", "newApi"] %}
               <a class="button-link" href="/accounts/{{ account.id }}/group-rates">分组变化</a>
@@ -209,7 +235,7 @@
     <div class="dialog-head">
       <div>
         <h2 data-balance-history-title>余额趋势</h2>
-        <p data-balance-history-message>最近 14 天</p>
+        <p data-balance-history-message>最近 3 天</p>
       </div>
       <div class="button-row">
         <button type="button" class="danger" data-balance-history-clear>清除</button>
@@ -250,12 +276,16 @@
     const amount = formatValue(value);
     return unit && amount !== "-" ? `${amount} ${unit}` : amount;
   };
-  const formatRemaining = (result) => formatAmountWithUnit(result.remaining, result.unit || "");
+  const defaultBalanceUnit = "USD";
+  const formatRemaining = (result, unit = result.unit || defaultBalanceUnit) => formatAmountWithUnit(result.remaining, unit);
   const roundAmount = (value) => Math.round((value + Number.EPSILON) * 1000000) / 1000000;
   const formatTotalAmount = (value) => String(roundAmount(value));
   const consumptionAttributeName = (period) => `data-account-consumption-${String(period).replaceAll("_", "-")}`;
   const updateConsumptionSummaries = () => {
     document.querySelectorAll("[data-consumption-summary]").forEach((count) => {
+      if (count.dataset.consumptionStatic === "true") {
+        return;
+      }
       const period = count.dataset.consumptionPeriod || "";
       const total = count.parentElement?.querySelector("[data-consumption-total]");
       if (!period || !total) {
@@ -273,7 +303,7 @@
         if (!Number.isFinite(value)) {
           return;
         }
-        const unit = row.getAttribute("data-account-consumption-unit") || "";
+        const unit = row.getAttribute("data-account-consumption-unit") || defaultBalanceUnit;
         totals.set(unit, roundAmount((totals.get(unit) || 0) + value));
         accountCount += 1;
       });
@@ -351,7 +381,7 @@
   document.querySelector("[data-group-picker-close]")?.addEventListener("click", () => {
     groupPicker?.close();
   });
-  const chooseNewapiGroup = async (accountId, groupId, group) => {
+  const chooseAccountGroup = async (accountId, groupId, group) => {
     const response = await fetch(`/api/accounts/${accountId}/selected-group`, {
       method: "POST",
       headers: {"Content-Type": "application/json"},
@@ -363,11 +393,11 @@
     }
     return result;
   };
-  const showGroupPicker = (accountId, groups, selectedGroupId, sourceButton) => {
+  const showGroupPicker = (accountId, groups, selectedGroupId, sourceButton, platform = sourceButton?.dataset?.platform || "newApi") => {
     if (!groupPicker || !groupPickerOptions) {
       return;
     }
-    groupPickerTitle.textContent = "选择 newApi 分组";
+    groupPickerTitle.textContent = `选择 ${platform} 分组`;
     groupPickerMessage.textContent = groups.length ? "选择后会替换当前使用的分组，后续查组只监测这个分组。" : "没有获取到可用分组。";
     groupPickerOptions.innerHTML = "";
     groups.forEach((group) => {
@@ -388,7 +418,7 @@
       option.addEventListener("click", async () => {
         option.disabled = true;
         try {
-          const result = await chooseNewapiGroup(accountId, groupId, group);
+          const result = await chooseAccountGroup(accountId, groupId, group);
           groupPicker.close();
           if (sourceButton) {
             sourceButton.title = `当前分组: ${groupId}`;
@@ -411,6 +441,17 @@
     }
     return result;
   };
+  const fetchSub2apiGroups = async (button) => {
+    const response = await fetch(`/api/accounts/${button.dataset.accountId}/sub2api-groups`);
+    const result = await response.json();
+    if (!response.ok) {
+      throw new Error(result.detail || result.invalid_message || "获取分组失败");
+    }
+    return result;
+  };
+  const fetchAccountGroups = (button, platform) => (
+    platform === "sub2Api" ? fetchSub2apiGroups(button) : fetchNewapiGroups(button)
+  );
   const balanceHistoryDialog = document.querySelector("[data-balance-history-dialog]");
   const balanceHistoryTitle = document.querySelector("[data-balance-history-title]");
   const balanceHistoryMessage = document.querySelector("[data-balance-history-message]");
@@ -457,7 +498,7 @@
         checkedAt: record.checked_at || record.checkedAt,
         planName: record.plan_name || record.planName,
         time,
-        unit: record.unit || ""
+        unit: record.unit || defaultBalanceUnit
       };
     }).filter((record) => Number.isFinite(record.time) && Number.isFinite(record.balance))
       .sort((left, right) => left.time - right.time);
@@ -644,8 +685,8 @@
     if (balanceHistoryEmpty) {
       balanceHistoryEmpty.textContent = "暂无余额数据";
     }
-    const unit = activeBalanceHistoryRecords.find((record) => record.unit)?.unit || account.last_unit || "";
-    setBalanceHistoryMessage(account, `最近 14 天${unit ? ` · 单位 ${unit}` : ""}`);
+    const unit = activeBalanceHistoryRecords.find((record) => record.unit)?.unit || account.last_unit || defaultBalanceUnit;
+    setBalanceHistoryMessage(account, `最近 3 天${unit ? ` · 单位 ${unit}` : ""}`);
     drawBalanceChart();
     return payload;
   };
@@ -701,7 +742,7 @@
         balanceHistoryEmpty.textContent = "暂无余额数据";
       }
       if (balanceHistoryMessage) {
-        balanceHistoryMessage.textContent = "最近 14 天 · 已清除";
+        balanceHistoryMessage.textContent = "最近 3 天 · 已清除";
       }
       drawBalanceChart();
     } catch (error) {
@@ -792,6 +833,8 @@
     const low = row.querySelector("[data-account-low]");
     const checkedAt = row.querySelector("[data-account-checked-at]");
     const isValid = Boolean(result.is_valid);
+    const stats = result.consumption_stats || result.consumptionStats || {};
+    const unit = result.unit || row.getAttribute("data-account-consumption-unit") || todayConsumption?.dataset.accountTodayConsumptionUnit || defaultBalanceUnit;
     if (status) {
       status.textContent = isValid ? "valid" : "invalid";
       status.className = `status ${isValid ? "valid" : "invalid"}`;
@@ -800,15 +843,13 @@
       plan.textContent = formatValue(result.plan_name);
     }
     if (remaining) {
-      remaining.textContent = formatRemaining(result);
+      remaining.textContent = formatRemaining(result, unit);
       remaining.dataset.accountRemainingValue = result.remaining ?? "";
     }
     if (todayConsumption) {
-      const stats = result.consumption_stats || result.consumptionStats || {};
       const consumption = stats.today ?? result.today_consumption ?? result.todayConsumption;
-      const unit = result.unit || row.getAttribute("data-account-consumption-unit") || todayConsumption.dataset.accountTodayConsumptionUnit || "";
       row.setAttribute("data-account-consumption-unit", unit);
-      ["today", "last_24h", "last_7d", "last_14d"].forEach((period) => {
+      ["today", "yesterday", "last_24h", "last_7d", "last_14d", "this_month", "last_month"].forEach((period) => {
         const value = period === "today" ? consumption : stats[period];
         if (value !== undefined) {
           row.setAttribute(consumptionAttributeName(period), value ?? "");
@@ -984,14 +1025,15 @@
       }
     });
   });
-  document.querySelectorAll("[data-newapi-groups]").forEach((button) => {
+  document.querySelectorAll("[data-newapi-groups], [data-sub2api-groups]").forEach((button) => {
     const originalText = button.textContent;
     button.addEventListener("click", async () => {
+      const platform = button.dataset.platform || (button.dataset.sub2apiGroups !== undefined ? "sub2Api" : "newApi");
       button.disabled = true;
       button.textContent = "获取中";
       try {
-        const result = await fetchNewapiGroups(button);
-        showGroupPicker(button.dataset.accountId, result.groups || [], result.selected_group_id ?? result.selectedGroupId, button);
+        const result = await fetchAccountGroups(button, platform);
+        showGroupPicker(button.dataset.accountId, result.groups || [], result.selected_group_id ?? result.selectedGroupId, button, platform);
         button.textContent = "已获取";
       } catch (error) {
         button.textContent = "失败";

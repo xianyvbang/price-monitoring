@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 
-from app.models import Database
+from app.models import DEFAULT_BALANCE_UNIT, Database
 from app.models import utc_now
 from app.services.alerts import handle_alert_state
 from app.services.balance import query_account, query_newapi_group, query_sub2api_group
@@ -92,6 +92,8 @@ async def query_one_account(db: Database, account_id: int) -> dict:
     result = await query_account(account, db.secret_key, settings["request_timeout"], db.add_log)
     result["account_id"] = account_id
     result["checked_at"] = utc_now()
+    if result.get("is_valid") and not str(result.get("unit") or "").strip():
+        result["unit"] = DEFAULT_BALANCE_UNIT
     db.update_account_result(account_id, result)
     if result.get("is_valid"):
         db.add_log(

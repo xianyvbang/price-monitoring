@@ -88,6 +88,37 @@ a {
   justify-content: flex-end;
 }
 
+.consumption-filter {
+  margin-bottom: 12px;
+}
+
+.consumption-filter-form {
+  align-items: flex-end;
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 12px 14px;
+}
+
+.consumption-filter-form label {
+  flex: 0 1 180px;
+  margin-top: 0;
+}
+
+.consumption-filter-actions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.consumption-filter-actions .primary {
+  margin-top: 0;
+}
+
 .dashboard-stats {
   display: grid;
   gap: 12px;
@@ -702,6 +733,28 @@ pre {
   .page-actions {
     align-items: stretch;
     flex-direction: column;
+    width: 100%;
+  }
+
+  .consumption-filter {
+    margin-bottom: 14px;
+  }
+
+  .consumption-filter-form {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .consumption-filter-form label {
+    flex: none;
+  }
+
+  .consumption-filter-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .consumption-filter-actions > * {
     width: 100%;
   }
 

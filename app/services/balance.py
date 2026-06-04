@@ -88,6 +88,17 @@ async def query_sub2api_group(account: Any, secret_key: str, timeout: float, log
         return normalize_result({"is_valid": False, "invalid_message": f"查询异常: {exc}"})
 
 
+async def query_sub2api_group_options(account: Any, secret_key: str, timeout: float, log: LogCallback | None = None) -> dict[str, Any]:
+    try:
+        return await _query_sub2api_group_options(account, secret_key, timeout, log)
+    except httpx.TimeoutException:
+        return normalize_result({"is_valid": False, "invalid_message": "请求超时"})
+    except httpx.HTTPError as exc:
+        return normalize_result({"is_valid": False, "invalid_message": f"请求失败: {exc}"})
+    except Exception as exc:
+        return normalize_result({"is_valid": False, "invalid_message": f"查询异常: {exc}"})
+
+
 async def _query_sub2api_group(account: Any, secret_key: str, timeout: float, log: LogCallback | None = None) -> dict[str, Any]:
     key_id = decrypt_value(_account_value(account, "key_id_enc"), secret_key)
     api_key = decrypt_value(_account_value(account, "api_key_enc"), secret_key)
@@ -143,6 +154,43 @@ async def _query_sub2api_group(account: Any, secret_key: str, timeout: float, lo
 
     raw_json = _compact_json(summary)
     return normalize_result({"is_valid": True, "plan_name": summary["title"], "extra": raw_json})
+
+
+async def _query_sub2api_group_options(account: Any, secret_key: str, timeout: float, log: LogCallback | None = None) -> dict[str, Any]:
+    selected_group_id = decrypt_value(_account_value(account, "key_id_enc"), secret_key)
+    email = decrypt_value(_account_value(account, "email_enc"), secret_key)
+    password = decrypt_value(_account_value(account, "password_enc"), secret_key)
+    if not email:
+        return normalize_result({"is_valid": False, "invalid_message": "缺少 email"})
+    if not password:
+        return normalize_result({"is_valid": False, "invalid_message": "缺少 password"})
+
+    base_url = account["base_url"].rstrip("/")
+    token_cache_key = _sub2api_token_cache_key(base_url, email)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        token = _get_cached_sub2api_token(token_cache_key)
+        if not token:
+            token_result = await _login_sub2api(client, base_url, email, password, token_cache_key, log, account)
+            if isinstance(token_result, dict):
+                return token_result
+            token = token_result
+        try:
+            groups_payload, rates_payload = await _fetch_sub2api_group_payloads(client, base_url, token, log, account)
+        except httpx.HTTPError:
+            _SUB2API_TOKEN_CACHE.pop(token_cache_key, None)
+            token_result = await _login_sub2api(client, base_url, email, password, token_cache_key, log, account)
+            if isinstance(token_result, dict):
+                return token_result
+            groups_payload, rates_payload = await _fetch_sub2api_group_payloads(client, base_url, token_result, log, account)
+
+    groups = [_summarize_group(group, _extract_group_rates(rates_payload)) for group in _extract_groups(groups_payload)]
+    return {
+        "is_valid": True,
+        "groups": groups,
+        "selected_group_id": selected_group_id,
+        "selectedGroupId": selected_group_id,
+        "extra": _compact_json({"groups": groups, "selected_group_id": selected_group_id}),
+    }
 
 
 async def query_newapi(account: Any, secret_key: str, timeout: float, log: LogCallback | None = None) -> dict[str, Any]:

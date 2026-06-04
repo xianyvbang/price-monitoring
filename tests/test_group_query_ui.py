@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.main import config
 from app.models import Database
+from app.security import decrypt_value
 
 
 def test_group_query_buttons_use_api_fetch(tmp_path, monkeypatch):
@@ -133,6 +134,73 @@ def test_newapi_group_picker_ui_and_api_routes(tmp_path, monkeypatch):
     assert "/api/accounts/${accountId}/selected-group" in accounts.text
 
 
+def test_sub2api_group_picker_ui_and_api_routes(tmp_path, monkeypatch):
+    test_db = Database(str(tmp_path / "app.db"), config.app_secret_key)
+    test_db.init()
+    test_db.ensure_admin("admin", "password123")
+    account_id = test_db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "sub",
+            "base_url": "https://sub.example",
+            "api_key": "secret",
+            "email": "user@example.com",
+            "password": "password",
+            "key_id": "basic",
+        }
+    )
+    monkeypatch.setattr("app.main.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
+
+    async def stop_scheduler():
+        return None
+
+    async def fake_sub2api_group_options(account, secret_key, timeout, log=None):
+        return {
+            "is_valid": True,
+            "selected_group_id": "basic",
+            "groups": [
+                {"id": "basic", "plan_name": "Basic Plan", "effective_rate_multiplier": 0.8},
+                {"id": "pro", "plan_name": "Pro Plan", "effective_rate_multiplier": 1.5},
+            ],
+        }
+
+    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+    monkeypatch.setattr("app.main.query_sub2api_group_options", fake_sub2api_group_options)
+
+    with TestClient(app) as client:
+        client.post("/login", data={"username": "admin", "password": "password123"})
+        dashboard = client.get("/")
+        accounts = client.get("/accounts")
+        options = client.get(f"/api/accounts/{account_id}/sub2api-groups")
+        selection = client.post(
+            f"/api/accounts/{account_id}/selected-group",
+            json={
+                "group_id": "pro",
+                "group": {"id": "pro", "plan_name": "Pro Plan", "effective_rate_multiplier": 1.5},
+            },
+        )
+        dashboard_after = client.get("/")
+
+    assert dashboard.status_code == 200
+    assert accounts.status_code == 200
+    assert options.status_code == 200
+    assert selection.status_code == 200
+    assert "当前分组: basic" in accounts.text
+    assert "当前分组 basic: -" in dashboard.text
+    assert 'data-sub2api-groups' in dashboard.text
+    assert 'data-sub2api-groups' in accounts.text
+    assert "/api/accounts/${button.dataset.accountId}/sub2api-groups" in dashboard.text
+    assert "/api/accounts/${accountId}/sub2api-groups" in accounts.text
+    assert "/api/accounts/${accountId}/selected-group" in accounts.text
+    assert options.json()["groups"][1]["id"] == "pro"
+    assert selection.json()["account"]["selected_group_id"] == "pro"
+    assert selection.json()["account"]["group_rates"][0]["plan_name"] == "Pro Plan"
+    assert decrypt_value(test_db.get_account(account_id)["key_id_enc"], config.app_secret_key) == "pro"
+    assert "Pro Plan: 1.5" in dashboard_after.text
+
+
 def test_selected_newapi_group_shows_rate_on_dashboard(tmp_path, monkeypatch):
     test_db = Database(str(tmp_path / "app.db"), config.app_secret_key)
     test_db.init()
@@ -247,8 +315,8 @@ def test_dashboard_shows_today_consumption_column(tmp_path, monkeypatch):
     test_db.update_account_result(account_id, {"is_valid": True, "remaining": 50, "unit": "USD", "checked_at": first})
     test_db.update_account_result(account_id, {"is_valid": True, "remaining": 44.5, "unit": "USD", "checked_at": second})
     test_db.update_account_result(account_id, {"is_valid": True, "remaining": 48, "unit": "USD", "checked_at": third})
-    test_db.update_account_result(second_account_id, {"is_valid": True, "remaining": 10, "unit": "USD", "checked_at": first})
-    test_db.update_account_result(second_account_id, {"is_valid": True, "remaining": 8.75, "unit": "USD", "checked_at": second})
+    test_db.update_account_result(second_account_id, {"is_valid": True, "remaining": 10, "checked_at": first})
+    test_db.update_account_result(second_account_id, {"is_valid": True, "remaining": 8.75, "checked_at": second})
     monkeypatch.setattr("app.main.db", test_db)
     monkeypatch.setattr("app.main.scheduler.db", test_db)
     monkeypatch.setattr("app.main.scheduler.start", lambda: None)
@@ -261,17 +329,37 @@ def test_dashboard_shows_today_consumption_column(tmp_path, monkeypatch):
     with TestClient(app) as client:
         client.post("/login", data={"username": "admin", "password": "password123"})
         dashboard = client.get("/")
+        date_text = today_start.date().isoformat()
+        dashboard_custom = client.get(f"/?consumption_start={date_text}&consumption_end={date_text}")
 
     assert dashboard.status_code == 200
+    assert dashboard_custom.status_code == 200
     assert "今日消耗" in dashboard.text
     assert "今日消耗总余额" in dashboard.text
+    assert "昨日消耗总余额" in dashboard.text
     assert "近24小时消耗总余额" in dashboard.text
     assert "近7天消耗总余额" in dashboard.text
     assert "近14天消耗总余额" in dashboard.text
+    assert "本月消耗总余额" in dashboard.text
+    assert "上月消耗总余额" in dashboard.text
+    assert "筛选区间消耗总余额" in dashboard.text
+    assert 'name="consumption_start"' in dashboard.text
+    assert 'name="consumption_end"' in dashboard.text
+    assert 'data-consumption-period="yesterday"' in dashboard.text
     assert 'data-consumption-period="last_24h"' in dashboard.text
+    assert 'data-consumption-period="custom"' in dashboard.text
+    assert 'data-consumption-static="true"' in dashboard.text
+    assert 'data-account-consumption-yesterday' in dashboard.text
     assert 'data-account-consumption-last-14d' in dashboard.text
+    assert 'data-account-consumption-this-month' in dashboard.text
+    assert 'data-account-consumption-last-month' in dashboard.text
+    assert "0 个账号有筛选区间记录" in dashboard.text
     assert "5.5 USD" in dashboard.text
     assert "6.75 USD" in dashboard.text
+    assert f'value="{date_text}"' in dashboard_custom.text
+    assert "清除筛选" in dashboard_custom.text
+    assert "2 个账号有筛选区间记录" in dashboard_custom.text
+    assert "6.75 USD" in dashboard_custom.text
 
 
 def test_dashboard_orders_eliminated_accounts_last(tmp_path, monkeypatch):
