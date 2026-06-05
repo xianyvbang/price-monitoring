@@ -175,6 +175,23 @@
                 data-is-enabled="{{ 'true' if account.is_enabled else 'false' }}"
                 data-is-visible="{{ 'true' if account.is_visible else 'false' }}"
               >编辑</button>
+              <button
+                type="button"
+                data-copy-account
+                data-account-id="{{ account.id }}"
+                data-platform="{{ platform }}"
+                data-name="{{ account.name }}"
+                data-base-url="{{ account.base_url }}"
+                data-note="{{ account.note or '' }}"
+                data-recharge-url="{{ account.recharge_url or '' }}"
+                data-key-id="{{ account.key_id if account.key_id is defined else account.selected_group_id or '' }}"
+                data-selected-group-id="{{ account.selected_group_id or '' }}"
+                data-email="{{ account.email if account.email is defined else '' }}"
+                data-user-id="{{ account.user_id if account.user_id is defined else '' }}"
+                data-threshold="{{ account.threshold if account.threshold is not none else '' }}"
+                data-is-enabled="{{ 'true' if account.is_enabled else 'false' }}"
+                data-is-visible="{{ 'true' if account.is_visible else 'false' }}"
+              >复制</button>
               {% if platform == "sub2Api" %}
               <button type="button" data-group-query data-account-id="{{ account.id }}">查组</button>
               <button type="button" data-sub2api-groups data-platform="sub2Api" data-account-id="{{ account.id }}">选择分组</button>
@@ -412,6 +429,23 @@
                 data-is-enabled="${isEnabled ? "true" : "false"}"
                 data-is-visible="${isVisible ? "true" : "false"}"
               >编辑</button>
+              <button
+                type="button"
+                data-copy-account
+                data-account-id="${escapeHtml(id)}"
+                data-platform="${escapeHtml(platform)}"
+                data-name="${escapeHtml(name)}"
+                data-base-url="${escapeHtml(baseUrl)}"
+                data-note="${escapeHtml(note)}"
+                data-recharge-url="${escapeHtml(rechargeUrl)}"
+                data-key-id="${escapeHtml(effectiveKeyId)}"
+                data-selected-group-id="${escapeHtml(selectedGroupId)}"
+                data-email="${escapeHtml(email)}"
+                data-user-id="${escapeHtml(userId)}"
+                data-threshold="${escapeHtml(threshold)}"
+                data-is-enabled="${isEnabled ? "true" : "false"}"
+                data-is-visible="${isVisible ? "true" : "false"}"
+              >复制</button>
               ${platform === "sub2Api" ? `<button type="button" data-group-query data-account-id="${escapeHtml(id)}">查组</button><button type="button" data-sub2api-groups data-platform="sub2Api" data-account-id="${escapeHtml(id)}">选择分组</button>` : ""}
               ${platform === "newApi" ? `<button type="button" data-newapi-groups data-platform="newApi" data-account-id="${escapeHtml(id)}">重新获取分组</button>` : ""}
               <form method="post" action="/accounts/${escapeHtml(id)}/delete">
@@ -557,6 +591,14 @@
   const fetchGroupsByAccountId = async (accountId, platform) => (
     platform === "sub2Api" ? fetchSub2apiGroupsByAccountId(accountId) : fetchNewapiGroupsByAccountId(accountId)
   );
+  const fetchEditableAccount = async (accountId) => {
+    const response = await fetch(`/api/accounts/${accountId}`);
+    const result = await parseJsonResponse(response);
+    if (!response.ok) {
+      throw new Error(result.detail || "获取账号失败");
+    }
+    return result.account || result;
+  };
   const openModalDialog = (dialog) => {
     if (!dialog || dialog.open) {
       return;
@@ -635,29 +677,43 @@
       }
       syncVisibilityControls();
     };
+    const copiedAccountName = (name) => {
+      const text = String(name ?? "").trim();
+      return text ? `${text} 副本` : "";
+    };
     const enterEditMode = (account) => {
-      accountId.value = account.id || "";
-      select.value = account.platform || "newApi";
-      form.elements.name.value = account.name || "";
-      form.elements.base_url.value = account.baseUrl || "";
-      form.elements.recharge_url.value = account.rechargeUrl || "";
-      form.elements.note.value = account.note || "";
-      form.elements.threshold.value = account.threshold || "";
-      form.elements.is_visible.checked = account.isVisible !== "false";
-      form.elements.is_enabled.checked = account.isEnabled === "true";
-      const selectedGroupId = account.selectedGroupId || account.keyId || "";
+      const platform = fieldValue(account, "platform") || "newApi";
+      const visibleValue = fieldValue(account, "is_visible", "isVisible");
+      const enabledValue = fieldValue(account, "is_enabled", "isEnabled");
+      const keyId = fieldValue(account, "key_id", "keyId");
+      const selectedGroupId = fieldValue(account, "selected_group_id", "selectedGroupId") || keyId;
+      accountId.value = fieldValue(account, "id");
+      select.value = platform;
+      form.elements.name.value = fieldValue(account, "name");
+      form.elements.base_url.value = fieldValue(account, "base_url", "baseUrl");
+      form.elements.recharge_url.value = fieldValue(account, "recharge_url", "rechargeUrl");
+      form.elements.note.value = fieldValue(account, "note");
+      form.elements.threshold.value = fieldValue(account, "threshold");
+      form.elements.is_visible.checked = visibleValue === "" ? true : boolValue(visibleValue);
+      form.elements.is_enabled.checked = enabledValue === "" ? true : boolValue(enabledValue);
       form.elements.key_id.value = selectedGroupId;
-      visibleSub2KeyId.value = account.platform === "sub2Api" ? selectedGroupId : account.keyId || "";
+      visibleSub2KeyId.value = platform === "sub2Api" ? selectedGroupId : keyId;
       form.elements.api_key.value = "";
-      form.elements.email.value = account.email || "";
+      form.elements.email.value = fieldValue(account, "email");
       form.elements.password.value = "";
       form.elements.access_token.value = "";
-      form.elements.user_id.value = account.userId || "";
+      form.elements.user_id.value = fieldValue(account, "user_id", "userId");
       title.textContent = "编辑账号";
       setSubmitLabel();
       cancelEdit.hidden = false;
       select.disabled = false;
       syncFields();
+    };
+    const enterCopyMode = (account) => {
+      enterEditMode({...account, id: "", name: copiedAccountName(fieldValue(account, "name"))});
+      title.textContent = "复制账号";
+      setSubmitLabel();
+      setInlineStatus(formStatus, "已复制到弹窗，尚未保存", "pending");
     };
     select.addEventListener("change", syncFields);
     form.elements.is_visible.addEventListener("change", syncVisibilityControls);
@@ -757,6 +813,28 @@
       setInlineStatus(formStatus, "");
       openModalDialog(accountDialog);
       setTimeout(() => form.elements.name?.focus(), 0);
+    });
+
+    document.addEventListener("click", async (event) => {
+      const button = event.target.closest("[data-copy-account]");
+      if (!button || button.disabled) {
+        return;
+      }
+      const sourceStatus = button.closest("[data-account-row]")?.querySelector("[data-account-action-status]");
+      button.disabled = true;
+      setInlineStatus(sourceStatus, "复制中", "pending");
+      try {
+        const account = button.dataset.accountId ? await fetchEditableAccount(button.dataset.accountId) : button.dataset;
+        enterCopyMode(account);
+        openModalDialog(accountDialog);
+        setInlineStatus(sourceStatus, "已复制到弹窗", "success");
+        clearInlineStatusLater(sourceStatus);
+        setTimeout(() => form.elements.name?.focus(), 0);
+      } catch (error) {
+        setInlineStatus(sourceStatus, error.message || "复制失败", "error");
+      } finally {
+        button.disabled = false;
+      }
     });
 
     if (form.dataset.initialEdit === "true") {

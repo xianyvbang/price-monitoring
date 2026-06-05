@@ -876,6 +876,15 @@ async def api_accounts(request: Request):
     return grouped_accounts()
 
 
+@app.get("/api/accounts/{account_id}")
+async def api_account_detail(request: Request, account_id: int):
+    require_user(request)
+    account = public_edit_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    return {"account": account}
+
+
 @app.get("/api/logs")
 async def api_logs(request: Request):
     require_user(request)

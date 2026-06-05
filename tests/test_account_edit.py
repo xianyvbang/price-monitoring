@@ -144,6 +144,57 @@ def test_api_update_returns_account_for_local_row_refresh(tmp_path, monkeypatch)
     assert payload["account"]["has_password"] is True
 
 
+def test_copy_account_button_uses_unsaved_dialog_data(tmp_path, monkeypatch):
+    test_db = Database(str(tmp_path / "app.db"), config.app_secret_key)
+    test_db.init()
+    test_db.ensure_admin("admin", "password123")
+    account_id = test_db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "copy-source",
+            "base_url": "https://copy.example",
+            "key_id": "basic",
+            "api_key": "secret",
+            "email": "copy@example.com",
+            "password": "login-password",
+            "threshold": 4.5,
+            "note": "copy note",
+            "recharge_url": "https://copy.example/topup",
+            "is_visible": True,
+            "is_enabled": True,
+        }
+    )
+    monkeypatch.setattr("app.main.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
+
+    async def stop_scheduler():
+        return None
+
+    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+
+    before_accounts = [(row["id"], row["name"]) for row in test_db.list_accounts()]
+    with TestClient(app) as client:
+        client.post("/login", data={"username": "admin", "password": "password123"})
+        page = client.get("/accounts")
+        detail = client.get(f"/api/accounts/{account_id}")
+    after_accounts = [(row["id"], row["name"]) for row in test_db.list_accounts()]
+
+    assert page.status_code == 200
+    assert detail.status_code == 200
+    assert 'data-copy-account' in page.text
+    assert f'data-account-id="{account_id}"' in page.text
+    assert "复制账号" in page.text
+    assert "已复制到弹窗，尚未保存" in page.text
+    assert 'enterEditMode({...account, id: "", name: copiedAccountName' in page.text
+    assert before_accounts == after_accounts
+    assert detail.json()["account"]["name"] == "copy-source"
+    assert detail.json()["account"]["key_id"] == "basic"
+    assert detail.json()["account"]["email"] == "copy@example.com"
+    assert "api_key" not in detail.json()["account"]
+    assert "password" not in detail.json()["account"]
+
+
 def test_form_update_missing_account_returns_404(tmp_path, monkeypatch):
     test_db = Database(str(tmp_path / "app.db"), "test-key")
     test_db.init()
