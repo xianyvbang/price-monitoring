@@ -135,6 +135,7 @@ async def _query_sub2api_group(account: Any, secret_key: str, timeout: float, lo
                 summary = await _try_match_group_from_api_key(
                     client, base_url, token, log, account, api_key, key_id, active_plan_name, groups, rates, summary
                 )
+            available_groups = [_summarize_group(group, rates) for group in groups]
         except httpx.HTTPError:
             if not used_cached_token:
                 raise
@@ -151,9 +152,10 @@ async def _query_sub2api_group(account: Any, secret_key: str, timeout: float, lo
                 summary = await _try_match_group_from_api_key(
                     client, base_url, token_result, log, account, api_key, key_id, active_plan_name, groups, rates, summary
                 )
+            available_groups = [_summarize_group(group, rates) for group in groups]
 
     raw_json = _compact_json(summary)
-    return normalize_result({"is_valid": True, "plan_name": summary["title"], "extra": raw_json})
+    return normalize_result({"is_valid": True, "plan_name": summary["title"], "extra": raw_json, "available_groups": available_groups})
 
 
 async def _query_sub2api_group_options(account: Any, secret_key: str, timeout: float, log: LogCallback | None = None) -> dict[str, Any]:
@@ -255,15 +257,21 @@ async def query_newapi_group_options(account: Any, secret_key: str, timeout: flo
 async def query_newapi_group(account: Any, secret_key: str, timeout: float, log: LogCallback | None = None) -> dict[str, Any]:
     try:
         selected_group_id = decrypt_value(_account_value(account, "key_id_enc"), secret_key)
-        if not selected_group_id:
-            return normalize_result({"is_valid": False, "invalid_message": "请先重新获取分组并选择当前使用的分组"})
         options = await query_newapi_group_options(account, secret_key, timeout, log)
         if not options.get("is_valid"):
             return options
         groups = options.get("groups") if isinstance(options.get("groups"), list) else []
+        if not selected_group_id:
+            summary = {
+                "title": "已获取可用分组",
+                "group_id": None,
+                "groups": [],
+            }
+            raw_json = _compact_json(summary)
+            return normalize_result({"is_valid": True, "plan_name": summary["title"], "extra": raw_json, "available_groups": groups})
         summary = _build_current_group_rate_summary(selected_group_id, None, None, groups, {})
         raw_json = _compact_json(summary)
-        return normalize_result({"is_valid": True, "plan_name": summary["title"], "extra": raw_json})
+        return normalize_result({"is_valid": True, "plan_name": summary["title"], "extra": raw_json, "available_groups": groups})
     except httpx.TimeoutException:
         return normalize_result({"is_valid": False, "invalid_message": "请求超时"})
     except httpx.HTTPError as exc:

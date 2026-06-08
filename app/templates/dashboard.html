@@ -99,7 +99,9 @@
       <tbody>
         {% for account in accounts %}
         <tr
-          data-account-row="{{ account.id }}"
+          data-account-row="{{ account.dashboard_row_id }}"
+          data-account-id="{{ account.id }}"
+          data-monitor-group-id="{{ account.current_monitor_group_id or '' }}"
           data-account-eliminated="{{ 'true' if account.is_eliminated else 'false' }}"
           data-account-enabled="{{ 'true' if account.is_enabled else 'false' }}"
           data-account-base-url="{{ account.base_url }}"
@@ -112,7 +114,7 @@
           data-account-consumption-this-month="{{ account.consumption_stats.this_month if account.consumption_stats.this_month is not none else '' }}"
           data-account-consumption-last-month="{{ account.consumption_stats.last_month if account.consumption_stats.last_month is not none else '' }}"
         >
-          <td data-label="名称">{{ account.name }}</td>
+          <td data-label="名称">{{ account.name }}{% if account.current_group_id %}<br><small>分组: {{ account.current_group_id }}</small>{% endif %}</td>
           <td class="note-cell" data-label="备注">{{ account.note or "-" }}</td>
           <td data-label="状态"><span class="status {{ account.last_status }}" data-account-status>{{ account.last_status }}</span></td>
           <td data-account-group-rates data-label="分组倍率">
@@ -137,6 +139,7 @@
                 class="change-status-reset"
                 data-group-rate-reset
                 data-account-id="{{ account.id }}"
+                data-monitor-group-id="{{ account.current_monitor_group_id or '' }}"
                 {% if not account.last_group_rate_changed %}hidden{% endif %}
               >重置</button>
             </div>
@@ -193,7 +196,7 @@
               <button type="button" data-newapi-groups data-platform="newApi" data-account-id="{{ account.id }}">重新获取分组</button>
               {% endif %}
               {% if platform in ["sub2Api", "newApi"] %}
-              <a class="button-link" href="/accounts/{{ account.id }}/group-rates">分组变化</a>
+              <a class="button-link" href="/accounts/{{ account.id }}/group-rates{% if account.current_monitor_group_id %}?monitor_group_id={{ account.current_monitor_group_id }}{% endif %}">分组变化</a>
               {% endif %}
               <a class="button-link" href="/accounts?edit_id={{ account.id }}">修改</a>
               <button
@@ -308,7 +311,7 @@
         }
         const unit = row.getAttribute("data-account-consumption-unit") || defaultBalanceUnit;
         const baseUrlKey = consumptionBaseUrlKey(row);
-        const accountId = Number(row.getAttribute("data-account-row"));
+        const accountId = Number(row.getAttribute("data-account-id") || row.getAttribute("data-account-row"));
         const existing = consumptionByBaseUrl.get(baseUrlKey);
         if (!existing || (Number.isFinite(accountId) && accountId < existing.accountId)) {
           consumptionByBaseUrl.set(baseUrlKey, {accountId: Number.isFinite(accountId) ? accountId : Number.MAX_SAFE_INTEGER, value, unit});
@@ -354,6 +357,8 @@
       return `<span class="group-rate-item">${escapeHtml(group.planName)}: ${escapeHtml(group.rateMultiplier)}</span>`;
     }).join("")}</div>`;
   };
+  const rowsForAccount = (accountId) => Array.from(document.querySelectorAll(`[data-account-id="${String(accountId)}"]`));
+  const rowForMonitorGroup = (accountId, monitorGroupId) => rowsForAccount(accountId).find((row) => row.dataset.monitorGroupId === String(monitorGroupId));
   const setGroupRateChangeCell = (button, changed) => {
     const row = button.closest("[data-account-row]");
     if (!row) {
@@ -373,16 +378,36 @@
     setGroupRateChangeCell(button, false);
   };
   const updateGroupRatesCell = (button, result) => {
-    const row = button.closest("[data-account-row]");
-    if (!row) {
+    const rows = rowsForAccount(button.dataset.accountId);
+    const records = result.group_rate_records || result.groupRateRecords || [];
+    if (records.length) {
+      records.forEach((record) => {
+        const row = rowForMonitorGroup(button.dataset.accountId, record.monitor_group_id || record.monitorGroupId);
+        if (!row) {
+          return;
+        }
+        const groupRates = row.querySelector("[data-account-group-rates]");
+        if (groupRates && record.record) {
+          groupRates.innerHTML = renderGroupRates([{planName: record.record.plan_name || "-", rateMultiplier: record.record.rate_multiplier ?? "-"}]);
+        }
+        const resetButton = row.querySelector("[data-group-rate-reset]");
+        if (resetButton) {
+          setGroupRateChangeCell(resetButton, Boolean(record.changed));
+        }
+      });
       return;
     }
-    const groupRates = row.querySelector("[data-account-group-rates]");
-    if (groupRates) {
-      groupRates.innerHTML = renderGroupRates(groupRatesFromResult(result));
-    }
-    const changed = Boolean(result.group_rate_changed || result.groupRateChanged || result.group_rate_record?.changed);
-    setGroupRateChangeCell(button, changed);
+    rows.forEach((row) => {
+      const groupRates = row.querySelector("[data-account-group-rates]");
+      if (groupRates) {
+        groupRates.innerHTML = renderGroupRates(groupRatesFromResult(result));
+      }
+      const resetButton = row.querySelector("[data-group-rate-reset]");
+      if (resetButton) {
+        const changed = Boolean(result.group_rate_changed || result.groupRateChanged || result.group_rate_record?.changed);
+        setGroupRateChangeCell(resetButton, changed);
+      }
+    });
   };
   const groupPicker = document.querySelector("[data-group-picker]");
   const groupPickerTitle = document.querySelector("[data-group-picker-title]");
@@ -391,11 +416,11 @@
   document.querySelector("[data-group-picker-close]")?.addEventListener("click", () => {
     groupPicker?.close();
   });
-  const chooseAccountGroup = async (accountId, groupId, group) => {
+  const chooseAccountGroups = async (accountId, groupIds, groups) => {
     const response = await fetch(`/api/accounts/${accountId}/selected-group`, {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({group_id: groupId, group})
+      body: JSON.stringify({group_ids: groupIds, groups})
     });
     const result = await response.json();
     if (!response.ok) {
@@ -407,40 +432,47 @@
     if (!groupPicker || !groupPickerOptions) {
       return;
     }
+    const selectedIds = new Set(Array.isArray(selectedGroupId) ? selectedGroupId.map(String) : String(selectedGroupId ?? "").split("|").filter(Boolean));
     groupPickerTitle.textContent = `选择 ${platform} 分组`;
-    groupPickerMessage.textContent = groups.length ? "选择后会替换当前使用的分组，后续查组只监测这个分组。" : "没有获取到可用分组。";
+    groupPickerMessage.textContent = groups.length ? "勾选一个或多个分组后保存，首页会按分组展开展示。" : "没有获取到可用分组。";
     groupPickerOptions.innerHTML = "";
     groups.forEach((group) => {
-      const option = document.createElement("button");
-      option.type = "button";
+      const option = document.createElement("label");
       option.className = "group-option";
       const groupId = String(group.id ?? group.name ?? "");
+      const checked = selectedIds.has(groupId) ? " checked" : "";
       option.innerHTML = `
+        <input type="checkbox" value="${escapeHtml(groupId)}"${checked}>
         <span>
           <strong>${escapeHtml(group.plan_name || group.planName || group.name || groupId || "-")}</strong>
           <small>ID: ${escapeHtml(groupId || "-")}</small>
         </span>
         <span>倍率 ${escapeHtml(group.effective_rate_multiplier ?? group.user_rate_multiplier ?? group.default_rate_multiplier ?? "-")}</span>
       `;
-      if (selectedGroupId !== null && selectedGroupId !== undefined && groupId === String(selectedGroupId)) {
+      if (selectedIds.has(groupId)) {
         option.classList.add("selected");
       }
-      option.addEventListener("click", async () => {
-        option.disabled = true;
-        try {
-          const result = await chooseAccountGroup(accountId, groupId, group);
-          groupPicker.close();
-          if (sourceButton) {
-            sourceButton.title = `当前分组: ${groupId}`;
-            updateGroupRatesCell(sourceButton, result.group_result || {extra: null});
-          }
-        } catch (error) {
-          option.disabled = false;
-          groupPickerMessage.textContent = error.message || "保存分组失败";
-        }
+      option.querySelector("input")?.addEventListener("change", (event) => {
+        option.classList.toggle("selected", event.target.checked);
       });
       groupPickerOptions.appendChild(option);
     });
+    const saveButton = document.createElement("button");
+    saveButton.type = "button";
+    saveButton.className = "primary";
+    saveButton.textContent = "保存分组";
+    saveButton.addEventListener("click", async () => {
+      const checked = Array.from(groupPickerOptions.querySelectorAll("input[type='checkbox']:checked")).map((input) => input.value);
+      const selectedGroups = groups.filter((group) => checked.includes(String(group.id ?? group.name ?? "")));
+      try {
+        await chooseAccountGroups(accountId, checked, selectedGroups);
+        groupPicker.close();
+        window.location.reload();
+      } catch (error) {
+        groupPickerMessage.textContent = error.message || "保存分组失败";
+      }
+    });
+    groupPickerOptions.appendChild(saveButton);
     groupPicker.showModal();
   };
   const fetchNewapiGroups = async (button) => {
@@ -829,8 +861,7 @@
       }
     }
   };
-  const updateBalanceRow = (target, result) => {
-    const row = target instanceof Element ? target.closest("[data-account-row]") : document.querySelector(`[data-account-row="${target}"]`);
+  const updateOneBalanceRow = (row, result) => {
     if (!row) {
       return;
     }
@@ -879,6 +910,12 @@
     if (checkedAt) {
       checkedAt.textContent = formatChinaTime(result.checked_at || result.checkedAt);
     }
+  };
+  const updateBalanceRow = (target, result) => {
+    const sourceRow = target instanceof Element ? target.closest("[data-account-row]") : null;
+    const accountId = sourceRow?.dataset.accountId || result.account_id || result.accountId || target;
+    const rows = rowsForAccount(accountId);
+    (rows.length ? rows : [sourceRow]).forEach((row) => updateOneBalanceRow(row, result));
     updateConsumptionSummaries();
   };
   const updateBalanceRows = (results) => {
@@ -937,7 +974,7 @@
         const response = await fetch(`/api/accounts/${button.dataset.accountId}/group-rate-change-status`, {
           method: "POST",
           headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({changed: false})
+          body: JSON.stringify({changed: false, monitor_group_id: button.dataset.monitorGroupId || null})
         });
         const result = await response.json();
         if (!response.ok) {
@@ -980,11 +1017,14 @@
           throw new Error(result.detail || "保存失败");
         }
         const isEliminated = truthy(result.account?.is_eliminated ?? nextState);
-        row.dataset.accountEliminated = isEliminated ? "true" : "false";
-        setEliminatedButtonState(button, isEliminated);
-        const remaining = row.querySelector("[data-account-remaining]")?.dataset.accountRemainingValue;
-        updateLowBalanceCell(row, result.account?.last_remaining ?? remaining);
-        moveAccountRowForEliminatedState(row, isEliminated);
+        rowsForAccount(button.dataset.accountId).forEach((targetRow) => {
+          targetRow.dataset.accountEliminated = isEliminated ? "true" : "false";
+          const targetButton = targetRow.querySelector("[data-account-eliminated-toggle]");
+          setEliminatedButtonState(targetButton, isEliminated);
+          const remaining = targetRow.querySelector("[data-account-remaining]")?.dataset.accountRemainingValue;
+          updateLowBalanceCell(targetRow, result.account?.last_remaining ?? remaining);
+          moveAccountRowForEliminatedState(targetRow, isEliminated);
+        });
       } catch (error) {
         if (text) {
           text.textContent = originalText;
@@ -1021,8 +1061,10 @@
           throw new Error(result.detail || "保存失败");
         }
         const isEnabled = truthy(result.account?.is_enabled ?? nextState);
-        row.dataset.accountEnabled = isEnabled ? "true" : "false";
-        setEnabledButtonState(button, isEnabled);
+        rowsForAccount(button.dataset.accountId).forEach((targetRow) => {
+          targetRow.dataset.accountEnabled = isEnabled ? "true" : "false";
+          setEnabledButtonState(targetRow.querySelector("[data-account-enabled-toggle]"), isEnabled);
+        });
       } catch (error) {
         if (text) {
           text.textContent = originalText;
@@ -1043,7 +1085,7 @@
       button.textContent = "获取中";
       try {
         const result = await fetchAccountGroups(button, platform);
-        showGroupPicker(button.dataset.accountId, result.groups || [], result.selected_group_id ?? result.selectedGroupId, button, platform);
+        showGroupPicker(button.dataset.accountId, result.groups || [], result.selected_group_ids ?? result.selectedGroupIds ?? result.selected_group_id ?? result.selectedGroupId, button, platform);
         button.textContent = "已获取";
       } catch (error) {
         button.textContent = "失败";

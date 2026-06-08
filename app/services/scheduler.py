@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 
-from app.models import DEFAULT_BALANCE_UNIT, Database
+from app.models import DEFAULT_BALANCE_UNIT, Database, monitor_group_to_dict
 from app.models import utc_now
 from app.services.alerts import handle_alert_state
 from app.services.balance import query_account, query_newapi_group, query_sub2api_group
@@ -141,37 +141,59 @@ async def query_group_rate_for_account(db: Database, account_id: int, notify: bo
     if result.get("is_valid"):
         db.update_account_group_result(account_id, result)
         checked_at = utc_now()
-        record_result = db.record_group_rate_if_changed(account_id, _group_summary_from_result(result), checked_at)
+        group_summaries = _monitor_group_summaries_from_result(db, account_id, result)
+        record_results = []
+        for item in group_summaries:
+            record_result = db.record_group_rate_if_changed(
+                account_id,
+                item["summary"],
+                checked_at,
+                monitor_group_id=item["monitor_group_id"],
+            )
+            db.update_monitor_group_snapshot(item["monitor_group_id"], item["summary"], checked_at)
+            if record_result["changed"]:
+                db.update_account_group_rate_change_status(account_id, True, monitor_group_id=item["monitor_group_id"])
+            record_results.append({**record_result, "monitor_group_id": item["monitor_group_id"], "group_id": item["group_id"]})
+        if not record_results:
+            record_results = [db.record_group_rate_if_changed(account_id, _group_summary_from_result(result), checked_at)]
+            if record_results[0]["changed"]:
+                db.update_account_group_rate_change_status(account_id, True)
+        record_result = next((item for item in record_results if item.get("changed")), record_results[0])
         result["group_rate_record"] = record_result
+        result["group_rate_records"] = record_results
+        result["groupRateRecords"] = record_results
         record = record_result.get("record") or {}
-        updated_name = db.update_account_name_rate_suffix(account_id, record.get("rate_multiplier"))
+        updated_name = None
+        if len(db.list_monitor_groups(account_id)) <= 1:
+            updated_name = db.update_account_name_rate_suffix(account_id, record.get("rate_multiplier"))
         if updated_name:
             account = db.get_account(account_id) or account
+        account = db.get_account(account_id) or account
         group_rate_changed = bool(account["last_group_rate_changed"])
-        if record_result["changed"]:
-            group_rate_changed = True
-            db.update_account_group_rate_change_status(account_id, True)
         result["group_rate_changed"] = group_rate_changed
         result["groupRateChanged"] = group_rate_changed
-        if notify and record_result["changed"] and not account["is_eliminated"]:
+        changed_records = [item for item in record_results if item.get("changed")]
+        if notify and changed_records and not account["is_eliminated"]:
             try:
                 smtp = db.get_smtp_settings()
-                subject, body = build_group_rate_change_email(
-                    account,
-                    str(record.get("plan_name") or result.get("plan_name") or "-"),
-                    record_result["previous_rate"],
-                    record_result["current_rate"],
-                    checked_at,
-                )
-                send_email(smtp, db.secret_key, subject, body)
-                db.add_log(
-                    "warning",
-                    "alert",
-                    f"{account['platform']} / {account['name']} 分组倍率变化: {record_result['previous_rate']} -> {record_result['current_rate']}，已发送邮件",
-                )
+                for changed_record in changed_records:
+                    changed_row = changed_record.get("record") or {}
+                    subject, body = build_group_rate_change_email(
+                        account,
+                        str(changed_row.get("plan_name") or result.get("plan_name") or "-"),
+                        changed_record["previous_rate"],
+                        changed_record["current_rate"],
+                        checked_at,
+                    )
+                    send_email(smtp, db.secret_key, subject, body)
+                    db.add_log(
+                        "warning",
+                        "alert",
+                        f"{account['platform']} / {account['name']} 分组倍率变化: {changed_record['previous_rate']} -> {changed_record['current_rate']}，已发送邮件",
+                    )
             except Exception as exc:
                 db.add_log("error", "alert", f"{account['platform']} / {account['name']} 分组倍率变化邮件发送失败: {exc}")
-        elif notify and record_result["changed"] and account["is_eliminated"]:
+        elif notify and changed_records and account["is_eliminated"]:
             db.add_log(
                 "info",
                 "alert",
@@ -191,7 +213,7 @@ async def query_all_group_rates(db: Database, notify: bool = True) -> list[dict]
         if account["platform"] == "sub2Api" and (not account["api_key_enc"] or not account["email_enc"] or not account["password_enc"]):
             db.add_log("warning", "query", f"{account['platform']} / {account['name']} 自动查组跳过: 缺少 apiKey/email/password")
             continue
-        if account["platform"] == "newApi" and (not account["access_token_enc"] or not account["user_id_enc"] or not account["key_id_enc"]):
+        if account["platform"] == "newApi" and (not account["access_token_enc"] or not account["user_id_enc"] or not db.list_monitor_groups(account["id"])):
             db.add_log("warning", "query", f"{account['platform']} / {account['name']} 自动查组跳过: 缺少 accessToken/userId/已选分组")
             continue
         if account["platform"] not in {"sub2Api", "newApi"}:
@@ -222,3 +244,42 @@ def _group_summary_from_result(result: dict) -> dict:
         summary = {}
     summary["raw_json"] = extra if isinstance(extra, str) else json.dumps(summary, ensure_ascii=False, default=str)
     return summary
+
+
+def _monitor_group_summaries_from_result(db: Database, account_id: int, result: dict) -> list[dict]:
+    monitor_groups = [monitor_group_to_dict(row, db.secret_key) for row in db.list_monitor_groups(account_id)]
+    if not monitor_groups:
+        return []
+    summary = _group_summary_from_result(result)
+    available = result.get("available_groups") if isinstance(result.get("available_groups"), list) else None
+    if available is None:
+        available = summary.get("available_groups") if isinstance(summary.get("available_groups"), list) else None
+    groups = summary.get("groups") if isinstance(summary.get("groups"), list) else None
+    candidates = available or groups or ([summary.get("group")] if isinstance(summary.get("group"), dict) else [])
+    results = []
+    for monitor_group in monitor_groups:
+        group_id = str(monitor_group.get("group_id") or "")
+        matched = next((group for group in candidates if isinstance(group, dict) and str(group.get("id") or group.get("name") or "") == group_id), None)
+        if matched is None and str(summary.get("group_id") or "") == group_id and isinstance(summary.get("group"), dict):
+            matched = summary["group"]
+        if matched is None:
+            matched = {
+                "id": group_id,
+                "plan_name": monitor_group.get("plan_name") or f"分组 {group_id}",
+                "effective_rate_multiplier": monitor_group.get("effective_rate_multiplier"),
+            }
+        group_summary = {
+            "title": f"{matched.get('plan_name') or matched.get('name') or group_id} 倍率 {matched.get('effective_rate_multiplier')}",
+            "group_id": group_id,
+            "group": matched,
+            "groups": [matched],
+            "raw_json": summary.get("raw_json"),
+        }
+        results.append(
+            {
+                "monitor_group_id": monitor_group["id"],
+                "group_id": group_id,
+                "summary": group_summary,
+            }
+        )
+    return results

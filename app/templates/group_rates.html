@@ -4,7 +4,7 @@
 <section class="page-head">
   <div>
     <h1>分组变化</h1>
-    <p>{{ account.platform }} / {{ account.name }} / {{ account.base_url }}</p>
+    <p>{{ account.platform }} / {{ account.name }} / {{ account.base_url }}{% if monitor_group %} / 分组 {{ monitor_group.display_name }}{% endif %}</p>
   </div>
   <a class="button-link" href="/">返回仪表盘</a>
 </section>

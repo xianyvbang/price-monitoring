@@ -324,6 +324,52 @@ table {
   width: 100%;
 }
 
+[data-accounts-table] {
+  table-layout: fixed;
+}
+
+[data-accounts-table] th:nth-child(1),
+[data-accounts-table] td:nth-child(1) {
+  width: 9%;
+}
+
+[data-accounts-table] th:nth-child(2),
+[data-accounts-table] td:nth-child(2) {
+  width: 10%;
+}
+
+[data-accounts-table] th:nth-child(3),
+[data-accounts-table] td:nth-child(3) {
+  width: 14%;
+}
+
+[data-accounts-table] th:nth-child(4),
+[data-accounts-table] td:nth-child(4) {
+  width: 7%;
+}
+
+[data-accounts-table] th:nth-child(5),
+[data-accounts-table] td:nth-child(5) {
+  width: 38%;
+}
+
+[data-accounts-table] th:nth-child(6),
+[data-accounts-table] td:nth-child(6) {
+  width: 6%;
+}
+
+[data-accounts-table] th:nth-child(7),
+[data-accounts-table] td:nth-child(7),
+[data-accounts-table] th:nth-child(8),
+[data-accounts-table] td:nth-child(8) {
+  width: 8%;
+}
+
+[data-accounts-table] th:nth-child(9),
+[data-accounts-table] td:nth-child(9) {
+  width: 10rem;
+}
+
 th,
 td {
   border-bottom: 1px solid var(--line);
@@ -632,17 +678,67 @@ dialog::backdrop {
 
 .group-option {
   align-items: center;
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
+  background: #ffffff;
+  border: 1px solid #cfd7e3;
+  border-radius: 6px;
+  cursor: pointer;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 18px minmax(0, 1fr) max-content;
+  margin-top: 0;
   min-height: 54px;
+  padding: 10px 12px;
   text-align: left;
   width: 100%;
+}
+
+.group-option input[type="checkbox"] {
+  display: block;
+  margin: 0;
+  min-height: 16px;
+  padding: 0;
+  width: 16px;
 }
 
 .group-option span {
   display: grid;
   gap: 4px;
+  min-width: 0;
+}
+
+.group-option span:last-child {
+  justify-self: end;
+  white-space: nowrap;
+}
+
+[data-account-credentials] {
+  line-height: 1.55;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  word-break: break-word;
+}
+
+[data-accounts-table] td:last-child {
+  white-space: normal;
+}
+
+[data-accounts-table] td:last-child .actions {
+  align-items: stretch;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-width: 9rem;
+}
+
+[data-accounts-table] td:last-child .actions > *,
+[data-accounts-table] td:last-child .actions form,
+[data-accounts-table] td:last-child .actions form button {
+  width: 100%;
+}
+
+[data-accounts-table] td:last-child .actions form:last-of-type {
+  grid-column: 1 / -1;
 }
 
 .group-option small {
@@ -888,6 +984,15 @@ pre {
     border-collapse: separate;
   }
 
+  [data-accounts-table] {
+    table-layout: auto;
+  }
+
+  [data-accounts-table] th,
+  [data-accounts-table] td {
+    width: auto;
+  }
+
   thead {
     display: none;
   }
@@ -917,6 +1022,15 @@ pre {
 
   td:last-child {
     border-bottom: 0;
+  }
+
+  [data-accounts-table] td:last-child .actions {
+    display: flex;
+    min-width: 0;
+  }
+
+  [data-accounts-table] td:last-child .actions form:last-of-type {
+    grid-column: auto;
   }
 
   td::before {
@@ -1016,9 +1130,9 @@ pre {
   }
 
   .group-option {
-    align-items: stretch;
-    flex-direction: column;
+    align-items: center;
     gap: 8px;
+    grid-template-columns: 18px minmax(0, 1fr) max-content;
   }
 
   .chart-shell {

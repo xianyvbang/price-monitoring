@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import calendar
+import hashlib
 import os
 import sqlite3
 from contextlib import contextmanager
@@ -8,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Optional
 
 from app.defaults import DEFAULT_ACCOUNTS
-from app.security import encrypt_value, hash_password
+from app.security import decrypt_value, encrypt_value, hash_password
 
 
 def utc_now() -> str:
@@ -137,10 +138,30 @@ class Database:
                 CREATE TABLE IF NOT EXISTS group_rate_records (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    monitor_group_id INTEGER REFERENCES account_monitor_groups(id) ON DELETE CASCADE,
                     plan_name TEXT NOT NULL,
                     rate_multiplier REAL,
                     raw_json TEXT NOT NULL,
                     checked_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS account_monitor_groups (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    group_id_enc TEXT NOT NULL,
+                    group_id_hash TEXT NOT NULL,
+                    plan_name TEXT,
+                    name TEXT,
+                    default_rate_multiplier REAL,
+                    user_rate_multiplier REAL,
+                    effective_rate_multiplier REAL,
+                    raw_json TEXT,
+                    last_checked_at TEXT,
+                    last_group_rate_changed INTEGER NOT NULL DEFAULT 0,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(account_id, group_id_hash)
                 );
 
                 CREATE TABLE IF NOT EXISTS app_logs (
@@ -154,6 +175,8 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_app_logs_created_at ON app_logs(created_at);
                 CREATE INDEX IF NOT EXISTS idx_group_rate_records_account_checked_at
                 ON group_rate_records(account_id, checked_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_account_monitor_groups_account_sort
+                ON account_monitor_groups(account_id, sort_order, id);
                 CREATE INDEX IF NOT EXISTS idx_query_records_account_checked_at
                 ON query_records(account_id, checked_at DESC);
                 """
@@ -167,6 +190,14 @@ class Database:
             self._migrate_accounts_group_rate_changed(conn)
             self._migrate_accounts_visible(conn)
             self._migrate_accounts_eliminated(conn)
+            self._migrate_group_rate_records_monitor_group(conn)
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_group_rate_records_monitor_checked_at
+                ON group_rate_records(monitor_group_id, checked_at DESC)
+                """
+            )
+            self._migrate_legacy_selected_groups(conn)
             self._set_default(conn, "request_timeout", "15")
             self._set_default(conn, "query_interval", str(BALANCE_QUERY_INTERVAL_SECONDS))
             self._set_default(conn, "group_rate_query_interval", str(GROUP_RATE_QUERY_INTERVAL_SECONDS))
@@ -317,6 +348,51 @@ class Database:
             conn.execute("ALTER TABLE accounts ADD COLUMN is_eliminated INTEGER NOT NULL DEFAULT 0")
 
     @staticmethod
+    def _migrate_group_rate_records_monitor_group(conn: sqlite3.Connection) -> None:
+        columns = conn.execute("PRAGMA table_info(group_rate_records)").fetchall()
+        column_names = {row["name"] for row in columns}
+        if "monitor_group_id" not in column_names:
+            conn.execute("ALTER TABLE group_rate_records ADD COLUMN monitor_group_id INTEGER REFERENCES account_monitor_groups(id) ON DELETE CASCADE")
+
+    def _migrate_legacy_selected_groups(self, conn: sqlite3.Connection) -> None:
+        existing = conn.execute("SELECT COUNT(*) AS count FROM account_monitor_groups").fetchone()["count"]
+        if existing:
+            return
+        accounts = conn.execute(
+            """
+            SELECT id, key_id_enc
+            FROM accounts
+            WHERE key_id_enc IS NOT NULL AND key_id_enc != ''
+            ORDER BY id
+            """
+        ).fetchall()
+        now = utc_now()
+        for account in accounts:
+            try:
+                group_id = decrypt_value(account["key_id_enc"], self.secret_key)
+            except Exception:
+                group_id = None
+            if not group_id:
+                continue
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO account_monitor_groups (
+                    account_id, group_id_enc, group_id_hash, plan_name, name, sort_order, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, 0, ?, ?)
+                """,
+                (
+                    account["id"],
+                    encrypt_value(group_id, self.secret_key),
+                    _hash_group_id(group_id),
+                    f"当前分组 {group_id}",
+                    group_id,
+                    now,
+                    now,
+                ),
+            )
+
+    @staticmethod
     def _migrate_users_session_version(conn: sqlite3.Connection) -> None:
         columns = conn.execute("PRAGMA table_info(users)").fetchall()
         column_names = {row["name"] for row in columns}
@@ -430,6 +506,140 @@ class Database:
         with self.connect() as conn:
             return conn.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
 
+    def list_monitor_groups(self, account_id: int) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            return conn.execute(
+                """
+                SELECT *
+                FROM account_monitor_groups
+                WHERE account_id = ?
+                ORDER BY sort_order ASC, id ASC
+                """,
+                (account_id,),
+            ).fetchall()
+
+    def get_monitor_group(self, monitor_group_id: int) -> Optional[sqlite3.Row]:
+        with self.connect() as conn:
+            return conn.execute(
+                "SELECT * FROM account_monitor_groups WHERE id = ?",
+                (monitor_group_id,),
+            ).fetchone()
+
+    def get_monitor_group_by_group_id(self, account_id: int, group_id: str) -> Optional[sqlite3.Row]:
+        with self.connect() as conn:
+            return conn.execute(
+                """
+                SELECT *
+                FROM account_monitor_groups
+                WHERE account_id = ? AND group_id_hash = ?
+                """,
+                (account_id, _hash_group_id(group_id)),
+            ).fetchone()
+
+    def replace_account_monitor_groups(self, account_id: int, groups: list[dict[str, Any]] | list[str]) -> None:
+        normalized = _normalize_monitor_groups(groups)
+        now = utc_now()
+        with self.connect() as conn:
+            account = conn.execute("SELECT id FROM accounts WHERE id = ?", (account_id,)).fetchone()
+            if not account:
+                raise ValueError("账号不存在")
+            keep_hashes = {_hash_group_id(item["group_id"]) for item in normalized}
+            if keep_hashes:
+                placeholders = ",".join("?" for _ in keep_hashes)
+                conn.execute(
+                    f"""
+                    DELETE FROM account_monitor_groups
+                    WHERE account_id = ? AND group_id_hash NOT IN ({placeholders})
+                    """,
+                    (account_id, *keep_hashes),
+                )
+            else:
+                conn.execute("DELETE FROM account_monitor_groups WHERE account_id = ?", (account_id,))
+
+            for sort_order, item in enumerate(normalized):
+                group_id = item["group_id"]
+                group_id_hash = _hash_group_id(group_id)
+                summary = _monitor_group_summary(item)
+                conn.execute(
+                    """
+                    INSERT INTO account_monitor_groups (
+                        account_id, group_id_enc, group_id_hash, plan_name, name,
+                        default_rate_multiplier, user_rate_multiplier, effective_rate_multiplier,
+                        raw_json, sort_order, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(account_id, group_id_hash) DO UPDATE SET
+                        group_id_enc = excluded.group_id_enc,
+                        plan_name = COALESCE(excluded.plan_name, account_monitor_groups.plan_name),
+                        name = COALESCE(excluded.name, account_monitor_groups.name),
+                        default_rate_multiplier = COALESCE(excluded.default_rate_multiplier, account_monitor_groups.default_rate_multiplier),
+                        user_rate_multiplier = COALESCE(excluded.user_rate_multiplier, account_monitor_groups.user_rate_multiplier),
+                        effective_rate_multiplier = COALESCE(excluded.effective_rate_multiplier, account_monitor_groups.effective_rate_multiplier),
+                        raw_json = COALESCE(excluded.raw_json, account_monitor_groups.raw_json),
+                        sort_order = excluded.sort_order,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        account_id,
+                        encrypt_value(group_id, self.secret_key),
+                        group_id_hash,
+                        summary["plan_name"],
+                        summary["name"],
+                        summary["default_rate_multiplier"],
+                        summary["user_rate_multiplier"],
+                        summary["effective_rate_multiplier"],
+                        summary["raw_json"],
+                        sort_order,
+                        now,
+                        now,
+                    ),
+                )
+            first_group = normalized[0]["group_id"] if normalized else None
+            conn.execute(
+                """
+                UPDATE accounts
+                SET key_id_enc = ?, last_group_rate_changed = (
+                    SELECT CASE WHEN COUNT(*) > 0 THEN 1 ELSE 0 END
+                    FROM account_monitor_groups
+                    WHERE account_id = accounts.id AND last_group_rate_changed = 1
+                ), updated_at = ?
+                WHERE id = ?
+                """,
+                (encrypt_value(first_group, self.secret_key), now, account_id),
+            )
+
+    def update_monitor_group_snapshot(self, monitor_group_id: int, group_summary: dict[str, Any], checked_at: str) -> None:
+        group = group_summary.get("group") if isinstance(group_summary.get("group"), dict) else group_summary
+        if not isinstance(group, dict):
+            group = {}
+        summary = _monitor_group_summary(group)
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE account_monitor_groups
+                SET plan_name = COALESCE(?, plan_name),
+                    name = COALESCE(?, name),
+                    default_rate_multiplier = ?,
+                    user_rate_multiplier = ?,
+                    effective_rate_multiplier = ?,
+                    raw_json = ?,
+                    last_checked_at = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    summary["plan_name"],
+                    summary["name"],
+                    summary["default_rate_multiplier"],
+                    summary["user_rate_multiplier"],
+                    summary["effective_rate_multiplier"],
+                    summary["raw_json"] or _json_dumps(group_summary),
+                    checked_at,
+                    utc_now(),
+                    monitor_group_id,
+                ),
+            )
+
     def upsert_account(self, data: dict[str, Any]) -> int:
         now = utc_now()
         platform = data["platform"]
@@ -506,7 +716,10 @@ class Database:
                 "SELECT id FROM accounts WHERE platform = ? AND name = ?",
                 (platform, data["name"]),
             ).fetchone()
-            return int(row["id"])
+            account_id = int(row["id"])
+        if _should_replace_monitor_groups(data):
+            self.replace_account_monitor_groups(account_id, _groups_from_account_data(data))
+        return account_id
 
     def update_account(self, account_id: int, data: dict[str, Any]) -> int:
         current = self.get_account(account_id)
@@ -567,6 +780,8 @@ class Database:
                     account_id,
                 ),
             )
+        if _should_replace_monitor_groups(data):
+            self.replace_account_monitor_groups(account_id, _groups_from_account_data(data))
         return account_id
 
     def delete_account(self, account_id: int) -> None:
@@ -637,25 +852,69 @@ class Database:
             )
 
     def update_account_selected_group(self, account_id: int, group_id: str) -> None:
-        with self.connect() as conn:
-            conn.execute(
-                """
-                UPDATE accounts
-                SET key_id_enc = ?, last_group_rate_changed = 0, updated_at = ?
-                WHERE id = ?
-                """,
-                (encrypt_value(group_id, self.secret_key), utc_now(), account_id),
-            )
+        self.replace_account_monitor_groups(account_id, [{"group_id": group_id}])
 
-    def update_account_group_rate_change_status(self, account_id: int, changed: bool) -> None:
+    def update_account_group_rate_change_status(
+        self,
+        account_id: int,
+        changed: bool,
+        monitor_group_id: int | None = None,
+        group_id: str | None = None,
+    ) -> None:
         with self.connect() as conn:
+            target_monitor_group_id = monitor_group_id
+            if target_monitor_group_id is None and group_id:
+                row = conn.execute(
+                    """
+                    SELECT id FROM account_monitor_groups
+                    WHERE account_id = ? AND group_id_hash = ?
+                    """,
+                    (account_id, _hash_group_id(group_id)),
+                ).fetchone()
+                target_monitor_group_id = int(row["id"]) if row else None
+            if target_monitor_group_id is not None:
+                conn.execute(
+                    """
+                    UPDATE account_monitor_groups
+                    SET last_group_rate_changed = ?, updated_at = ?
+                    WHERE id = ? AND account_id = ?
+                    """,
+                    (1 if changed else 0, utc_now(), target_monitor_group_id, account_id),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE account_monitor_groups
+                    SET last_group_rate_changed = ?, updated_at = ?
+                    WHERE account_id = ?
+                    """,
+                    (1 if changed else 0, utc_now(), account_id),
+                )
+            has_monitor_groups = conn.execute(
+                "SELECT 1 FROM account_monitor_groups WHERE account_id = ? LIMIT 1",
+                (account_id,),
+            ).fetchone()
+            if not has_monitor_groups:
+                conn.execute(
+                    """
+                    UPDATE accounts
+                    SET last_group_rate_changed = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (1 if changed else 0, utc_now(), account_id),
+                )
+                return
             conn.execute(
                 """
                 UPDATE accounts
-                SET last_group_rate_changed = ?, updated_at = ?
+                SET last_group_rate_changed = (
+                    SELECT CASE WHEN COUNT(*) > 0 THEN 1 ELSE 0 END
+                    FROM account_monitor_groups
+                    WHERE account_id = ? AND last_group_rate_changed = 1
+                ), updated_at = ?
                 WHERE id = ?
                 """,
-                (1 if changed else 0, utc_now(), account_id),
+                (account_id, utc_now(), account_id),
             )
 
     def update_account_enabled(self, account_id: int, is_enabled: bool) -> None:
@@ -726,6 +985,7 @@ class Database:
         account_id: int,
         group_summary: dict[str, Any],
         checked_at: str,
+        monitor_group_id: int | None = None,
     ) -> dict[str, Any]:
         group = group_summary.get("group") if isinstance(group_summary.get("group"), dict) else {}
         plan_name = (
@@ -752,14 +1012,15 @@ class Database:
             raw_json = _json_dumps(group_summary)
 
         with self.connect() as conn:
+            where_monitor = "monitor_group_id IS ?" if monitor_group_id is None else "monitor_group_id = ?"
             previous = conn.execute(
-                """
+                f"""
                 SELECT * FROM group_rate_records
-                WHERE account_id = ?
+                WHERE account_id = ? AND {where_monitor}
                 ORDER BY checked_at DESC, id DESC
                 LIMIT 1
                 """,
-                (account_id,),
+                (account_id, monitor_group_id),
             ).fetchone()
             previous_rate = previous["rate_multiplier"] if previous else None
             previous_plan_name = previous["plan_name"] if previous else None
@@ -770,10 +1031,10 @@ class Database:
             if inserted:
                 cursor = conn.execute(
                     """
-                    INSERT INTO group_rate_records (account_id, plan_name, rate_multiplier, raw_json, checked_at)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO group_rate_records (account_id, monitor_group_id, plan_name, rate_multiplier, raw_json, checked_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (account_id, str(plan_name), current_rate, raw_json, checked_at),
+                    (account_id, monitor_group_id, str(plan_name), current_rate, raw_json, checked_at),
                 )
                 record = conn.execute(
                     "SELECT * FROM group_rate_records WHERE id = ?",
@@ -787,15 +1048,18 @@ class Database:
                 "record": row_to_dict(record) if record else None,
             }
 
-    def list_group_rate_records(self, account_id: int) -> list[sqlite3.Row]:
+    def list_group_rate_records(self, account_id: int, monitor_group_id: int | None = None) -> list[sqlite3.Row]:
         with self.connect() as conn:
+            monitor_filter = "AND monitor_group_id = ?" if monitor_group_id is not None else ""
+            params: tuple[Any, ...] = (account_id, monitor_group_id) if monitor_group_id is not None else (account_id,)
             return conn.execute(
-                """
+                f"""
                 SELECT * FROM group_rate_records
                 WHERE account_id = ?
+                {monitor_filter}
                 ORDER BY checked_at DESC, id DESC
                 """,
-                (account_id,),
+                params,
             ).fetchall()
 
     def list_balance_history(self, account_id: int) -> list[sqlite3.Row]:
@@ -934,10 +1198,139 @@ def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {key: row[key] for key in row.keys()}
 
 
+def monitor_group_to_dict(row: sqlite3.Row, secret_key: str) -> dict[str, Any]:
+    data = row_to_dict(row)
+    group_id_enc = data.pop("group_id_enc", None)
+    group_id = decrypt_value(group_id_enc, secret_key) if group_id_enc else None
+    data["group_id"] = group_id
+    data["groupId"] = group_id
+    data["last_group_rate_changed"] = bool(data.get("last_group_rate_changed"))
+    data["lastGroupRateChanged"] = data["last_group_rate_changed"]
+    data["rate_multiplier"] = data.get("effective_rate_multiplier")
+    data["rateMultiplier"] = data["rate_multiplier"]
+    data["planName"] = data.get("plan_name")
+    return data
+
+
+def _hash_group_id(group_id: str) -> str:
+    return hashlib.sha256(str(group_id).encode("utf-8")).hexdigest()
+
+
+def _groups_from_account_data(data: dict[str, Any]) -> list[dict[str, Any]]:
+    if "monitor_groups" in data:
+        return _normalize_monitor_groups(data.get("monitor_groups"))
+    if "monitor_group_ids" in data:
+        return _normalize_monitor_groups(data.get("monitor_group_ids"))
+    return _normalize_monitor_groups([data.get("key_id")])
+
+
+def _should_replace_monitor_groups(data: dict[str, Any]) -> bool:
+    if "monitor_groups" in data or "monitor_group_ids" in data:
+        return True
+    return data.get("key_id") not in {None, ""}
+
+
+def _normalize_monitor_groups(groups: Any) -> list[dict[str, Any]]:
+    if groups is None:
+        return []
+    if isinstance(groups, str):
+        groups = _split_group_ids(groups)
+    if not isinstance(groups, list):
+        groups = [groups]
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in groups:
+        if isinstance(item, str):
+            group = {"group_id": item}
+        elif isinstance(item, dict):
+            group_id = item.get("group_id") or item.get("groupId") or item.get("id") or item.get("name")
+            group = {**item, "group_id": group_id}
+        else:
+            continue
+        group_id = str(group.get("group_id") or "").strip()
+        if not group_id:
+            continue
+        group_hash = _hash_group_id(group_id)
+        if group_hash in seen:
+            continue
+        seen.add(group_hash)
+        normalized.append({**group, "group_id": group_id})
+    return normalized
+
+
+def _split_group_ids(value: str) -> list[str]:
+    text = str(value or "").strip()
+    if not text:
+        return []
+    separators = ["|", ";", "\n"]
+    values = [text]
+    for separator in separators:
+        values = [part for value in values for part in value.split(separator)]
+    return [value.strip() for value in values if value.strip()]
+
+
+def _monitor_group_summary(group: dict[str, Any]) -> dict[str, Any]:
+    raw_json = group.get("raw_json")
+    if not raw_json:
+        raw_json = group.get("rawJson")
+    if not raw_json:
+        raw_json = _json_dumps(group) if group else None
+    default_rate = _optional_float_or_none(
+        group.get("default_rate_multiplier")
+        if group.get("default_rate_multiplier") is not None
+        else group.get("defaultRateMultiplier")
+        if group.get("defaultRateMultiplier") is not None
+        else group.get("rate")
+        if group.get("rate") is not None
+        else group.get("ratio")
+        if group.get("ratio") is not None
+        else group.get("rate_multiplier")
+        if group.get("rate_multiplier") is not None
+        else group.get("rateMultiplier")
+    )
+    user_rate = _optional_float_or_none(
+        group.get("user_rate_multiplier")
+        if group.get("user_rate_multiplier") is not None
+        else group.get("userRateMultiplier")
+    )
+    effective_rate = _optional_float_or_none(
+        group.get("effective_rate_multiplier")
+        if group.get("effective_rate_multiplier") is not None
+        else group.get("effectiveRateMultiplier")
+    )
+    if effective_rate is None:
+        effective_rate = user_rate if user_rate is not None else default_rate
+    plan_name = (
+        group.get("plan_name")
+        or group.get("planName")
+        or group.get("name")
+        or group.get("desc")
+        or group.get("description")
+    )
+    if plan_name is None:
+        group_id = group.get("group_id") or group.get("groupId") or group.get("id")
+        plan_name = f"当前分组 {group_id}" if group_id else None
+    return {
+        "plan_name": str(plan_name) if plan_name is not None else None,
+        "name": str(group.get("name")) if group.get("name") is not None else None,
+        "default_rate_multiplier": default_rate,
+        "user_rate_multiplier": user_rate,
+        "effective_rate_multiplier": effective_rate,
+        "raw_json": raw_json,
+    }
+
+
 def _optional_float(value: Any) -> Optional[float]:
     if value is None or value == "":
         return None
     return float(value)
+
+
+def _optional_float_or_none(value: Any) -> Optional[float]:
+    try:
+        return _optional_float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _optional_bool(value: Any) -> Optional[int]:

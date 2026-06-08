@@ -29,6 +29,7 @@
     data-initial-note="{{ edit_account.note or '' }}"
     data-initial-recharge-url="{{ edit_account.recharge_url or '' }}"
     data-initial-key-id="{{ edit_account.key_id if edit_account else '' }}"
+    data-initial-selected-group-ids="{{ (edit_account.selected_group_ids or [])|join('|') if edit_account else '' }}"
     data-initial-email="{{ edit_account.email if edit_account else '' }}"
     data-initial-user-id="{{ edit_account.user_id if edit_account else '' }}"
     data-initial-threshold="{{ edit_account.threshold if edit_account.threshold is not none else '' }}"
@@ -104,7 +105,7 @@
     <span data-platform-count>{{ accounts|length }} 个账号</span>
   </div>
   <div class="table-wrap">
-    <table>
+    <table data-accounts-table>
       <thead>
         <tr>
           <th>名称</th>
@@ -132,8 +133,9 @@
             {% endif %}
           </td>
           <td data-account-credentials data-label="凭据">
-            {% if platform == "sub2Api" %}当前分组: {{ account.selected_group_id or "未选择" }} / apiKey: {{ "已配置" if account.has_api_key else "未配置" }} / email: {{ "已配置" if account.has_email else "未配置" }} / password: {{ "已配置" if account.has_password else "未配置" }}{% endif %}
-            {% if platform == "newApi" %}accessToken: {{ "已配置" if account.has_access_token else "未配置" }} / userId: {{ "已配置" if account.has_user_id else "未配置" }} / 当前分组: {{ account.selected_group_id or "未选择" }}{% endif %}
+            {% set group_text = account.selected_group_ids|join(", ") if account.selected_group_ids else "未选择" %}
+            {% if platform == "sub2Api" %}当前分组: {{ account.selected_group_id or "未选择" }} / 监控分组: {{ group_text }} / apiKey: {{ "已配置" if account.has_api_key else "未配置" }} / email: {{ "已配置" if account.has_email else "未配置" }} / password: {{ "已配置" if account.has_password else "未配置" }}{% endif %}
+            {% if platform == "newApi" %}accessToken: {{ "已配置" if account.has_access_token else "未配置" }} / userId: {{ "已配置" if account.has_user_id else "未配置" }} / 当前分组: {{ account.selected_group_id or "未选择" }} / 监控分组: {{ group_text }}{% endif %}
           </td>
           <td data-account-threshold-cell data-label="阈值">{{ account.threshold if account.threshold is not none else settings.default_threshold }}</td>
           <td data-label="仪表盘显示">
@@ -169,6 +171,7 @@
                 data-recharge-url="{{ account.recharge_url or '' }}"
                 data-key-id="{{ account.key_id if account.key_id is defined else account.selected_group_id or '' }}"
                 data-selected-group-id="{{ account.selected_group_id or '' }}"
+                data-selected-group-ids="{{ account.selected_group_ids|join('|') }}"
                 data-email="{{ account.email if account.email is defined else '' }}"
                 data-user-id="{{ account.user_id if account.user_id is defined else '' }}"
                 data-threshold="{{ account.threshold if account.threshold is not none else '' }}"
@@ -186,6 +189,7 @@
                 data-recharge-url="{{ account.recharge_url or '' }}"
                 data-key-id="{{ account.key_id if account.key_id is defined else account.selected_group_id or '' }}"
                 data-selected-group-id="{{ account.selected_group_id or '' }}"
+                data-selected-group-ids="{{ account.selected_group_ids|join('|') }}"
                 data-email="{{ account.email if account.email is defined else '' }}"
                 data-user-id="{{ account.user_id if account.user_id is defined else '' }}"
                 data-threshold="{{ account.threshold if account.threshold is not none else '' }}"
@@ -304,13 +308,26 @@
     }
   };
   const configuredLabel = (value) => boolValue(value) ? "已配置" : "未配置";
+  const selectedGroupIdsFromAccount = (account) => {
+    const values = fieldValue(account, "selected_group_ids", "selectedGroupIds");
+    if (Array.isArray(values)) {
+      return values.map(String);
+    }
+    const single = fieldValue(account, "selected_group_id", "selectedGroupId") || fieldValue(account, "key_id", "keyId");
+    return single ? [String(single)] : [];
+  };
+  const selectedGroupIdsFromDataset = (data) => {
+    const raw = data?.selectedGroupIds || data?.selected_group_ids || data?.selectedGroupId || data?.selected_group_id || data?.keyId || "";
+    return String(raw).split("|").map((value) => value.trim()).filter(Boolean);
+  };
   const renderCredentials = (account) => {
     const platform = fieldValue(account, "platform") || "newApi";
-    const selectedGroupId = fieldValue(account, "selected_group_id", "selectedGroupId") || fieldValue(account, "key_id", "keyId");
+    const selectedGroupText = selectedGroupIdsFromAccount(account).join(", ");
+    const currentGroupText = fieldValue(account, "selected_group_id", "selectedGroupId") || fieldValue(account, "key_id", "keyId");
     if (platform === "sub2Api") {
-      return `当前分组: ${escapeHtml(displayText(selectedGroupId, "未选择"))} / apiKey: ${configuredLabel(fieldValue(account, "has_api_key", "hasApiKey"))} / email: ${configuredLabel(fieldValue(account, "has_email", "hasEmail"))} / password: ${configuredLabel(fieldValue(account, "has_password", "hasPassword"))}`;
+      return `当前分组: ${escapeHtml(displayText(currentGroupText, "未选择"))} / 监控分组: ${escapeHtml(displayText(selectedGroupText, "未选择"))} / apiKey: ${configuredLabel(fieldValue(account, "has_api_key", "hasApiKey"))} / email: ${configuredLabel(fieldValue(account, "has_email", "hasEmail"))} / password: ${configuredLabel(fieldValue(account, "has_password", "hasPassword"))}`;
     }
-    return `accessToken: ${configuredLabel(fieldValue(account, "has_access_token", "hasAccessToken"))} / userId: ${configuredLabel(fieldValue(account, "has_user_id", "hasUserId"))} / 当前分组: ${escapeHtml(displayText(selectedGroupId, "未选择"))}`;
+    return `accessToken: ${configuredLabel(fieldValue(account, "has_access_token", "hasAccessToken"))} / userId: ${configuredLabel(fieldValue(account, "has_user_id", "hasUserId"))} / 当前分组: ${escapeHtml(displayText(currentGroupText, "未选择"))} / 监控分组: ${escapeHtml(displayText(selectedGroupText, "未选择"))}`;
   };
   const renderRechargeCell = (account) => {
     const rechargeUrl = fieldValue(account, "recharge_url", "rechargeUrl");
@@ -340,6 +357,7 @@
       note: data.note,
       key_id: data.keyId,
       selected_group_id: data.selectedGroupId,
+      selected_group_ids: selectedGroupIdsFromDataset(data),
       email: data.email,
       user_id: data.userId,
       threshold: data.threshold,
@@ -356,6 +374,7 @@
     [
       ["key_id", "keyId"],
       ["selected_group_id", "selectedGroupId"],
+      ["selected_group_ids", "selectedGroupIds"],
       ["email", "email"],
       ["user_id", "userId"]
     ].forEach(([snakeName, camelName]) => {
@@ -374,6 +393,8 @@
     const note = fieldValue(account, "note");
     const keyId = fieldValue(account, "key_id", "keyId");
     const selectedGroupId = fieldValue(account, "selected_group_id", "selectedGroupId") || (platform === "newApi" ? keyId : "");
+    const selectedGroupIds = selectedGroupIdsFromAccount(account);
+    const selectedGroupIdsText = selectedGroupIds.join("|");
     const effectiveKeyId = platform === "sub2Api" ? (fieldValue(account, "selected_group_id", "selectedGroupId") || keyId) : keyId;
     const email = fieldValue(account, "email");
     const userId = fieldValue(account, "user_id", "userId");
@@ -423,6 +444,7 @@
                 data-recharge-url="${escapeHtml(rechargeUrl)}"
                 data-key-id="${escapeHtml(effectiveKeyId)}"
                 data-selected-group-id="${escapeHtml(selectedGroupId)}"
+                data-selected-group-ids="${escapeHtml(selectedGroupIdsText)}"
                 data-email="${escapeHtml(email)}"
                 data-user-id="${escapeHtml(userId)}"
                 data-threshold="${escapeHtml(threshold)}"
@@ -440,6 +462,7 @@
                 data-recharge-url="${escapeHtml(rechargeUrl)}"
                 data-key-id="${escapeHtml(effectiveKeyId)}"
                 data-selected-group-id="${escapeHtml(selectedGroupId)}"
+                data-selected-group-ids="${escapeHtml(selectedGroupIdsText)}"
                 data-email="${escapeHtml(email)}"
                 data-user-id="${escapeHtml(userId)}"
                 data-threshold="${escapeHtml(threshold)}"
@@ -506,11 +529,11 @@
   document.querySelector("[data-group-picker-close]")?.addEventListener("click", () => {
     groupPicker?.close();
   });
-  const chooseAccountGroup = async (accountId, groupId, group) => {
+  const chooseAccountGroups = async (accountId, groupIds, groups) => {
     const response = await fetch(`/api/accounts/${accountId}/selected-group`, {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({group_id: groupId, group})
+      body: JSON.stringify({group_ids: groupIds, groups})
     });
     const result = await parseJsonResponse(response);
     if (!response.ok) {
@@ -522,54 +545,69 @@
     if (!groupPicker || !groupPickerOptions) {
       return;
     }
+    const selectedIds = new Set(Array.isArray(selectedGroupId) ? selectedGroupId.map(String) : String(selectedGroupId ?? "").split("|").filter(Boolean));
     groupPickerTitle.textContent = `选择 ${platform} 分组`;
-    groupPickerMessage.textContent = groups.length ? "选择后会替换当前使用的分组，后续查组只监测这个分组。" : "没有获取到可用分组。";
+    groupPickerMessage.textContent = groups.length ? "勾选一个或多个分组后保存，后续首页会按分组展开展示。" : "没有获取到可用分组。";
     groupPickerOptions.innerHTML = "";
     groups.forEach((group) => {
       const groupId = String(group.id ?? group.name ?? "");
-      const option = document.createElement("button");
-      option.type = "button";
+      const option = document.createElement("label");
       option.className = "group-option";
+      const checked = selectedIds.has(groupId) ? " checked" : "";
       option.innerHTML = `
+        <input type="checkbox" value="${escapeHtml(groupId)}"${checked}>
         <span>
           <strong>${escapeHtml(group.plan_name || group.planName || group.name || groupId || "-")}</strong>
           <small>ID: ${escapeHtml(groupId || "-")}</small>
         </span>
         <span>倍率 ${escapeHtml(group.effective_rate_multiplier ?? group.user_rate_multiplier ?? group.default_rate_multiplier ?? "-")}</span>
       `;
-      if (selectedGroupId !== null && selectedGroupId !== undefined && groupId === String(selectedGroupId)) {
+      if (selectedIds.has(groupId)) {
         option.classList.add("selected");
       }
-      option.addEventListener("click", async () => {
-        option.disabled = true;
-        const formStatus = sourceButton?.dataset?.submitLabel !== undefined
-          ? sourceButton.closest("[data-account-form]")?.querySelector("[data-form-status]")
-          : null;
-        setInlineStatus(formStatus, "保存分组中", "pending");
-        setAccountActionStatus(accountId, "保存分组中", "pending");
-        try {
-          const result = await chooseAccountGroup(accountId, groupId, group);
-          if (result.account) {
-            upsertAccountRow(result.account, {updateEditableFields: false});
-          }
-          groupPicker.close();
-          if (sourceButton) {
-            sourceButton.title = `当前分组: ${groupId}`;
-          }
-          setInlineStatus(formStatus, "已保存", "success");
-          setAccountActionStatus(accountId, "已保存", "success");
-          if (typeof onSelected === "function") {
-            onSelected(result);
-          }
-        } catch (error) {
-          option.disabled = false;
-          setInlineStatus(formStatus, error.message || "保存分组失败", "error");
-          setAccountActionStatus(accountId, "保存失败", "error");
-          groupPickerMessage.textContent = error.message || "保存分组失败";
-        }
+      option.querySelector("input")?.addEventListener("change", (event) => {
+        option.classList.toggle("selected", event.target.checked);
       });
       groupPickerOptions.appendChild(option);
     });
+    const saveButton = document.createElement("button");
+    saveButton.type = "button";
+    saveButton.className = "primary";
+    saveButton.textContent = "保存分组";
+    saveButton.addEventListener("click", async () => {
+      const checked = Array.from(groupPickerOptions.querySelectorAll("input[type='checkbox']:checked")).map((input) => input.value);
+      const selectedGroups = groups.filter((group) => checked.includes(String(group.id ?? group.name ?? "")));
+      const formStatus = sourceButton?.dataset?.submitLabel !== undefined
+        ? sourceButton.closest("[data-account-form]")?.querySelector("[data-form-status]")
+        : null;
+      setInlineStatus(formStatus, "保存分组中", "pending");
+      setAccountActionStatus(accountId, "保存分组中", "pending");
+      try {
+        const result = await chooseAccountGroups(accountId, checked, selectedGroups);
+        if (result.account) {
+          upsertAccountRow(result.account, {updateEditableFields: false});
+        }
+        groupPicker.close();
+        if (sourceButton) {
+          sourceButton.title = `监控分组: ${checked.join(", ") || "未选择"}`;
+          const sourceForm = sourceButton.closest("[data-account-form]");
+          const selectedInput = sourceForm?.querySelector("[data-newapi-selected-group]");
+          if (selectedInput) {
+            selectedInput.value = checked.join("|");
+          }
+        }
+        setInlineStatus(formStatus, "已保存", "success");
+        setAccountActionStatus(accountId, "已保存", "success");
+        if (typeof onSelected === "function") {
+          onSelected(result);
+        }
+      } catch (error) {
+        setInlineStatus(formStatus, error.message || "保存分组失败", "error");
+        setAccountActionStatus(accountId, "保存失败", "error");
+        groupPickerMessage.textContent = error.message || "保存分组失败";
+      }
+    });
+    groupPickerOptions.appendChild(saveButton);
     groupPicker.showModal();
   };
   const fetchNewapiGroupsByAccountId = async (accountId) => {
@@ -686,7 +724,8 @@
       const visibleValue = fieldValue(account, "is_visible", "isVisible");
       const enabledValue = fieldValue(account, "is_enabled", "isEnabled");
       const keyId = fieldValue(account, "key_id", "keyId");
-      const selectedGroupId = fieldValue(account, "selected_group_id", "selectedGroupId") || keyId;
+      const selectedGroupIds = selectedGroupIdsFromAccount(account);
+      const selectedGroupId = selectedGroupIds[0] || fieldValue(account, "selected_group_id", "selectedGroupId") || keyId;
       accountId.value = fieldValue(account, "id");
       select.value = platform;
       form.elements.name.value = fieldValue(account, "name");
@@ -738,6 +777,10 @@
       const payload = Object.fromEntries(formData.entries());
       payload.is_visible = form.elements.is_visible.checked;
       payload.is_enabled = form.elements.is_enabled.checked;
+      const currentSelectedGroupIds = selectedGroupIdsFromDataset({selectedGroupIds: form.elements.key_id.value});
+      if (currentSelectedGroupIds.length) {
+        payload.monitor_group_ids = currentSelectedGroupIds;
+      }
       delete payload.account_id;
       delete payload.sub2_key_id;
       const isEdit = Boolean(accountId.value);
@@ -771,7 +814,7 @@
             showGroupPicker(
               result.id,
               groupResult.groups || [],
-              groupResult.selected_group_id ?? groupResult.selectedGroupId,
+              groupResult.selected_group_ids ?? groupResult.selectedGroupIds ?? groupResult.selected_group_id ?? groupResult.selectedGroupId,
               submitLabel,
               () => finishSuccessfulSave(result.id),
               select.value
@@ -971,7 +1014,7 @@
     button.textContent = "获取中";
     try {
       const result = await fetchGroupsByAccountId(button.dataset.accountId, platform);
-      showGroupPicker(button.dataset.accountId, result.groups || [], result.selected_group_id ?? result.selectedGroupId, button, undefined, platform);
+      showGroupPicker(button.dataset.accountId, result.groups || [], result.selected_group_ids ?? result.selectedGroupIds ?? result.selected_group_id ?? result.selectedGroupId, button, undefined, platform);
       temporaryButtonStatus(button, "已获取");
     } catch (error) {
       temporaryButtonStatus(button, "失败", error.message || "获取分组失败");

@@ -20,6 +20,7 @@ from app.models import (
     GROUP_RATE_QUERY_INTERVAL_SECONDS,
     Database,
     format_china_time,
+    monitor_group_to_dict,
     row_to_dict,
 )
 from app.security import decrypt_value
@@ -301,19 +302,85 @@ def public_account(row: Any) -> dict[str, Any]:
     data["last_unit"] = str(data.get("last_unit") or DEFAULT_BALANCE_UNIT).strip() or DEFAULT_BALANCE_UNIT
     key_id_enc = data.pop("key_id_enc", None)
     data["has_key_id"] = bool(key_id_enc)
-    selected_group_id = decrypt_value(key_id_enc, config.app_secret_key) if data["platform"] in {"newApi", "sub2Api"} and key_id_enc else None
+    monitor_groups = [public_monitor_group(group) for group in db.list_monitor_groups(int(data["id"]))]
+    selected_group_ids = [group["group_id"] for group in monitor_groups if group.get("group_id")]
+    selected_group_id = selected_group_ids[0] if selected_group_ids else (
+        decrypt_value(key_id_enc, config.app_secret_key) if data["platform"] in {"newApi", "sub2Api"} and key_id_enc else None
+    )
     data["selected_group_id"] = selected_group_id
+    data["selectedGroupId"] = selected_group_id
+    data["selected_group_ids"] = selected_group_ids
+    data["selectedGroupIds"] = selected_group_ids
+    data["monitor_groups"] = monitor_groups
+    data["monitorGroups"] = monitor_groups
     data["has_api_key"] = bool(data.pop("api_key_enc", None))
     data["has_email"] = bool(data.pop("email_enc", None))
     data["has_password"] = bool(data.pop("password_enc", None))
     data["has_access_token"] = bool(data.pop("access_token_enc", None))
     data["has_user_id"] = bool(data.pop("user_id_enc", None))
-    data["group_rates"] = group_rates_from_extra(data.get("last_extra"))
+    data["group_rates"] = monitor_group_rates(monitor_groups) or group_rates_from_extra(data.get("last_extra"))
     data["consumption_stats"] = db.get_consumption_stats(int(data["id"]))
     data["today_consumption"] = data["consumption_stats"]["today"]
+    data["last_group_rate_changed"] = bool(
+        any(group.get("last_group_rate_changed") for group in monitor_groups)
+        or data.get("last_group_rate_changed")
+    )
     if data["platform"] in {"newApi", "sub2Api"} and selected_group_id and not data["group_rates"]:
         data["group_rates"] = [{"plan_name": f"当前分组 {selected_group_id}", "rate_multiplier": None}]
     return data
+
+
+def public_monitor_group(row: Any) -> dict[str, Any]:
+    data = monitor_group_to_dict(row, config.app_secret_key)
+    data["display_name"] = data.get("plan_name") or data.get("name") or data.get("group_id") or "-"
+    data["displayName"] = data["display_name"]
+    return data
+
+
+def monitor_group_rates(monitor_groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rates = []
+    for group in monitor_groups:
+        rates.append(
+            {
+                "monitor_group_id": group.get("id"),
+                "group_id": group.get("group_id"),
+                "plan_name": group.get("plan_name") or group.get("name") or group.get("group_id") or "-",
+                "rate_multiplier": group.get("effective_rate_multiplier"),
+            }
+        )
+    return rates
+
+
+def public_dashboard_account(account: dict[str, Any], monitor_group: dict[str, Any] | None) -> dict[str, Any]:
+    row = dict(account)
+    row["monitor_group"] = monitor_group
+    row["monitorGroup"] = monitor_group
+    if monitor_group:
+        row["dashboard_row_id"] = f"{account['id']}:group:{monitor_group['id']}"
+        row["dashboardRowId"] = row["dashboard_row_id"]
+        row["current_group_id"] = monitor_group.get("group_id")
+        row["currentGroupId"] = row["current_group_id"]
+        row["current_monitor_group_id"] = monitor_group.get("id")
+        row["currentMonitorGroupId"] = row["current_monitor_group_id"]
+        row["last_group_rate_changed"] = bool(monitor_group.get("last_group_rate_changed"))
+        row["group_rates"] = [
+            {
+                "monitor_group_id": monitor_group.get("id"),
+                "group_id": monitor_group.get("group_id"),
+                "plan_name": monitor_group.get("plan_name") or monitor_group.get("name") or monitor_group.get("group_id") or "-",
+                "rate_multiplier": monitor_group.get("effective_rate_multiplier"),
+            }
+        ]
+    else:
+        row["dashboard_row_id"] = f"{account['id']}:account"
+        row["dashboardRowId"] = row["dashboard_row_id"]
+        row["current_group_id"] = None
+        row["currentGroupId"] = None
+        row["current_monitor_group_id"] = None
+        row["currentMonitorGroupId"] = None
+        row["last_group_rate_changed"] = bool(account.get("last_group_rate_changed"))
+        row["group_rates"] = account.get("group_rates") or []
+    return row
 
 
 def group_rates_from_extra(extra: Any) -> list[dict[str, Any]]:
@@ -403,6 +470,85 @@ def account_group_result_from_selection(platform: str, group_id: str, group: dic
     return {"is_valid": True, "plan_name": title, "extra": extra}
 
 
+def multi_group_result(results: list[dict[str, Any]]) -> dict[str, Any]:
+    groups = []
+    titles = []
+    for result in results:
+        extra = result.get("extra")
+        if isinstance(extra, str):
+            try:
+                extra = json.loads(extra)
+            except json.JSONDecodeError:
+                extra = {}
+        if isinstance(extra, dict):
+            if isinstance(extra.get("group"), dict):
+                groups.append(extra["group"])
+            titles.append(str(extra.get("title") or result.get("plan_name") or ""))
+    title = " / ".join(title for title in titles if title) or "已选择分组"
+    return {
+        "is_valid": True,
+        "plan_name": title,
+        "extra": json.dumps({"title": title, "groups": groups}, ensure_ascii=False, default=str),
+    }
+
+
+def _group_ids_from_payload(payload: dict[str, Any]) -> list[str]:
+    raw = payload.get("group_ids")
+    if raw is None:
+        raw = payload.get("groupIds")
+    if raw is None:
+        raw = payload.get("monitor_group_ids")
+    if raw is None:
+        raw = payload.get("monitorGroupIds")
+    if raw is None:
+        raw = payload.get("group_id") or payload.get("groupId")
+    if isinstance(raw, str):
+        items = [part.strip() for value in raw.split("|") for part in value.split(";")]
+    elif isinstance(raw, list):
+        items = [str(item.get("id") or item.get("group_id") or item.get("groupId") or item.get("name") if isinstance(item, dict) else item).strip() for item in raw]
+    else:
+        items = [str(raw).strip()] if raw is not None else []
+    result = []
+    seen = set()
+    for item in items:
+        if item and item not in seen:
+            seen.add(item)
+            result.append(item)
+    return result
+
+
+def _groups_by_id_from_payload(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    raw_groups = payload.get("groups")
+    if raw_groups is None and isinstance(payload.get("group"), dict):
+        raw_groups = [payload["group"]]
+    if not isinstance(raw_groups, list):
+        raw_groups = []
+    groups = {}
+    for group in raw_groups:
+        if not isinstance(group, dict):
+            continue
+        group_id = str(group.get("id") or group.get("group_id") or group.get("groupId") or group.get("name") or "").strip()
+        if group_id:
+            groups[group_id] = group
+    return groups
+
+
+def with_monitor_group_selection(account_id: int, result: dict[str, Any]) -> dict[str, Any]:
+    selected_group_ids = [
+        group["group_id"]
+        for group in (public_monitor_group(row) for row in db.list_monitor_groups(account_id))
+        if group.get("group_id")
+    ]
+    selected_group_id = selected_group_ids[0] if selected_group_ids else result.get("selected_group_id")
+    return {
+        **result,
+        "selected_group_id": selected_group_id,
+        "selectedGroupId": selected_group_id,
+        "selected_group_ids": selected_group_ids,
+        "selectedGroupIds": selected_group_ids,
+    }
+
+
 def grouped_accounts(
     eliminated_last: bool = False,
     enabled_only: bool = False,
@@ -414,6 +560,20 @@ def grouped_accounts(
     if eliminated_last:
         for accounts in grouped.values():
             accounts.sort(key=lambda account: (1 if account.get("is_eliminated") else 0, str(account.get("name") or "").lower()))
+    return grouped
+
+
+def dashboard_grouped_accounts() -> dict[str, list[dict[str, Any]]]:
+    grouped = {"newApi": [], "sub2Api": []}
+    for platform, accounts in grouped_accounts(eliminated_last=True, visible_only=True).items():
+        for account in accounts:
+            monitor_groups = account.get("monitor_groups") if isinstance(account.get("monitor_groups"), list) else []
+            if monitor_groups:
+                for monitor_group in monitor_groups:
+                    grouped[platform].append(public_dashboard_account(account, monitor_group))
+            else:
+                grouped[platform].append(public_dashboard_account(account, None))
+        grouped[platform].sort(key=lambda item: (1 if item.get("is_eliminated") else 0, str(item.get("name") or "").lower(), str(item.get("current_group_id") or "")))
     return grouped
 
 
@@ -500,9 +660,13 @@ def public_edit_account(account_id: int | None) -> dict[str, Any] | None:
     data = public_account(row)
     if row["platform"] == "sub2Api":
         data["key_id"] = decrypt_value(row["key_id_enc"], config.app_secret_key) or ""
+        if data.get("selected_group_id"):
+            data["key_id"] = data["selected_group_id"]
         data["email"] = decrypt_value(row["email_enc"], config.app_secret_key) or ""
     if row["platform"] == "newApi":
         data["key_id"] = decrypt_value(row["key_id_enc"], config.app_secret_key) or ""
+        if data.get("selected_group_id"):
+            data["key_id"] = data["selected_group_id"]
         data["user_id"] = decrypt_value(row["user_id_enc"], config.app_secret_key) or ""
     return data
 
@@ -512,7 +676,7 @@ async def dashboard(request: Request):
     redirect = redirect_if_needed(request)
     if redirect:
         return redirect
-    grouped = grouped_accounts(eliminated_last=True, visible_only=True)
+    grouped = dashboard_grouped_accounts()
     consumption_filter = consumption_date_range_from_query(request)
     return templates.TemplateResponse(
         request,
@@ -750,13 +914,19 @@ async def group_rates_page(request: Request, account_id: int):
     account = db.get_account(account_id)
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")
+    monitor_group_id = _optional_int(request.query_params.get("monitor_group_id") or request.query_params.get("monitorGroupId"))
+    monitor_group_row = db.get_monitor_group(monitor_group_id) if monitor_group_id else None
+    if monitor_group_row and monitor_group_row["account_id"] != account_id:
+        raise HTTPException(status_code=404, detail="分组不存在")
+    monitor_group = public_monitor_group(monitor_group_row) if monitor_group_row else None
     return templates.TemplateResponse(
         request,
         "group_rates.html",
         template_context(
             request,
             account=public_account(account),
-            records=[row_to_dict(row) for row in db.list_group_rate_records(account_id)],
+            monitor_group=monitor_group,
+            records=[row_to_dict(row) for row in db.list_group_rate_records(account_id, monitor_group_id=monitor_group_id)],
         ),
     )
 
@@ -912,9 +1082,14 @@ async def api_group_rates(request: Request, account_id: int):
     account = db.get_account(account_id)
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")
+    monitor_group_id = _optional_int(request.query_params.get("monitor_group_id") or request.query_params.get("monitorGroupId"))
+    monitor_group_row = db.get_monitor_group(monitor_group_id) if monitor_group_id else None
+    if monitor_group_row and monitor_group_row["account_id"] != account_id:
+        raise HTTPException(status_code=404, detail="分组不存在")
     return {
         "account": public_account(account),
-        "records": [row_to_dict(row) for row in db.list_group_rate_records(account_id)],
+        "monitor_group": public_monitor_group(monitor_group_row) if monitor_group_row else None,
+        "records": [row_to_dict(row) for row in db.list_group_rate_records(account_id, monitor_group_id=monitor_group_id)],
     }
 
 
@@ -949,6 +1124,8 @@ async def api_group_rate_change_status(request: Request, account_id: int):
         raise HTTPException(status_code=404, detail="账号不存在")
     payload = await request.json()
     changed = False
+    monitor_group_id = None
+    group_id = None
     if isinstance(payload, dict):
         if "changed" in payload:
             changed = bool(payload.get("changed"))
@@ -956,7 +1133,9 @@ async def api_group_rate_change_status(request: Request, account_id: int):
             changed = bool(payload.get("group_rate_changed"))
         elif "groupRateChanged" in payload:
             changed = bool(payload.get("groupRateChanged"))
-    db.update_account_group_rate_change_status(account_id, changed)
+        monitor_group_id = _optional_int(payload.get("monitor_group_id") or payload.get("monitorGroupId"))
+        group_id = str(payload.get("group_id") or payload.get("groupId") or "").strip() or None
+    db.update_account_group_rate_change_status(account_id, changed, monitor_group_id=monitor_group_id, group_id=group_id)
     updated = db.get_account(account_id)
     db.add_log("info", "account", f"{account['platform']} / {account['name']} 分组倍率状态: {'变化' if changed else '未变化'}")
     return {"ok": True, "account": public_account(updated)}
@@ -1090,7 +1269,7 @@ async def api_newapi_groups(request: Request, account_id: int):
     result = await query_newapi_group_options(account, db.secret_key, settings["request_timeout"], db.add_log)
     if not result.get("is_valid"):
         return JSONResponse(result, status_code=400)
-    return result
+    return with_monitor_group_selection(account_id, result)
 
 @app.get("/api/accounts/{account_id}/sub2api-groups")
 async def api_sub2api_groups(request: Request, account_id: int):
@@ -1104,7 +1283,7 @@ async def api_sub2api_groups(request: Request, account_id: int):
     result = await query_sub2api_group_options(account, db.secret_key, settings["request_timeout"], db.add_log)
     if not result.get("is_valid"):
         return JSONResponse(result, status_code=400)
-    return result
+    return with_monitor_group_selection(account_id, result)
 
 
 @app.post("/api/accounts/{account_id}/selected-group")
@@ -1116,16 +1295,25 @@ async def api_select_account_group(request: Request, account_id: int):
     if account["platform"] not in {"newApi", "sub2Api"}:
         raise HTTPException(status_code=400, detail="仅支持 newApi 或 sub2Api")
     payload = await request.json()
-    group_id = str(payload.get("group_id") or payload.get("groupId") or "").strip()
-    if not group_id:
+    group_ids = _group_ids_from_payload(payload)
+    if not group_ids:
         raise HTTPException(status_code=400, detail="请选择分组")
-    group = payload.get("group")
-    group_result = account_group_result_from_selection(account["platform"], group_id, group) if isinstance(group, dict) else None
-    db.update_account_selected_group(account_id, group_id)
-    db.update_account_group_result(account_id, group_result or {"extra": None})
+    groups = _groups_by_id_from_payload(payload)
+    monitor_groups = []
+    selected_results = []
+    for group_id in group_ids:
+        group = groups.get(group_id, {"id": group_id, "plan_name": f"当前分组 {group_id}"})
+        monitor_groups.append({**group, "group_id": group_id})
+        if isinstance(group, dict):
+            selected_results.append(account_group_result_from_selection(account["platform"], group_id, group))
+    db.replace_account_monitor_groups(account_id, monitor_groups)
+    if selected_results:
+        db.update_account_group_result(account_id, multi_group_result(selected_results))
+    else:
+        db.update_account_group_result(account_id, {"extra": None})
     updated = db.get_account(account_id)
-    db.add_log("info", "account", f"{account['platform']} / {account['name']} 选择分组: {group_id}")
-    return {"ok": True, "account": public_account(updated), "group_result": group_result}
+    db.add_log("info", "account", f"{account['platform']} / {account['name']} 选择分组: {', '.join(group_ids)}")
+    return {"ok": True, "account": public_account(updated), "group_result": selected_results[0] if selected_results else None, "group_results": selected_results}
 
 
 @app.post("/api/query-all")
@@ -1243,6 +1431,15 @@ def _account_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "threshold": payload.get("threshold"),
         "is_eliminated": is_eliminated,
     }
+    if "monitor_groups" in payload or "monitorGroups" in payload:
+        account_data["monitor_groups"] = payload.get("monitor_groups", payload.get("monitorGroups"))
+    elif "monitor_group_ids" in payload or "monitorGroupIds" in payload or "group_ids" in payload or "groupIds" in payload:
+        account_data["monitor_group_ids"] = (
+            payload.get("monitor_group_ids")
+            or payload.get("monitorGroupIds")
+            or payload.get("group_ids")
+            or payload.get("groupIds")
+        )
     if "is_enabled" in payload or "isEnabled" in payload or "enabled" in payload:
         account_data["is_enabled"] = _to_bool(payload.get("is_enabled", payload.get("isEnabled", payload.get("enabled"))))
     if "is_visible" in payload or "isVisible" in payload or "visible" in payload:
@@ -1267,11 +1464,13 @@ def import_bulk_accounts(platform: str, bulk_text: str) -> int:
             parts = [part.strip() for part in line.split(",")]
             if platform == "sub2Api":
                 if len(parts) >= 7:
+                    group_ids = _split_group_ids(parts[2])
                     items.append(
                         {
                             "name": parts[0],
                             "base_url": parts[1],
                             "key_id": parts[2],
+                            "monitor_group_ids": group_ids,
                             "email": parts[3],
                             "password": parts[4],
                             "api_key": parts[5],
@@ -1294,11 +1493,13 @@ def import_bulk_accounts(platform: str, bulk_text: str) -> int:
                         }
                     )
                 elif len(parts) >= 5:
+                    group_ids = _split_group_ids(parts[2])
                     items.append(
                         {
                             "name": parts[0],
                             "base_url": parts[1],
                             "key_id": parts[2],
+                            "monitor_group_ids": group_ids,
                             "api_key": parts[3],
                             "threshold": parts[4] if len(parts) > 4 else None,
                             "note": parts[5] if len(parts) > 5 else "",
@@ -1371,3 +1572,13 @@ def _optional_number(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _split_group_ids(value: Any) -> list[str]:
+    text = str(value or "").strip()
+    if not text:
+        return []
+    values = [text]
+    for separator in ("|", ";", "\n"):
+        values = [part for value in values for part in value.split(separator)]
+    return [value.strip() for value in values if value.strip()]
