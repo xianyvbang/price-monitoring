@@ -102,6 +102,7 @@
           data-account-row="{{ account.id }}"
           data-account-eliminated="{{ 'true' if account.is_eliminated else 'false' }}"
           data-account-enabled="{{ 'true' if account.is_enabled else 'false' }}"
+          data-account-base-url="{{ account.base_url }}"
           data-account-consumption-unit="{{ account.last_unit or 'USD' }}"
           data-account-consumption-today="{{ account.consumption_stats.today if account.consumption_stats.today is not none else '' }}"
           data-account-consumption-yesterday="{{ account.consumption_stats.yesterday if account.consumption_stats.yesterday is not none else '' }}"
@@ -281,6 +282,8 @@
   const roundAmount = (value) => Math.round((value + Number.EPSILON) * 1000000) / 1000000;
   const formatTotalAmount = (value) => String(roundAmount(value));
   const consumptionAttributeName = (period) => `data-account-consumption-${String(period).replaceAll("_", "-")}`;
+  const normalizeConsumptionBaseUrl = (value) => String(value || "").trim().replace(/\/+$/, "").toLowerCase();
+  const consumptionBaseUrlKey = (row) => normalizeConsumptionBaseUrl(row.getAttribute("data-account-base-url")) || `account:${row.getAttribute("data-account-row") || ""}`;
   const updateConsumptionSummaries = () => {
     document.querySelectorAll("[data-consumption-summary]").forEach((count) => {
       if (count.dataset.consumptionStatic === "true") {
@@ -292,7 +295,7 @@
         return;
       }
       const totals = new Map();
-      let accountCount = 0;
+      const consumptionByBaseUrl = new Map();
       const attributeName = consumptionAttributeName(period);
       document.querySelectorAll("[data-account-row]").forEach((row) => {
         const rawValue = row.getAttribute(attributeName);
@@ -304,14 +307,21 @@
           return;
         }
         const unit = row.getAttribute("data-account-consumption-unit") || defaultBalanceUnit;
+        const baseUrlKey = consumptionBaseUrlKey(row);
+        const accountId = Number(row.getAttribute("data-account-row"));
+        const existing = consumptionByBaseUrl.get(baseUrlKey);
+        if (!existing || (Number.isFinite(accountId) && accountId < existing.accountId)) {
+          consumptionByBaseUrl.set(baseUrlKey, {accountId: Number.isFinite(accountId) ? accountId : Number.MAX_SAFE_INTEGER, value, unit});
+        }
+      });
+      consumptionByBaseUrl.forEach(({value, unit}) => {
         totals.set(unit, roundAmount((totals.get(unit) || 0) + value));
-        accountCount += 1;
       });
       const parts = Array.from(totals.entries()).map(([unit, amount]) => {
         return unit ? `${formatTotalAmount(amount)} ${unit}` : formatTotalAmount(amount);
       });
       total.textContent = parts.length ? parts.join(" / ") : "-";
-      count.textContent = `${accountCount} ${count.dataset.consumptionCountLabel || "个账号有记录"}`;
+      count.textContent = `${consumptionByBaseUrl.size} ${count.dataset.consumptionCountLabel || "个 Base URL 有记录"}`;
     });
   };
   const groupRatesFromResult = (result) => {

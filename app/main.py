@@ -51,13 +51,13 @@ LOG_VALUE_LIMIT = 2000
 LOG_PAGE_SIZE = 50
 LOG_MAX_PAGE_SIZE = 200
 CONSUMPTION_PERIODS = [
-    {"key": "today", "label": "今日消耗总余额", "count_label": "个账号有今日记录"},
-    {"key": "yesterday", "label": "昨日消耗总余额", "count_label": "个账号有昨日记录"},
-    {"key": "last_24h", "label": "近24小时消耗总余额", "count_label": "个账号有近24小时记录"},
-    {"key": "last_7d", "label": "近7天消耗总余额", "count_label": "个账号有近7天记录"},
-    {"key": "last_14d", "label": "近14天消耗总余额", "count_label": "个账号有近14天记录"},
-    {"key": "this_month", "label": "本月消耗总余额", "count_label": "个账号有本月记录"},
-    {"key": "last_month", "label": "上月消耗总余额", "count_label": "个账号有上月记录"},
+    {"key": "today", "label": "今日消耗总余额", "count_label": "个 Base URL 有今日记录"},
+    {"key": "yesterday", "label": "昨日消耗总余额", "count_label": "个 Base URL 有昨日记录"},
+    {"key": "last_24h", "label": "近24小时消耗总余额", "count_label": "个 Base URL 有近24小时记录"},
+    {"key": "last_7d", "label": "近7天消耗总余额", "count_label": "个 Base URL 有近7天记录"},
+    {"key": "last_14d", "label": "近14天消耗总余额", "count_label": "个 Base URL 有近14天记录"},
+    {"key": "this_month", "label": "本月消耗总余额", "count_label": "个 Base URL 有本月记录"},
+    {"key": "last_month", "label": "上月消耗总余额", "count_label": "个 Base URL 有上月记录"},
 ]
 
 
@@ -419,22 +419,27 @@ def grouped_accounts(
 
 def summarize_consumption_period(grouped: dict[str, list[dict[str, Any]]], period: dict[str, Any]) -> dict[str, Any]:
     totals: dict[str, float] = {}
-    account_count = 0
+    consumption_by_base_url: dict[str, tuple[int, float, str]] = {}
     key = period["key"]
     for accounts in grouped.values():
         for account in accounts:
+            account_id = int(account["id"])
             if period.get("since"):
-                consumption = db.get_consumption_between(int(account["id"]), str(period["since"]), period.get("until"))
+                consumption = db.get_consumption_between(account_id, str(period["since"]), period.get("until"))
             else:
                 stats = account.get("consumption_stats") if isinstance(account.get("consumption_stats"), dict) else {}
                 consumption = _optional_number(stats.get(key))
             if consumption is None:
                 continue
+            base_url_key = _consumption_base_url_key(account)
             unit = str(account.get("last_unit") or DEFAULT_BALANCE_UNIT).strip() or DEFAULT_BALANCE_UNIT
-            totals[unit] = round(totals.get(unit, 0.0) + consumption, 6)
-            account_count += 1
+            existing = consumption_by_base_url.get(base_url_key)
+            if existing is None or account_id < existing[0]:
+                consumption_by_base_url[base_url_key] = (account_id, consumption, unit)
+    for _, consumption, unit in consumption_by_base_url.values():
+        totals[unit] = round(totals.get(unit, 0.0) + consumption, 6)
     total_items = [{"amount": amount, "unit": unit} for unit, amount in totals.items()]
-    return {**period, "totals": total_items, "account_count": account_count}
+    return {**period, "totals": total_items, "account_count": len(consumption_by_base_url)}
 
 
 def summarize_consumption_periods(grouped: dict[str, list[dict[str, Any]]], custom_range: dict[str, Any]) -> list[dict[str, Any]]:
@@ -442,7 +447,7 @@ def summarize_consumption_periods(grouped: dict[str, list[dict[str, Any]]], cust
     custom_period = {
         "key": "custom",
         "label": "筛选区间消耗总余额",
-        "count_label": "个账号有筛选区间记录",
+        "count_label": "个 Base URL 有筛选区间记录",
         "static": True,
     }
     if custom_range.get("active"):
@@ -451,6 +456,13 @@ def summarize_consumption_periods(grouped: dict[str, list[dict[str, Any]]], cust
     else:
         summaries.append({**custom_period, "totals": [], "account_count": 0})
     return summaries
+
+
+def _consumption_base_url_key(account: dict[str, Any]) -> str:
+    base_url = str(account.get("base_url") or "").strip().rstrip("/").lower()
+    if base_url:
+        return base_url
+    return f"account:{account.get('id', '')}"
 
 
 def consumption_date_range_from_query(request: Request) -> dict[str, Any]:
@@ -1079,7 +1091,6 @@ async def api_newapi_groups(request: Request, account_id: int):
     if not result.get("is_valid"):
         return JSONResponse(result, status_code=400)
     return result
-
 
 @app.get("/api/accounts/{account_id}/sub2api-groups")
 async def api_sub2api_groups(request: Request, account_id: int):

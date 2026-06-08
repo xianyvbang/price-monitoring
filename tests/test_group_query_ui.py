@@ -307,6 +307,14 @@ def test_dashboard_shows_today_consumption_column(tmp_path, monkeypatch):
             "api_key": "secret",
         }
     )
+    duplicate_base_url_account_id = test_db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "sub-consumption-duplicate-url",
+            "base_url": "https://SUB.example/",
+            "api_key": "secret",
+        }
+    )
     china_tz = timezone(timedelta(hours=8))
     today_start = datetime.now(china_tz).replace(hour=0, minute=0, second=0, microsecond=0)
     first = (today_start + timedelta(hours=1)).astimezone(timezone.utc).isoformat(timespec="seconds")
@@ -317,6 +325,8 @@ def test_dashboard_shows_today_consumption_column(tmp_path, monkeypatch):
     test_db.update_account_result(account_id, {"is_valid": True, "remaining": 48, "unit": "USD", "checked_at": third})
     test_db.update_account_result(second_account_id, {"is_valid": True, "remaining": 10, "checked_at": first})
     test_db.update_account_result(second_account_id, {"is_valid": True, "remaining": 8.75, "checked_at": second})
+    test_db.update_account_result(duplicate_base_url_account_id, {"is_valid": True, "remaining": 100, "checked_at": first})
+    test_db.update_account_result(duplicate_base_url_account_id, {"is_valid": True, "remaining": 80, "checked_at": second})
     monkeypatch.setattr("app.main.db", test_db)
     monkeypatch.setattr("app.main.scheduler.db", test_db)
     monkeypatch.setattr("app.main.scheduler.start", lambda: None)
@@ -349,17 +359,20 @@ def test_dashboard_shows_today_consumption_column(tmp_path, monkeypatch):
     assert 'data-consumption-period="last_24h"' in dashboard.text
     assert 'data-consumption-period="custom"' in dashboard.text
     assert 'data-consumption-static="true"' in dashboard.text
+    assert 'data-account-base-url="https://SUB.example"' in dashboard.text
     assert 'data-account-consumption-yesterday' in dashboard.text
     assert 'data-account-consumption-last-14d' in dashboard.text
     assert 'data-account-consumption-this-month' in dashboard.text
     assert 'data-account-consumption-last-month' in dashboard.text
-    assert "0 个账号有筛选区间记录" in dashboard.text
+    assert "0 个 Base URL 有筛选区间记录" in dashboard.text
     assert "5.5 USD" in dashboard.text
     assert "6.75 USD" in dashboard.text
+    assert "26.75 USD" not in dashboard.text
     assert f'value="{date_text}"' in dashboard_custom.text
     assert "清除筛选" in dashboard_custom.text
-    assert "2 个账号有筛选区间记录" in dashboard_custom.text
+    assert "2 个 Base URL 有筛选区间记录" in dashboard_custom.text
     assert "6.75 USD" in dashboard_custom.text
+    assert "26.75 USD" not in dashboard_custom.text
 
 
 def test_dashboard_orders_eliminated_accounts_last(tmp_path, monkeypatch):
