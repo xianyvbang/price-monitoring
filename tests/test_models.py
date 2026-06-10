@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from app.models import BALANCE_QUERY_INTERVAL_SECONDS, GROUP_RATE_QUERY_INTERVAL_SECONDS, Database, format_china_time
+from app.models import BALANCE_QUERY_INTERVAL_SECONDS, GROUP_RATE_QUERY_INTERVAL_SECONDS, REQUEST_TIMEOUT_SECONDS, Database, format_china_time
 from app.security import decrypt_value
 
 
@@ -639,6 +639,23 @@ def test_group_rate_records_skip_unrecognized_empty_summary(tmp_path):
 
     assert result["inserted"] is False
     assert db.list_group_rate_records(account_id) == []
+
+
+def test_request_timeout_defaults_to_one_minute(tmp_path):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+
+    assert db.get_general_settings()["request_timeout"] == REQUEST_TIMEOUT_SECONDS
+
+
+def test_legacy_request_timeout_default_is_upgraded(tmp_path):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+    db.update_general_settings(15, BALANCE_QUERY_INTERVAL_SECONDS, 5, GROUP_RATE_QUERY_INTERVAL_SECONDS)
+
+    db.init()
+
+    assert db.get_general_settings()["request_timeout"] == REQUEST_TIMEOUT_SECONDS
 
 
 def test_group_rate_records_cascade_delete_and_settings_default(tmp_path):

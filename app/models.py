@@ -20,6 +20,7 @@ CHINA_TZ = timezone(timedelta(hours=8))
 DEFAULT_BALANCE_UNIT = "USD"
 BALANCE_HISTORY_MONTHS = 9
 BALANCE_TREND_DAYS = 3
+REQUEST_TIMEOUT_SECONDS = 60
 BALANCE_QUERY_INTERVAL_SECONDS = 5 * 60
 GROUP_RATE_QUERY_INTERVAL_SECONDS = 20 * 60
 
@@ -198,7 +199,8 @@ class Database:
                 """
             )
             self._migrate_legacy_selected_groups(conn)
-            self._set_default(conn, "request_timeout", "15")
+            self._set_default(conn, "request_timeout", str(REQUEST_TIMEOUT_SECONDS))
+            self._upgrade_request_timeout_default(conn)
             self._set_default(conn, "query_interval", str(BALANCE_QUERY_INTERVAL_SECONDS))
             self._set_default(conn, "group_rate_query_interval", str(GROUP_RATE_QUERY_INTERVAL_SECONDS))
             self._set_default(conn, "default_threshold", "5")
@@ -234,6 +236,13 @@ class Database:
     @staticmethod
     def _set_default(conn: sqlite3.Connection, key: str, value: str) -> None:
         conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, value))
+
+    @staticmethod
+    def _upgrade_request_timeout_default(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            "UPDATE settings SET value = ? WHERE key = 'request_timeout' AND value = '15'",
+            (str(REQUEST_TIMEOUT_SECONDS),),
+        )
 
     @staticmethod
     def _seed_default_accounts(conn: sqlite3.Connection) -> None:
@@ -408,7 +417,7 @@ class Database:
             rows = conn.execute("SELECT key, value FROM settings").fetchall()
         values = {row["key"]: row["value"] for row in rows}
         return {
-            "request_timeout": float(values.get("request_timeout", "15")),
+            "request_timeout": float(values.get("request_timeout", str(REQUEST_TIMEOUT_SECONDS))),
             "query_interval": max(
                 BALANCE_QUERY_INTERVAL_SECONDS,
                 int(float(values.get("query_interval", str(BALANCE_QUERY_INTERVAL_SECONDS)))),

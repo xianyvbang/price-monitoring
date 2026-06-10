@@ -19,6 +19,7 @@ from app.models import (
     DEFAULT_BALANCE_UNIT,
     GROUP_RATE_QUERY_INTERVAL_SECONDS,
     Database,
+    REQUEST_TIMEOUT_SECONDS,
     format_china_time,
     monitor_group_to_dict,
     row_to_dict,
@@ -963,7 +964,7 @@ async def save_general_settings_form(request: Request):
         return redirect
     form = await request.form()
     db.update_general_settings(
-        float(form.get("request_timeout") or 15),
+        float(form.get("request_timeout") or REQUEST_TIMEOUT_SECONDS),
         int(float(form.get("query_interval") or BALANCE_QUERY_INTERVAL_SECONDS)),
         float(form.get("default_threshold") or 5),
         int(float(form.get("group_rate_query_interval") or GROUP_RATE_QUERY_INTERVAL_SECONDS)),
@@ -1339,7 +1340,7 @@ async def api_general_settings(request: Request):
     require_user(request)
     payload = await request.json()
     db.update_general_settings(
-        float(payload.get("request_timeout", 15)),
+        float(payload.get("request_timeout", REQUEST_TIMEOUT_SECONDS)),
         int(payload.get("query_interval", BALANCE_QUERY_INTERVAL_SECONDS)),
         float(payload.get("default_threshold", 5)),
         int(payload.get("group_rate_query_interval", payload.get("groupRateQueryInterval", GROUP_RATE_QUERY_INTERVAL_SECONDS))),
