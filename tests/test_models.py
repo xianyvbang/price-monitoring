@@ -1,6 +1,13 @@
 from datetime import datetime, timedelta, timezone
 
-from app.models import BALANCE_QUERY_INTERVAL_SECONDS, GROUP_RATE_QUERY_INTERVAL_SECONDS, REQUEST_TIMEOUT_SECONDS, Database, format_china_time
+from app.models import (
+    BALANCE_QUERY_INTERVAL_SECONDS,
+    GROUP_RATE_QUERY_INTERVAL_SECONDS,
+    REQUEST_TIMEOUT_SECONDS,
+    Database,
+    actual_consumption_amount,
+    format_china_time,
+)
 from app.security import decrypt_value
 
 
@@ -79,6 +86,35 @@ def test_account_note_is_saved_and_updated(tmp_path):
 
     assert account["note"] == "second note"
     assert account["recharge_url"] == "https://example.com/new-topup"
+    assert account["recharge_paid_amount"] == 1
+    assert account["recharge_received_amount"] == 1
+
+
+def test_recharge_ratio_calculates_actual_consumption(tmp_path):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+    account_id = db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "sub-ratio",
+            "base_url": "https://example.com",
+            "email": "user@example.com",
+            "password": "login-password",
+            "api_key": "sk-test",
+            "recharge_paid_amount": 1,
+            "recharge_received_amount": 2,
+        }
+    )
+    checked_at = datetime.now(timezone.utc).replace(microsecond=0)
+    db.update_account_result(account_id, {"is_valid": True, "remaining": 50, "checked_at": checked_at.isoformat(timespec="seconds")})
+    db.update_account_result(account_id, {"is_valid": True, "remaining": 44.5, "checked_at": (checked_at + timedelta(minutes=1)).isoformat(timespec="seconds")})
+
+    account = db.get_account(account_id)
+
+    assert account["recharge_paid_amount"] == 1
+    assert account["recharge_received_amount"] == 2
+    assert db.get_consumption_since(account_id, checked_at.isoformat(timespec="seconds")) == 5.5
+    assert actual_consumption_amount(5.5, account) == 2.75
 
 
 def test_group_rate_change_status_defaults_and_updates(tmp_path):

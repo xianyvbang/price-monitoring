@@ -28,6 +28,8 @@
     data-initial-base-url="{{ edit_account.base_url }}"
     data-initial-note="{{ edit_account.note or '' }}"
     data-initial-recharge-url="{{ edit_account.recharge_url or '' }}"
+    data-initial-recharge-paid-amount="{{ edit_account.recharge_paid_amount or 1 }}"
+    data-initial-recharge-received-amount="{{ edit_account.recharge_received_amount or 1 }}"
     data-initial-key-id="{{ edit_account.key_id if edit_account else '' }}"
     data-initial-selected-group-ids="{{ (edit_account.selected_group_ids or [])|join('|') if edit_account else '' }}"
     data-initial-email="{{ edit_account.email if edit_account else '' }}"
@@ -55,6 +57,10 @@
     <label>名称<input name="name" required></label>
     <label>Base URL<input name="base_url" required></label>
     <label>充值路径（可选）<input name="recharge_url" type="url" autocomplete="off"></label>
+    <div class="field-row" aria-label="充值比例">
+      <label>充值金额<input name="recharge_paid_amount" type="number" min="0.000001" step="0.000001" value="1" required></label>
+      <label>实际得到金额<input name="recharge_received_amount" type="number" min="0.000001" step="0.000001" value="1" required></label>
+    </div>
     <label>备注<textarea name="note" rows="3"></textarea></label>
     <label data-platform-field="sub2Api">sub2Api groupId（可选筛选）<input name="sub2_key_id" autocomplete="off"></label>
     <label data-platform-field="sub2Api">sub2Api apiKey<input name="api_key" type="password" autocomplete="off"></label>
@@ -112,6 +118,7 @@
           <th>备注</th>
           <th>Base URL</th>
           <th>充值路径</th>
+          <th>充值比例</th>
           <th>凭据</th>
           <th>阈值</th>
           <th>仪表盘显示</th>
@@ -132,6 +139,7 @@
             -
             {% endif %}
           </td>
+          <td data-account-recharge-ratio data-label="充值比例">{{ account.recharge_paid_amount or 1 }}:{{ account.recharge_received_amount or 1 }}</td>
           <td data-account-credentials data-label="凭据">
             {% set group_text = account.selected_group_ids|join(", ") if account.selected_group_ids else "未选择" %}
             {% if platform == "sub2Api" %}当前分组: {{ account.selected_group_id or "未选择" }} / 监控分组: {{ group_text }} / apiKey: {{ "已配置" if account.has_api_key else "未配置" }} / email: {{ "已配置" if account.has_email else "未配置" }} / password: {{ "已配置" if account.has_password else "未配置" }}{% endif %}
@@ -169,6 +177,8 @@
                 data-base-url="{{ account.base_url }}"
                 data-note="{{ account.note or '' }}"
                 data-recharge-url="{{ account.recharge_url or '' }}"
+                data-recharge-paid-amount="{{ account.recharge_paid_amount or 1 }}"
+                data-recharge-received-amount="{{ account.recharge_received_amount or 1 }}"
                 data-key-id="{{ account.key_id if account.key_id is defined else account.selected_group_id or '' }}"
                 data-selected-group-id="{{ account.selected_group_id or '' }}"
                 data-selected-group-ids="{{ account.selected_group_ids|join('|') }}"
@@ -187,6 +197,8 @@
                 data-base-url="{{ account.base_url }}"
                 data-note="{{ account.note or '' }}"
                 data-recharge-url="{{ account.recharge_url or '' }}"
+                data-recharge-paid-amount="{{ account.recharge_paid_amount or 1 }}"
+                data-recharge-received-amount="{{ account.recharge_received_amount or 1 }}"
                 data-key-id="{{ account.key_id if account.key_id is defined else account.selected_group_id or '' }}"
                 data-selected-group-id="{{ account.selected_group_id or '' }}"
                 data-selected-group-ids="{{ account.selected_group_ids|join('|') }}"
@@ -211,7 +223,7 @@
           </td>
         </tr>
         {% else %}
-        <tr class="empty-row"><td colspan="9" class="empty">暂无账号</td></tr>
+        <tr class="empty-row"><td colspan="10" class="empty">暂无账号</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -300,7 +312,7 @@
       }
     });
     if (rows.length === 0 && !tbody.querySelector(".empty-row")) {
-      tbody.insertAdjacentHTML("beforeend", '<tr class="empty-row"><td colspan="9" class="empty">暂无账号</td></tr>');
+      tbody.insertAdjacentHTML("beforeend", '<tr class="empty-row"><td colspan="10" class="empty">暂无账号</td></tr>');
     }
     const count = panel.querySelector("[data-platform-count]");
     if (count) {
@@ -335,6 +347,16 @@
       ? `<a class="button-link" href="${escapeHtml(rechargeUrl)}" target="_blank" rel="noopener noreferrer">充值</a>`
       : "-";
   };
+  const positiveAmountText = (value, fallback = "1") => {
+    const text = String(value ?? "").trim();
+    const number = Number(text);
+    return text && Number.isFinite(number) && number > 0 ? text : fallback;
+  };
+  const renderRechargeRatioCell = (account) => {
+    const paidAmount = positiveAmountText(fieldValue(account, "recharge_paid_amount", "rechargePaidAmount"));
+    const receivedAmount = positiveAmountText(fieldValue(account, "recharge_received_amount", "rechargeReceivedAmount"));
+    return `${escapeHtml(paidAmount)}:${escapeHtml(receivedAmount)}`;
+  };
   const accountVisible = (account) => {
     const value = fieldValue(account, "is_visible", "isVisible");
     return value === "" ? true : boolValue(value);
@@ -354,6 +376,8 @@
       name: data.name,
       base_url: data.baseUrl,
       recharge_url: data.rechargeUrl,
+      recharge_paid_amount: data.rechargePaidAmount,
+      recharge_received_amount: data.rechargeReceivedAmount,
       note: data.note,
       key_id: data.keyId,
       selected_group_id: data.selectedGroupId,
@@ -390,6 +414,8 @@
     const name = fieldValue(account, "name");
     const baseUrl = fieldValue(account, "base_url", "baseUrl");
     const rechargeUrl = fieldValue(account, "recharge_url", "rechargeUrl");
+    const rechargePaidAmount = positiveAmountText(fieldValue(account, "recharge_paid_amount", "rechargePaidAmount"));
+    const rechargeReceivedAmount = positiveAmountText(fieldValue(account, "recharge_received_amount", "rechargeReceivedAmount"));
     const note = fieldValue(account, "note");
     const keyId = fieldValue(account, "key_id", "keyId");
     const selectedGroupId = fieldValue(account, "selected_group_id", "selectedGroupId") || (platform === "newApi" ? keyId : "");
@@ -409,6 +435,7 @@
           <td class="note-cell" data-account-note data-label="备注">${escapeHtml(displayText(note))}</td>
           <td data-account-base-url data-label="Base URL">${escapeHtml(displayText(baseUrl))}</td>
           <td data-account-recharge-url data-label="充值路径">${renderRechargeCell(account)}</td>
+          <td data-account-recharge-ratio data-label="充值比例">${renderRechargeRatioCell(account)}</td>
           <td data-account-credentials data-label="凭据">${renderCredentials(account)}</td>
           <td data-account-threshold-cell data-label="阈值">${escapeHtml(displayText(thresholdText))}</td>
           <td data-label="仪表盘显示">
@@ -442,6 +469,8 @@
                 data-base-url="${escapeHtml(baseUrl)}"
                 data-note="${escapeHtml(note)}"
                 data-recharge-url="${escapeHtml(rechargeUrl)}"
+                data-recharge-paid-amount="${escapeHtml(rechargePaidAmount)}"
+                data-recharge-received-amount="${escapeHtml(rechargeReceivedAmount)}"
                 data-key-id="${escapeHtml(effectiveKeyId)}"
                 data-selected-group-id="${escapeHtml(selectedGroupId)}"
                 data-selected-group-ids="${escapeHtml(selectedGroupIdsText)}"
@@ -460,6 +489,8 @@
                 data-base-url="${escapeHtml(baseUrl)}"
                 data-note="${escapeHtml(note)}"
                 data-recharge-url="${escapeHtml(rechargeUrl)}"
+                data-recharge-paid-amount="${escapeHtml(rechargePaidAmount)}"
+                data-recharge-received-amount="${escapeHtml(rechargeReceivedAmount)}"
                 data-key-id="${escapeHtml(effectiveKeyId)}"
                 data-selected-group-id="${escapeHtml(selectedGroupId)}"
                 data-selected-group-ids="${escapeHtml(selectedGroupIdsText)}"
@@ -731,6 +762,8 @@
       form.elements.name.value = fieldValue(account, "name");
       form.elements.base_url.value = fieldValue(account, "base_url", "baseUrl");
       form.elements.recharge_url.value = fieldValue(account, "recharge_url", "rechargeUrl");
+      form.elements.recharge_paid_amount.value = positiveAmountText(fieldValue(account, "recharge_paid_amount", "rechargePaidAmount"));
+      form.elements.recharge_received_amount.value = positiveAmountText(fieldValue(account, "recharge_received_amount", "rechargeReceivedAmount"));
       form.elements.note.value = fieldValue(account, "note");
       form.elements.threshold.value = fieldValue(account, "threshold");
       form.elements.is_visible.checked = visibleValue === "" ? true : boolValue(visibleValue);
@@ -887,6 +920,8 @@
         name: form.dataset.initialName,
         baseUrl: form.dataset.initialBaseUrl,
         rechargeUrl: form.dataset.initialRechargeUrl,
+        rechargePaidAmount: form.dataset.initialRechargePaidAmount,
+        rechargeReceivedAmount: form.dataset.initialRechargeReceivedAmount,
         note: form.dataset.initialNote,
         keyId: form.dataset.initialKeyId,
         selectedGroupId: form.dataset.initialKeyId,

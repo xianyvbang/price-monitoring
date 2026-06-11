@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 
-from app.models import DEFAULT_BALANCE_UNIT, Database, monitor_group_to_dict
+from app.models import DEFAULT_BALANCE_UNIT, Database, actual_consumption_stats, monitor_group_to_dict
 from app.models import utc_now
 from app.services.alerts import handle_alert_state
 from app.services.balance import query_account, query_newapi_group, query_sub2api_group
@@ -114,10 +114,15 @@ async def query_one_account(db: Database, account_id: int) -> dict:
         db.update_account_result(account_id, result)
         db.add_log("error", "alert", f"{account['platform']} / {account['name']} 告警发送失败: {exc}")
     consumption_stats = db.get_consumption_stats(account_id)
+    actual_stats = actual_consumption_stats(consumption_stats, db.get_account(account_id))
     result["consumption_stats"] = consumption_stats
     result["consumptionStats"] = consumption_stats
+    result["actual_consumption_stats"] = actual_stats
+    result["actualConsumptionStats"] = actual_stats
     result["today_consumption"] = consumption_stats["today"]
     result["todayConsumption"] = result["today_consumption"]
+    result["actual_today_consumption"] = actual_stats["today"]
+    result["actualTodayConsumption"] = result["actual_today_consumption"]
     return result
 
 

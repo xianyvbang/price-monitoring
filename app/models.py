@@ -95,6 +95,8 @@ class Database:
                     base_url TEXT NOT NULL,
                     note TEXT,
                     recharge_url TEXT,
+                    recharge_paid_amount REAL NOT NULL DEFAULT 1,
+                    recharge_received_amount REAL NOT NULL DEFAULT 1,
                     key_id_enc TEXT,
                     api_key_enc TEXT,
                     email_enc TEXT,
@@ -188,6 +190,7 @@ class Database:
             self._migrate_accounts_sub2api_login(conn)
             self._migrate_accounts_note(conn)
             self._migrate_accounts_recharge_url(conn)
+            self._migrate_accounts_recharge_ratio(conn)
             self._migrate_accounts_group_rate_changed(conn)
             self._migrate_accounts_visible(conn)
             self._migrate_accounts_eliminated(conn)
@@ -334,6 +337,15 @@ class Database:
         column_names = {row["name"] for row in columns}
         if "recharge_url" not in column_names:
             conn.execute("ALTER TABLE accounts ADD COLUMN recharge_url TEXT")
+
+    @staticmethod
+    def _migrate_accounts_recharge_ratio(conn: sqlite3.Connection) -> None:
+        columns = conn.execute("PRAGMA table_info(accounts)").fetchall()
+        column_names = {row["name"] for row in columns}
+        if "recharge_paid_amount" not in column_names:
+            conn.execute("ALTER TABLE accounts ADD COLUMN recharge_paid_amount REAL NOT NULL DEFAULT 1")
+        if "recharge_received_amount" not in column_names:
+            conn.execute("ALTER TABLE accounts ADD COLUMN recharge_received_amount REAL NOT NULL DEFAULT 1")
 
     @staticmethod
     def _migrate_accounts_group_rate_changed(conn: sqlite3.Connection) -> None:
@@ -654,6 +666,7 @@ class Database:
         platform = data["platform"]
         note = str(data.get("note") or "").strip()
         recharge_url = str(data.get("recharge_url") or "").strip()
+        recharge_paid_amount, recharge_received_amount = _recharge_ratio_values(data)
         key_id = data.get("key_id")
         api_key = data.get("api_key")
         email = data.get("email")
@@ -680,15 +693,18 @@ class Database:
             conn.execute(
                 """
                 INSERT INTO accounts (
-                    platform, name, base_url, note, recharge_url, key_id_enc, api_key_enc, email_enc, password_enc,
+                    platform, name, base_url, note, recharge_url, recharge_paid_amount, recharge_received_amount,
+                    key_id_enc, api_key_enc, email_enc, password_enc,
                     access_token_enc, user_id_enc,
                     threshold, is_enabled, is_visible, is_eliminated, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(platform, name) DO UPDATE SET
                     base_url = excluded.base_url,
                     note = excluded.note,
                     recharge_url = excluded.recharge_url,
+                    recharge_paid_amount = excluded.recharge_paid_amount,
+                    recharge_received_amount = excluded.recharge_received_amount,
                     key_id_enc = COALESCE(excluded.key_id_enc, accounts.key_id_enc),
                     api_key_enc = COALESCE(excluded.api_key_enc, accounts.api_key_enc),
                     email_enc = COALESCE(excluded.email_enc, accounts.email_enc),
@@ -707,6 +723,8 @@ class Database:
                     data["base_url"].rstrip("/"),
                     note,
                     recharge_url,
+                    recharge_paid_amount,
+                    recharge_received_amount,
                     key_id_enc,
                     api_key_enc,
                     email_enc,
@@ -738,6 +756,7 @@ class Database:
         platform = data["platform"]
         note = str(data.get("note") or "").strip()
         recharge_url = str(data.get("recharge_url") or "").strip()
+        recharge_paid_amount, recharge_received_amount = _recharge_ratio_values(data)
         key_id = data.get("key_id")
         api_key = data.get("api_key")
         email = data.get("email")
@@ -760,6 +779,7 @@ class Database:
                 """
                 UPDATE accounts
                 SET platform = ?, name = ?, base_url = ?, note = ?, recharge_url = ?,
+                    recharge_paid_amount = ?, recharge_received_amount = ?,
                     key_id_enc = COALESCE(?, key_id_enc),
                     api_key_enc = COALESCE(?, api_key_enc),
                     email_enc = COALESCE(?, email_enc),
@@ -775,6 +795,8 @@ class Database:
                     data["base_url"].rstrip("/"),
                     note,
                     recharge_url,
+                    recharge_paid_amount,
+                    recharge_received_amount,
                     key_id_enc,
                     api_key_enc,
                     email_enc,
@@ -1340,6 +1362,42 @@ def _optional_float_or_none(value: Any) -> Optional[float]:
         return _optional_float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _positive_float_or_default(value: Any, default: float = 1.0) -> float:
+    number = _optional_float_or_none(value)
+    if number is None or number <= 0:
+        return default
+    return number
+
+
+def _recharge_ratio_values(data: dict[str, Any]) -> tuple[float, float]:
+    return (
+        _positive_float_or_default(data.get("recharge_paid_amount"), 1.0),
+        _positive_float_or_default(data.get("recharge_received_amount"), 1.0),
+    )
+
+
+def _account_value(account: Any, key: str, default: Any = None) -> Any:
+    if account is None:
+        return default
+    try:
+        return account[key]
+    except (KeyError, IndexError, TypeError):
+        return default
+
+
+def actual_consumption_amount(value: Any, account: Any) -> Optional[float]:
+    amount = _optional_float_or_none(value)
+    if amount is None:
+        return None
+    paid_amount = _positive_float_or_default(_account_value(account, "recharge_paid_amount"), 1.0)
+    received_amount = _positive_float_or_default(_account_value(account, "recharge_received_amount"), 1.0)
+    return round(amount * paid_amount / received_amount, 6)
+
+
+def actual_consumption_stats(stats: dict[str, Any], account: Any) -> dict[str, Optional[float]]:
+    return {key: actual_consumption_amount(value, account) for key, value in stats.items()}
 
 
 def _optional_bool(value: Any) -> Optional[int]:

@@ -345,14 +345,15 @@ def test_dashboard_shows_today_consumption_column(tmp_path, monkeypatch):
     assert dashboard.status_code == 200
     assert dashboard_custom.status_code == 200
     assert "今日消耗" in dashboard.text
-    assert "今日消耗总余额" in dashboard.text
-    assert "昨日消耗总余额" in dashboard.text
-    assert "近24小时消耗总余额" in dashboard.text
-    assert "近7天消耗总余额" in dashboard.text
-    assert "近14天消耗总余额" in dashboard.text
-    assert "本月消耗总余额" in dashboard.text
-    assert "上月消耗总余额" in dashboard.text
-    assert "筛选区间消耗总余额" in dashboard.text
+    assert "今日实际消耗" in dashboard.text
+    assert "今日实际消耗总金额" in dashboard.text
+    assert "昨日实际消耗总金额" in dashboard.text
+    assert "近24小时实际消耗总金额" in dashboard.text
+    assert "近7天实际消耗总金额" in dashboard.text
+    assert "近14天实际消耗总金额" in dashboard.text
+    assert "本月实际消耗总金额" in dashboard.text
+    assert "上月实际消耗总金额" in dashboard.text
+    assert "筛选区间实际消耗总金额" in dashboard.text
     assert 'name="consumption_start"' in dashboard.text
     assert 'name="consumption_end"' in dashboard.text
     assert 'data-consumption-period="yesterday"' in dashboard.text
@@ -373,6 +374,45 @@ def test_dashboard_shows_today_consumption_column(tmp_path, monkeypatch):
     assert "2 个 Base URL 有筛选区间记录" in dashboard_custom.text
     assert "6.75 USD" in dashboard_custom.text
     assert "26.75 USD" not in dashboard_custom.text
+
+
+def test_dashboard_shows_actual_consumption_from_recharge_ratio(tmp_path, monkeypatch):
+    test_db = Database(str(tmp_path / "app.db"), "test-key")
+    test_db.init()
+    test_db.ensure_admin("admin", "password123")
+    account_id = test_db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "sub-actual-consumption",
+            "base_url": "https://actual.example",
+            "api_key": "secret",
+            "recharge_paid_amount": 1,
+            "recharge_received_amount": 2,
+        }
+    )
+    china_tz = timezone(timedelta(hours=8))
+    today_start = datetime.now(china_tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    first = (today_start + timedelta(hours=1)).astimezone(timezone.utc).isoformat(timespec="seconds")
+    second = (today_start + timedelta(hours=2)).astimezone(timezone.utc).isoformat(timespec="seconds")
+    test_db.update_account_result(account_id, {"is_valid": True, "remaining": 50, "unit": "USD", "checked_at": first})
+    test_db.update_account_result(account_id, {"is_valid": True, "remaining": 44.5, "unit": "USD", "checked_at": second})
+    monkeypatch.setattr("app.main.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
+
+    async def stop_scheduler():
+        return None
+
+    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+
+    with TestClient(app) as client:
+        client.post("/login", data={"username": "admin", "password": "password123"})
+        dashboard = client.get("/")
+
+    assert dashboard.status_code == 200
+    assert "5.5 USD" in dashboard.text
+    assert "2.75 USD" in dashboard.text
+    assert 'data-account-consumption-today="2.75"' in dashboard.text
 
 
 def test_dashboard_orders_eliminated_accounts_last(tmp_path, monkeypatch):

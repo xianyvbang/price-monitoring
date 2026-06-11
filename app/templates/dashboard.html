@@ -84,6 +84,7 @@
           {% endif %}
           <th>剩余</th>
           <th>今日消耗</th>
+          <th>今日实际消耗</th>
           {% if platform != "sub2Api" %}
           <th>已用</th>
           <th>总额</th>
@@ -106,13 +107,13 @@
           data-account-enabled="{{ 'true' if account.is_enabled else 'false' }}"
           data-account-base-url="{{ account.base_url }}"
           data-account-consumption-unit="{{ account.last_unit or 'USD' }}"
-          data-account-consumption-today="{{ account.consumption_stats.today if account.consumption_stats.today is not none else '' }}"
-          data-account-consumption-yesterday="{{ account.consumption_stats.yesterday if account.consumption_stats.yesterday is not none else '' }}"
-          data-account-consumption-last-24h="{{ account.consumption_stats.last_24h if account.consumption_stats.last_24h is not none else '' }}"
-          data-account-consumption-last-7d="{{ account.consumption_stats.last_7d if account.consumption_stats.last_7d is not none else '' }}"
-          data-account-consumption-last-14d="{{ account.consumption_stats.last_14d if account.consumption_stats.last_14d is not none else '' }}"
-          data-account-consumption-this-month="{{ account.consumption_stats.this_month if account.consumption_stats.this_month is not none else '' }}"
-          data-account-consumption-last-month="{{ account.consumption_stats.last_month if account.consumption_stats.last_month is not none else '' }}"
+          data-account-consumption-today="{{ account.actual_consumption_stats.today if account.actual_consumption_stats.today is not none else '' }}"
+          data-account-consumption-yesterday="{{ account.actual_consumption_stats.yesterday if account.actual_consumption_stats.yesterday is not none else '' }}"
+          data-account-consumption-last-24h="{{ account.actual_consumption_stats.last_24h if account.actual_consumption_stats.last_24h is not none else '' }}"
+          data-account-consumption-last-7d="{{ account.actual_consumption_stats.last_7d if account.actual_consumption_stats.last_7d is not none else '' }}"
+          data-account-consumption-last-14d="{{ account.actual_consumption_stats.last_14d if account.actual_consumption_stats.last_14d is not none else '' }}"
+          data-account-consumption-this-month="{{ account.actual_consumption_stats.this_month if account.actual_consumption_stats.this_month is not none else '' }}"
+          data-account-consumption-last-month="{{ account.actual_consumption_stats.last_month if account.actual_consumption_stats.last_month is not none else '' }}"
         >
           <td data-label="名称">{{ account.name }}{% if account.current_group_id %}<br><small>分组: {{ account.current_group_id }}</small>{% endif %}</td>
           <td class="note-cell" data-label="备注">{{ account.note or "-" }}</td>
@@ -152,6 +153,12 @@
             data-account-today-consumption-unit="{{ account.last_unit or 'USD' }}"
             data-label="今日消耗"
           >{{ account.today_consumption if account.today_consumption is not none else "-" }}{% if account.today_consumption is not none %} {{ account.last_unit or "USD" }}{% endif %}</td>
+          <td
+            data-account-actual-today-consumption
+            data-account-actual-today-consumption-value="{{ account.actual_today_consumption if account.actual_today_consumption is not none else '' }}"
+            data-account-actual-today-consumption-unit="{{ account.last_unit or 'USD' }}"
+            data-label="今日实际消耗"
+          >{{ account.actual_today_consumption if account.actual_today_consumption is not none else "-" }}{% if account.actual_today_consumption is not none %} {{ account.last_unit or "USD" }}{% endif %}</td>
           {% if platform != "sub2Api" %}
           <td data-account-used data-label="已用">{{ account.last_used if account.last_used is not none else "-" }}</td>
           <td data-account-total data-label="总额">{{ account.last_total if account.last_total is not none else "-" }}</td>
@@ -211,11 +218,11 @@
         </tr>
         {% if account.last_error %}
         <tr class="detail-row">
-          <td colspan="{{ 13 if platform == 'sub2Api' else 15 if platform == 'newApi' else 14 }}">{{ account.last_error }}</td>
+          <td colspan="{{ 14 if platform == 'sub2Api' else 16 if platform == 'newApi' else 15 }}">{{ account.last_error }}</td>
         </tr>
         {% endif %}
         {% else %}
-        <tr class="empty-row"><td colspan="{{ 13 if platform == 'sub2Api' else 15 if platform == 'newApi' else 14 }}" class="empty">暂无账号</td></tr>
+        <tr class="empty-row"><td colspan="{{ 14 if platform == 'sub2Api' else 16 if platform == 'newApi' else 15 }}" class="empty">暂无账号</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -869,13 +876,15 @@
     const plan = row.querySelector("[data-account-plan]");
     const remaining = row.querySelector("[data-account-remaining]");
     const todayConsumption = row.querySelector("[data-account-today-consumption]");
+    const actualTodayConsumption = row.querySelector("[data-account-actual-today-consumption]");
     const used = row.querySelector("[data-account-used]");
     const total = row.querySelector("[data-account-total]");
     const low = row.querySelector("[data-account-low]");
     const checkedAt = row.querySelector("[data-account-checked-at]");
     const isValid = Boolean(result.is_valid);
     const stats = result.consumption_stats || result.consumptionStats || {};
-    const unit = result.unit || row.getAttribute("data-account-consumption-unit") || todayConsumption?.dataset.accountTodayConsumptionUnit || defaultBalanceUnit;
+    const actualStats = result.actual_consumption_stats || result.actualConsumptionStats || stats;
+    const unit = result.unit || row.getAttribute("data-account-consumption-unit") || todayConsumption?.dataset.accountTodayConsumptionUnit || actualTodayConsumption?.dataset.accountActualTodayConsumptionUnit || defaultBalanceUnit;
     if (status) {
       status.textContent = isValid ? "valid" : "invalid";
       status.className = `status ${isValid ? "valid" : "invalid"}`;
@@ -889,16 +898,22 @@
     }
     if (todayConsumption) {
       const consumption = stats.today ?? result.today_consumption ?? result.todayConsumption;
+      todayConsumption.textContent = formatAmountWithUnit(consumption, unit);
+      todayConsumption.dataset.accountTodayConsumptionValue = consumption ?? "";
+      todayConsumption.dataset.accountTodayConsumptionUnit = unit;
+    }
+    if (actualTodayConsumption) {
+      const actualConsumption = actualStats.today ?? result.actual_today_consumption ?? result.actualTodayConsumption;
       row.setAttribute("data-account-consumption-unit", unit);
       ["today", "yesterday", "last_24h", "last_7d", "last_14d", "this_month", "last_month"].forEach((period) => {
-        const value = period === "today" ? consumption : stats[period];
+        const value = period === "today" ? actualConsumption : actualStats[period];
         if (value !== undefined) {
           row.setAttribute(consumptionAttributeName(period), value ?? "");
         }
       });
-      todayConsumption.textContent = formatAmountWithUnit(consumption, unit);
-      todayConsumption.dataset.accountTodayConsumptionValue = consumption ?? "";
-      todayConsumption.dataset.accountTodayConsumptionUnit = unit;
+      actualTodayConsumption.textContent = formatAmountWithUnit(actualConsumption, unit);
+      actualTodayConsumption.dataset.accountActualTodayConsumptionValue = actualConsumption ?? "";
+      actualTodayConsumption.dataset.accountActualTodayConsumptionUnit = unit;
     }
     if (used) {
       used.textContent = formatValue(result.used);

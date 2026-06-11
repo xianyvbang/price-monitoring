@@ -20,6 +20,8 @@ from app.models import (
     GROUP_RATE_QUERY_INTERVAL_SECONDS,
     Database,
     REQUEST_TIMEOUT_SECONDS,
+    actual_consumption_amount,
+    actual_consumption_stats,
     format_china_time,
     monitor_group_to_dict,
     row_to_dict,
@@ -53,13 +55,13 @@ LOG_VALUE_LIMIT = 2000
 LOG_PAGE_SIZE = 50
 LOG_MAX_PAGE_SIZE = 200
 CONSUMPTION_PERIODS = [
-    {"key": "today", "label": "今日消耗总余额", "count_label": "个 Base URL 有今日记录"},
-    {"key": "yesterday", "label": "昨日消耗总余额", "count_label": "个 Base URL 有昨日记录"},
-    {"key": "last_24h", "label": "近24小时消耗总余额", "count_label": "个 Base URL 有近24小时记录"},
-    {"key": "last_7d", "label": "近7天消耗总余额", "count_label": "个 Base URL 有近7天记录"},
-    {"key": "last_14d", "label": "近14天消耗总余额", "count_label": "个 Base URL 有近14天记录"},
-    {"key": "this_month", "label": "本月消耗总余额", "count_label": "个 Base URL 有本月记录"},
-    {"key": "last_month", "label": "上月消耗总余额", "count_label": "个 Base URL 有上月记录"},
+    {"key": "today", "label": "今日实际消耗总金额", "count_label": "个 Base URL 有今日记录"},
+    {"key": "yesterday", "label": "昨日实际消耗总金额", "count_label": "个 Base URL 有昨日记录"},
+    {"key": "last_24h", "label": "近24小时实际消耗总金额", "count_label": "个 Base URL 有近24小时记录"},
+    {"key": "last_7d", "label": "近7天实际消耗总金额", "count_label": "个 Base URL 有近7天记录"},
+    {"key": "last_14d", "label": "近14天实际消耗总金额", "count_label": "个 Base URL 有近14天记录"},
+    {"key": "this_month", "label": "本月实际消耗总金额", "count_label": "个 Base URL 有本月记录"},
+    {"key": "last_month", "label": "上月实际消耗总金额", "count_label": "个 Base URL 有上月记录"},
 ]
 
 
@@ -320,8 +322,18 @@ def public_account(row: Any) -> dict[str, Any]:
     data["has_access_token"] = bool(data.pop("access_token_enc", None))
     data["has_user_id"] = bool(data.pop("user_id_enc", None))
     data["group_rates"] = monitor_group_rates(monitor_groups) or group_rates_from_extra(data.get("last_extra"))
+    data["recharge_paid_amount"] = float(data.get("recharge_paid_amount") or 1)
+    data["recharge_received_amount"] = float(data.get("recharge_received_amount") or 1)
+    data["rechargePaidAmount"] = data["recharge_paid_amount"]
+    data["rechargeReceivedAmount"] = data["recharge_received_amount"]
     data["consumption_stats"] = db.get_consumption_stats(int(data["id"]))
+    data["consumptionStats"] = data["consumption_stats"]
+    data["actual_consumption_stats"] = actual_consumption_stats(data["consumption_stats"], data)
+    data["actualConsumptionStats"] = data["actual_consumption_stats"]
     data["today_consumption"] = data["consumption_stats"]["today"]
+    data["todayConsumption"] = data["today_consumption"]
+    data["actual_today_consumption"] = data["actual_consumption_stats"]["today"]
+    data["actualTodayConsumption"] = data["actual_today_consumption"]
     data["last_group_rate_changed"] = bool(
         any(group.get("last_group_rate_changed") for group in monitor_groups)
         or data.get("last_group_rate_changed")
@@ -587,8 +599,9 @@ def summarize_consumption_period(grouped: dict[str, list[dict[str, Any]]], perio
             account_id = int(account["id"])
             if period.get("since"):
                 consumption = db.get_consumption_between(account_id, str(period["since"]), period.get("until"))
+                consumption = actual_consumption_amount(consumption, account)
             else:
-                stats = account.get("consumption_stats") if isinstance(account.get("consumption_stats"), dict) else {}
+                stats = account.get("actual_consumption_stats") if isinstance(account.get("actual_consumption_stats"), dict) else {}
                 consumption = _optional_number(stats.get(key))
             if consumption is None:
                 continue
@@ -607,7 +620,7 @@ def summarize_consumption_periods(grouped: dict[str, list[dict[str, Any]]], cust
     summaries = [summarize_consumption_period(grouped, period) for period in CONSUMPTION_PERIODS]
     custom_period = {
         "key": "custom",
-        "label": "筛选区间消耗总余额",
+        "label": "筛选区间实际消耗总金额",
         "count_label": "个 Base URL 有筛选区间记录",
         "static": True,
     }
@@ -1389,6 +1402,8 @@ def _account_from_form(form: Any) -> dict[str, Any]:
             "base_url": form.get("base_url"),
             "note": form.get("note"),
             "recharge_url": form.get("recharge_url"),
+            "recharge_paid_amount": form.get("recharge_paid_amount"),
+            "recharge_received_amount": form.get("recharge_received_amount"),
             "key_id": form.get("key_id"),
             "api_key": form.get("api_key"),
             "email": form.get("email"),
@@ -1423,6 +1438,8 @@ def _account_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "base_url": base_url,
         "note": payload.get("note") or payload.get("remark") or payload.get("remarks") or "",
         "recharge_url": payload.get("recharge_url") or payload.get("rechargeUrl") or "",
+        "recharge_paid_amount": payload.get("recharge_paid_amount", payload.get("rechargePaidAmount", 1)),
+        "recharge_received_amount": payload.get("recharge_received_amount", payload.get("rechargeReceivedAmount", 1)),
         "key_id": payload.get("key_id") or payload.get("keyId"),
         "api_key": payload.get("api_key") or payload.get("apiKey"),
         "email": payload.get("email"),
