@@ -14,6 +14,29 @@
 
 {% if message %}<p class="notice">{{ message }}</p>{% endif %}
 
+<section class="consumption-filter account-filter" aria-label="账号筛选">
+  <form class="consumption-filter-form" method="get" action="/accounts">
+    <label>
+      名称
+      <input name="name" autocomplete="off" placeholder="模糊搜索" value="{{ account_filter.name }}">
+    </label>
+    <label>
+      平台
+      <select name="platform">
+        <option value="">全部平台</option>
+        <option value="newApi" {% if account_filter.platform == "newApi" %}selected{% endif %}>newApi</option>
+        <option value="sub2Api" {% if account_filter.platform == "sub2Api" %}selected{% endif %}>sub2Api</option>
+      </select>
+    </label>
+    <div class="consumption-filter-actions">
+      <button class="primary" type="submit">筛选</button>
+      {% if account_filter.active %}
+      <a class="button-link" href="/accounts">清除筛选</a>
+      {% endif %}
+    </div>
+  </form>
+</section>
+
 <dialog class="account-dialog" data-account-dialog>
   <form
     class="dialog-shell"

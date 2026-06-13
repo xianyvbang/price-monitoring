@@ -456,6 +456,71 @@ def test_dashboard_orders_eliminated_accounts_last(tmp_path, monkeypatch):
     assert dashboard.text.index("b-active-row") < dashboard.text.index("a-eliminated-row")
 
 
+def test_dashboard_and_accounts_filter_by_name_and_platform(tmp_path, monkeypatch):
+    test_db = Database(str(tmp_path / "app.db"), "test-key")
+    test_db.init()
+    test_db.ensure_admin("admin", "password123")
+    for account in test_db.list_accounts():
+        test_db.delete_account(account["id"])
+    test_db.upsert_account(
+        {
+            "platform": "newApi",
+            "name": "alpha-new-row",
+            "base_url": "https://new.example",
+            "access_token": "token",
+            "user_id": "42",
+        }
+    )
+    sub_id = test_db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "alpha-sub-row",
+            "base_url": "https://sub.example",
+            "api_key": "secret",
+        }
+    )
+    test_db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "beta-sub-row",
+            "base_url": "https://beta.example",
+            "api_key": "secret",
+        }
+    )
+    monkeypatch.setattr("app.main.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
+
+    async def stop_scheduler():
+        return None
+
+    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+
+    with TestClient(app) as client:
+        client.post("/login", data={"username": "admin", "password": "password123"})
+        dashboard = client.get("/?name=alpha&platform=sub2Api")
+        accounts = client.get("/accounts?name=alpha&platform=sub2Api")
+        api = client.get("/api/accounts?name=alpha&platform=sub2Api")
+
+    assert dashboard.status_code == 200
+    assert accounts.status_code == 200
+    assert api.status_code == 200
+    assert 'name="name"' in dashboard.text
+    assert 'value="alpha"' in dashboard.text
+    assert 'value="sub2Api" selected' in dashboard.text
+    assert '<h2>sub2Api</h2>' in dashboard.text
+    assert '<h2>newApi</h2>' not in dashboard.text
+    assert "alpha-sub-row" in dashboard.text
+    assert "alpha-sub-row" in accounts.text
+    assert "alpha-new-row" not in dashboard.text
+    assert "alpha-new-row" not in accounts.text
+    assert "beta-sub-row" not in dashboard.text
+    assert "beta-sub-row" not in accounts.text
+    assert 'action="/accounts"' in accounts.text
+    assert api.json()["sub2Api"][0]["id"] == sub_id
+    assert "newApi" not in api.json()
+
+
 def test_account_visibility_and_enabled_controls_are_separate(tmp_path, monkeypatch):
     test_db = Database(str(tmp_path / "app.db"), "test-key")
     test_db.init()

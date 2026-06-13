@@ -25,8 +25,20 @@
   </div>
 </section>
 
-<section class="consumption-filter" aria-label="消耗筛选">
+<section class="consumption-filter account-filter" aria-label="仪表盘筛选">
   <form class="consumption-filter-form" method="get" action="/">
+    <label>
+      名称
+      <input name="name" autocomplete="off" placeholder="模糊搜索" value="{{ account_filter.name }}">
+    </label>
+    <label>
+      平台
+      <select name="platform">
+        <option value="">全部平台</option>
+        <option value="newApi" {% if account_filter.platform == "newApi" %}selected{% endif %}>newApi</option>
+        <option value="sub2Api" {% if account_filter.platform == "sub2Api" %}selected{% endif %}>sub2Api</option>
+      </select>
+    </label>
     <label>
       开始日期
       <input type="date" name="consumption_start" value="{{ consumption_filter.start }}">
@@ -37,7 +49,7 @@
     </label>
     <div class="consumption-filter-actions">
       <button class="primary" type="submit">筛选</button>
-      {% if consumption_filter.active %}
+      {% if account_filter.active or consumption_filter.active %}
       <a class="button-link" href="/">清除筛选</a>
       {% endif %}
     </div>

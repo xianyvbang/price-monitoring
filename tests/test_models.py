@@ -763,5 +763,22 @@ def test_default_accounts_only_seed_on_first_init(tmp_path):
     assert db.list_accounts() == []
 
 
+def test_list_accounts_filters_by_platform_and_fuzzy_name(tmp_path):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+    for account in db.list_accounts():
+        db.delete_account(account["id"])
+
+    db.upsert_account({"platform": "newApi", "name": "alpha-new", "base_url": "https://new.example"})
+    db.upsert_account({"platform": "sub2Api", "name": "alpha-sub", "base_url": "https://sub.example"})
+    db.upsert_account({"platform": "sub2Api", "name": "literal-%-sub", "base_url": "https://literal.example"})
+
+    filtered = db.list_accounts(platform="sub2Api", name_query="alpha")
+    literal = db.list_accounts(name_query="%")
+
+    assert [(account["platform"], account["name"]) for account in filtered] == [("sub2Api", "alpha-sub")]
+    assert [account["name"] for account in literal] == ["literal-%-sub"]
+
+
 def test_format_china_time():
     assert format_china_time("2026-05-19T00:00:00+00:00") == "2026-05-19 08:00:00"

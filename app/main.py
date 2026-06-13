@@ -153,6 +153,14 @@ def template_context(request: Request, **extra: Any) -> dict[str, Any]:
     return {"request": request, "user": current_user(request), "format_time": format_china_time, **extra}
 
 
+def account_filter_from_query(request: Request) -> dict[str, Any]:
+    name = str(request.query_params.get("name") or "").strip()
+    platform = str(request.query_params.get("platform") or "").strip()
+    if platform not in {"newApi", "sub2Api"}:
+        platform = ""
+    return {"name": name, "platform": platform, "active": bool(name or platform)}
+
+
 def public_log(row: Any) -> dict[str, Any]:
     data = row_to_dict(row)
     data["created_at_formatted"] = format_china_time(data.get("created_at"))
@@ -566,9 +574,15 @@ def grouped_accounts(
     eliminated_last: bool = False,
     enabled_only: bool = False,
     visible_only: bool = False,
+    platform: str | None = None,
+    name_query: str | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
-    grouped = {"newApi": [], "sub2Api": []}
-    for row in db.list_accounts(enabled_only=enabled_only, visible_only=visible_only):
+    if platform in {"newApi", "sub2Api"}:
+        grouped = {platform: []}
+    else:
+        grouped = {"newApi": [], "sub2Api": []}
+        platform = None
+    for row in db.list_accounts(platform=platform, name_query=name_query, enabled_only=enabled_only, visible_only=visible_only):
         grouped[row["platform"]].append(public_account(row))
     if eliminated_last:
         for accounts in grouped.values():
@@ -576,9 +590,16 @@ def grouped_accounts(
     return grouped
 
 
-def dashboard_grouped_accounts() -> dict[str, list[dict[str, Any]]]:
-    grouped = {"newApi": [], "sub2Api": []}
-    for platform, accounts in grouped_accounts(eliminated_last=True, visible_only=True).items():
+def dashboard_grouped_accounts(account_filter: dict[str, Any] | None = None) -> dict[str, list[dict[str, Any]]]:
+    account_filter = account_filter or {}
+    platform_filter = account_filter.get("platform") if account_filter.get("platform") in {"newApi", "sub2Api"} else None
+    grouped = {platform_filter: []} if platform_filter else {"newApi": [], "sub2Api": []}
+    for platform, accounts in grouped_accounts(
+        eliminated_last=True,
+        visible_only=True,
+        platform=platform_filter,
+        name_query=account_filter.get("name") or None,
+    ).items():
         for account in accounts:
             monitor_groups = account.get("monitor_groups") if isinstance(account.get("monitor_groups"), list) else []
             if monitor_groups:
@@ -690,7 +711,8 @@ async def dashboard(request: Request):
     redirect = redirect_if_needed(request)
     if redirect:
         return redirect
-    grouped = dashboard_grouped_accounts()
+    account_filter = account_filter_from_query(request)
+    grouped = dashboard_grouped_accounts(account_filter)
     consumption_filter = consumption_date_range_from_query(request)
     return templates.TemplateResponse(
         request,
@@ -701,6 +723,7 @@ async def dashboard(request: Request):
             settings=db.get_general_settings(),
             consumption_summaries=summarize_consumption_periods(grouped, consumption_filter),
             consumption_filter=consumption_filter,
+            account_filter=account_filter,
         ),
     )
 
@@ -754,15 +777,17 @@ async def accounts_page(request: Request):
     if redirect:
         return redirect
     edit_id = _optional_int(request.query_params.get("edit_id"))
+    account_filter = account_filter_from_query(request)
     return templates.TemplateResponse(
         request,
         "accounts.html",
         template_context(
             request,
-            grouped=grouped_accounts(),
+            grouped=grouped_accounts(platform=account_filter.get("platform"), name_query=account_filter.get("name") or None),
             settings=db.get_general_settings(),
             message=None,
             edit_account=public_edit_account(edit_id),
+            account_filter=account_filter,
         ),
     )
 
@@ -788,6 +813,7 @@ async def save_account_form(request: Request):
                     settings=db.get_general_settings(),
                     message="账号不存在或已删除",
                     edit_account=None,
+                    account_filter=account_filter_from_query(request),
                 ),
                 status_code=404,
             )
@@ -817,6 +843,7 @@ async def bulk_accounts_form(request: Request):
             settings=db.get_general_settings(),
             message=f"已导入或更新 {imported} 个账号",
             edit_account=None,
+            account_filter=account_filter_from_query(request),
         ),
     )
 
@@ -1069,7 +1096,8 @@ async def change_password_form(request: Request):
 @app.get("/api/accounts")
 async def api_accounts(request: Request):
     require_user(request)
-    return grouped_accounts()
+    account_filter = account_filter_from_query(request)
+    return grouped_accounts(platform=account_filter.get("platform"), name_query=account_filter.get("name") or None)
 
 
 @app.get("/api/accounts/{account_id}")

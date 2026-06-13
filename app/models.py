@@ -38,6 +38,11 @@ def format_china_time(value: Any) -> str:
     return dt.astimezone(CHINA_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _like_pattern(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
 class Database:
     def __init__(self, path: str, secret_key: str) -> None:
         self.path = path
@@ -504,6 +509,7 @@ class Database:
     def list_accounts(
         self,
         platform: Optional[str] = None,
+        name_query: Optional[str] = None,
         enabled_only: bool = False,
         visible_only: bool = False,
     ) -> list[sqlite3.Row]:
@@ -513,6 +519,9 @@ class Database:
         if platform:
             conditions.append("platform = ?")
             params.append(platform)
+        if name_query:
+            conditions.append("name LIKE ? ESCAPE '\\'")
+            params.append(_like_pattern(name_query))
         if enabled_only:
             conditions.append("is_enabled = 1")
         if visible_only:
