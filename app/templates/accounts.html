@@ -65,7 +65,7 @@
     <div class="dialog-head">
       <div>
         <h2 data-form-title>{{ "编辑账号" if edit_account else "新增账号" }}</h2>
-        <p>保存后会按平台获取可选分组。</p>
+        <p>显示在仪表盘时，保存后会按平台获取可选分组。</p>
       </div>
       <button type="button" data-close-account-dialog>关闭</button>
     </div>
@@ -861,7 +861,8 @@
         accountId.value = result.id;
         upsertAccountRow(result.account || {...payload, id: result.id, platform: select.value}, {updateEditableFields: true});
         setAccountActionStatus(result.id, "保存中", "pending");
-        if (select.value === "newApi" || select.value === "sub2Api") {
+        const shouldFetchGroupsAfterSave = payload.is_visible && (select.value === "newApi" || select.value === "sub2Api");
+        if (shouldFetchGroupsAfterSave) {
           submitLabel.textContent = "获取分组中";
           setInlineStatus(formStatus, "获取分组中", "pending");
           try {
@@ -901,6 +902,7 @@
 
     cancelEdit.addEventListener("click", () => {
       resetAccountForm();
+      closeModalDialog(accountDialog);
     });
 
     document.addEventListener("click", (event) => {

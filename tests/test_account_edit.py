@@ -144,6 +144,30 @@ def test_api_update_returns_account_for_local_row_refresh(tmp_path, monkeypatch)
     assert payload["account"]["has_password"] is True
 
 
+def test_account_form_only_fetches_groups_after_save_when_visible(tmp_path, monkeypatch):
+    test_db = Database(str(tmp_path / "app.db"), config.app_secret_key)
+    test_db.init()
+    test_db.ensure_admin("admin", "password123")
+    monkeypatch.setattr("app.main.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
+
+    async def stop_scheduler():
+        return None
+
+    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+
+    with TestClient(app) as client:
+        client.post("/login", data={"username": "admin", "password": "password123"})
+        page = client.get("/accounts")
+
+    assert page.status_code == 200
+    assert "显示在仪表盘时，保存后会按平台获取可选分组。" in page.text
+    assert 'const shouldFetchGroupsAfterSave = payload.is_visible && (select.value === "newApi" || select.value === "sub2Api");' in page.text
+    assert 'if (select.value === "newApi" || select.value === "sub2Api") {' not in page.text
+    assert "cancelEdit.addEventListener(\"click\", () => {\n      resetAccountForm();\n      closeModalDialog(accountDialog);\n    });" in page.text
+
+
 def test_copy_account_button_uses_unsaved_dialog_data(tmp_path, monkeypatch):
     test_db = Database(str(tmp_path / "app.db"), config.app_secret_key)
     test_db.init()
