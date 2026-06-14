@@ -107,6 +107,7 @@ class Database:
                     email_enc TEXT,
                     password_enc TEXT,
                     access_token_enc TEXT,
+                    refresh_token_enc TEXT,
                     user_id_enc TEXT,
                     threshold REAL,
                     is_enabled INTEGER NOT NULL DEFAULT 1,
@@ -193,6 +194,7 @@ class Database:
             self._migrate_users_session_version(conn)
             self._migrate_accounts_key_id(conn)
             self._migrate_accounts_sub2api_login(conn)
+            self._migrate_accounts_refresh_token(conn)
             self._migrate_accounts_note(conn)
             self._migrate_accounts_recharge_url(conn)
             self._migrate_accounts_recharge_ratio(conn)
@@ -328,6 +330,13 @@ class Database:
             conn.execute("ALTER TABLE accounts ADD COLUMN email_enc TEXT")
         if "password_enc" not in column_names:
             conn.execute("ALTER TABLE accounts ADD COLUMN password_enc TEXT")
+
+    @staticmethod
+    def _migrate_accounts_refresh_token(conn: sqlite3.Connection) -> None:
+        columns = conn.execute("PRAGMA table_info(accounts)").fetchall()
+        column_names = {row["name"] for row in columns}
+        if "refresh_token_enc" not in column_names:
+            conn.execute("ALTER TABLE accounts ADD COLUMN refresh_token_enc TEXT")
 
     @staticmethod
     def _migrate_accounts_note(conn: sqlite3.Connection) -> None:
@@ -681,6 +690,7 @@ class Database:
         email = data.get("email")
         password = data.get("password")
         access_token = data.get("access_token")
+        refresh_token = data.get("refresh_token")
         if platform == "newApi" and not access_token and api_key:
             access_token = api_key
         key_id_enc = encrypt_value(key_id, self.secret_key)
@@ -688,6 +698,7 @@ class Database:
         email_enc = encrypt_value(email, self.secret_key)
         password_enc = encrypt_value(password, self.secret_key)
         access_token_enc = encrypt_value(access_token, self.secret_key)
+        refresh_token_enc = encrypt_value(refresh_token, self.secret_key)
         user_id_enc = encrypt_value(data.get("user_id"), self.secret_key)
         threshold = _optional_float(data.get("threshold"))
         is_eliminated = _optional_bool(data.get("is_eliminated"))
@@ -704,10 +715,10 @@ class Database:
                 INSERT INTO accounts (
                     platform, name, base_url, note, recharge_url, recharge_paid_amount, recharge_received_amount,
                     key_id_enc, api_key_enc, email_enc, password_enc,
-                    access_token_enc, user_id_enc,
+                    access_token_enc, refresh_token_enc, user_id_enc,
                     threshold, is_enabled, is_visible, is_eliminated, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(platform, name) DO UPDATE SET
                     base_url = excluded.base_url,
                     note = excluded.note,
@@ -719,6 +730,7 @@ class Database:
                     email_enc = COALESCE(excluded.email_enc, accounts.email_enc),
                     password_enc = COALESCE(excluded.password_enc, accounts.password_enc),
                     access_token_enc = COALESCE(excluded.access_token_enc, accounts.access_token_enc),
+                    refresh_token_enc = COALESCE(excluded.refresh_token_enc, accounts.refresh_token_enc),
                     user_id_enc = COALESCE(excluded.user_id_enc, accounts.user_id_enc),
                     threshold = excluded.threshold,
                     is_enabled = excluded.is_enabled,
@@ -739,6 +751,7 @@ class Database:
                     email_enc,
                     password_enc,
                     access_token_enc,
+                    refresh_token_enc,
                     user_id_enc,
                     threshold,
                     is_enabled,
@@ -771,6 +784,7 @@ class Database:
         email = data.get("email")
         password = data.get("password")
         access_token = data.get("access_token")
+        refresh_token = data.get("refresh_token")
         if platform == "newApi" and not access_token and api_key:
             access_token = api_key
         key_id_enc = encrypt_value(key_id, self.secret_key)
@@ -778,6 +792,7 @@ class Database:
         email_enc = encrypt_value(email, self.secret_key)
         password_enc = encrypt_value(password, self.secret_key)
         access_token_enc = encrypt_value(access_token, self.secret_key)
+        refresh_token_enc = encrypt_value(refresh_token, self.secret_key)
         user_id_enc = encrypt_value(data.get("user_id"), self.secret_key)
         threshold = _optional_float(data.get("threshold"))
         is_visible = 1 if data.get("is_visible", current["is_visible"]) else 0
@@ -794,6 +809,7 @@ class Database:
                     email_enc = COALESCE(?, email_enc),
                     password_enc = COALESCE(?, password_enc),
                     access_token_enc = COALESCE(?, access_token_enc),
+                    refresh_token_enc = COALESCE(?, refresh_token_enc),
                     user_id_enc = COALESCE(?, user_id_enc),
                     threshold = ?, is_enabled = ?, is_visible = ?, is_eliminated = COALESCE(?, is_eliminated), updated_at = ?
                 WHERE id = ?
@@ -811,6 +827,7 @@ class Database:
                     email_enc,
                     password_enc,
                     access_token_enc,
+                    refresh_token_enc,
                     user_id_enc,
                     threshold,
                     is_enabled,
@@ -823,6 +840,26 @@ class Database:
         if _should_replace_monitor_groups(data):
             self.replace_account_monitor_groups(account_id, _groups_from_account_data(data))
         return account_id
+
+    def update_account_tokens(
+        self,
+        account_id: int,
+        access_token: str | None = None,
+        refresh_token: str | None = None,
+    ) -> None:
+        access_token_enc = encrypt_value(access_token, self.secret_key)
+        refresh_token_enc = encrypt_value(refresh_token, self.secret_key)
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE accounts
+                SET access_token_enc = COALESCE(?, access_token_enc),
+                    refresh_token_enc = COALESCE(?, refresh_token_enc),
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (access_token_enc, refresh_token_enc, utc_now(), account_id),
+            )
 
     def delete_account(self, account_id: int) -> None:
         with self.connect() as conn:

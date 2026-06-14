@@ -77,6 +77,8 @@ JSON 示例：
 
 `sub2Api` 账号自动查询时使用 `GET {baseUrl}/v1/usage`，并使用 `apiKey` 作为 `Authorization: Bearer ...`。手动点击“查组”时会先用当前 `apiKey` 查询激活分组，再用 `email/password` 登录 `POST {baseUrl}/api/v1/auth/login` 获取 JWT，调用 `GET {baseUrl}/api/v1/groups/available` 和 `GET {baseUrl}/api/v1/groups/rates` 获取该激活分组的名称和倍率。登录 JWT 会按过期时间缓存在服务进程内，未过期时复用；如果分组接口请求失败，会清除缓存并重新登录后重试一次。倍率优先显示 `user_rate_multiplier`，为空时显示 `default_rate_multiplier`。
 
+如果 `sub2Api` 站点开启了 Turnstile 人机验证（例如 `https://2chat.cc`），服务端无法只用 `email/password` 自动登录，登录接口可能返回 `400`。这时可以在账号里填写网页登录后的 `auth_token` 到 `accessToken`，并可选填写 `refresh_token` 到 `refreshToken`；查组会优先使用 `refreshToken` 刷新 `accessToken`，并在 `accessToken` 失效前自动刷新。JSON 批量导入时字段名为 `access_token` / `accessToken` 和 `refresh_token` / `refreshToken`。
+
 ## 接口
 
 - `GET /api/accounts`

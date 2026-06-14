@@ -144,6 +144,10 @@ async def query_group_rate_for_account(db: Database, account_id: int, notify: bo
     else:
         result = await query_newapi_group(account, db.secret_key, settings["request_timeout"], db.add_log)
     if result.get("is_valid"):
+        refreshed_access_token = result.get("refreshed_access_token")
+        refreshed_refresh_token = result.get("refreshed_refresh_token")
+        if refreshed_access_token or refreshed_refresh_token:
+            db.update_account_tokens(account_id, access_token=refreshed_access_token, refresh_token=refreshed_refresh_token)
         db.update_account_group_result(account_id, result)
         checked_at = utc_now()
         group_summaries = _monitor_group_summaries_from_result(db, account_id, result)
@@ -215,8 +219,11 @@ async def query_group_rate_for_account(db: Database, account_id: int, notify: bo
 async def query_all_group_rates(db: Database, notify: bool = True) -> list[dict]:
     results = []
     for account in db.list_accounts(enabled_only=True, visible_only=True):
-        if account["platform"] == "sub2Api" and (not account["api_key_enc"] or not account["email_enc"] or not account["password_enc"]):
-            db.add_log("warning", "query", f"{account['platform']} / {account['name']} 自动查组跳过: 缺少 apiKey/email/password")
+        if account["platform"] == "sub2Api" and (
+            not account["api_key_enc"]
+            or not (account["refresh_token_enc"] or account["access_token_enc"] or (account["email_enc"] and account["password_enc"]))
+        ):
+            db.add_log("warning", "query", f"{account['platform']} / {account['name']} 自动查组跳过: 缺少 apiKey/refreshToken/accessToken 或 email/password")
             continue
         if account["platform"] == "newApi" and (not account["access_token_enc"] or not account["user_id_enc"] or not db.list_monitor_groups(account["id"])):
             db.add_log("warning", "query", f"{account['platform']} / {account['name']} 自动查组跳过: 缺少 accessToken/userId/已选分组")

@@ -201,7 +201,7 @@ async def test_query_all_group_rates_only_queries_enabled_sub2api_with_credentia
     assert [result["is_valid"] for result in results] == [True]
     assert called == [enabled_id]
     assert len(db.list_group_rate_records(enabled_id)) == 1
-    assert any("自动查组跳过: 缺少 apiKey/email/password" in log["message"] for log in logs)
+    assert any("自动查组跳过: 缺少 apiKey/refreshToken/accessToken 或 email/password" in log["message"] for log in logs)
 
 
 @pytest.mark.asyncio

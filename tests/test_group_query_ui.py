@@ -45,6 +45,8 @@ def test_group_query_buttons_use_api_fetch(tmp_path, monkeypatch):
     assert "暂停监控" in dashboard.text
     assert "备注" in dashboard.text
     assert "monitor note" in dashboard.text
+    assert '<td data-label="名称">sub' in dashboard.text
+    assert '<a class="button-link" href="https://sub.example" target="_blank" rel="noopener noreferrer">打开</a>' in dashboard.text
     assert "充值路径" in accounts.text
     assert "https://sub.example/topup" in dashboard.text
     assert "https://sub.example/topup" in accounts.text
@@ -339,11 +341,8 @@ def test_dashboard_shows_today_consumption_column(tmp_path, monkeypatch):
     with TestClient(app) as client:
         client.post("/login", data={"username": "admin", "password": "password123"})
         dashboard = client.get("/")
-        date_text = today_start.date().isoformat()
-        dashboard_custom = client.get(f"/?consumption_start={date_text}&consumption_end={date_text}")
 
     assert dashboard.status_code == 200
-    assert dashboard_custom.status_code == 200
     assert "今日消耗" in dashboard.text
     assert "今日实际消耗" in dashboard.text
     assert "今日实际消耗总金额" in dashboard.text
@@ -353,27 +352,18 @@ def test_dashboard_shows_today_consumption_column(tmp_path, monkeypatch):
     assert "近14天实际消耗总金额" in dashboard.text
     assert "本月实际消耗总金额" in dashboard.text
     assert "上月实际消耗总金额" in dashboard.text
-    assert "筛选区间实际消耗总金额" in dashboard.text
-    assert 'name="consumption_start"' in dashboard.text
-    assert 'name="consumption_end"' in dashboard.text
+    assert "筛选区间实际消耗总金额" not in dashboard.text
     assert 'data-consumption-period="yesterday"' in dashboard.text
     assert 'data-consumption-period="last_24h"' in dashboard.text
-    assert 'data-consumption-period="custom"' in dashboard.text
-    assert 'data-consumption-static="true"' in dashboard.text
+    assert 'data-consumption-period="custom"' not in dashboard.text
     assert 'data-account-base-url="https://SUB.example"' in dashboard.text
     assert 'data-account-consumption-yesterday' in dashboard.text
     assert 'data-account-consumption-last-14d' in dashboard.text
     assert 'data-account-consumption-this-month' in dashboard.text
     assert 'data-account-consumption-last-month' in dashboard.text
-    assert "0 个 Base URL 有筛选区间记录" in dashboard.text
     assert "5.5 USD" in dashboard.text
     assert "6.75 USD" in dashboard.text
     assert "26.75 USD" not in dashboard.text
-    assert f'value="{date_text}"' in dashboard_custom.text
-    assert "清除筛选" in dashboard_custom.text
-    assert "2 个 Base URL 有筛选区间记录" in dashboard_custom.text
-    assert "6.75 USD" in dashboard_custom.text
-    assert "26.75 USD" not in dashboard_custom.text
 
 
 def test_dashboard_shows_actual_consumption_from_recharge_ratio(tmp_path, monkeypatch):

@@ -19,7 +19,7 @@ _SUB2API_TOKEN_CACHE: dict[str, dict[str, Any]] = {}
 
 
 def normalize_result(data: dict[str, Any]) -> dict[str, Any]:
-    return {
+    result = {
         "is_valid": bool(data.get("is_valid", data.get("isValid", True))),
         "invalid_message": data.get("invalid_message") or data.get("invalidMessage"),
         "remaining": _optional_number(data.get("remaining")),
@@ -29,6 +29,10 @@ def normalize_result(data: dict[str, Any]) -> dict[str, Any]:
         "used": _optional_number(data.get("used")),
         "extra": data.get("extra"),
     }
+    for passthrough_key in ("available_groups", "refreshed_access_token", "refreshed_refresh_token"):
+        if passthrough_key in data:
+            result[passthrough_key] = data[passthrough_key]
+    return result
 
 
 async def query_account(account: Any, secret_key: str, timeout: float, log: LogCallback | None = None) -> dict[str, Any]:
@@ -104,27 +108,46 @@ async def _query_sub2api_group(account: Any, secret_key: str, timeout: float, lo
     api_key = decrypt_value(_account_value(account, "api_key_enc"), secret_key)
     email = decrypt_value(_account_value(account, "email_enc"), secret_key)
     password = decrypt_value(_account_value(account, "password_enc"), secret_key)
+    configured_access_token = decrypt_value(_account_value(account, "access_token_enc"), secret_key)
+    configured_refresh_token = decrypt_value(_account_value(account, "refresh_token_enc"), secret_key)
     if not api_key:
         return normalize_result({"is_valid": False, "invalid_message": "缺少 apiKey"})
-    if not email:
-        return normalize_result({"is_valid": False, "invalid_message": "缺少 email"})
-    if not password:
-        return normalize_result({"is_valid": False, "invalid_message": "缺少 password"})
+    if not configured_access_token and not configured_refresh_token:
+        if not email:
+            return normalize_result({"is_valid": False, "invalid_message": "缺少 refreshToken/accessToken 或 email"})
+        if not password:
+            return normalize_result({"is_valid": False, "invalid_message": "缺少 refreshToken/accessToken 或 password"})
 
     base_url = account["base_url"].rstrip("/")
-    token_cache_key = _sub2api_token_cache_key(base_url, email)
+    token_cache_key = _sub2api_token_cache_key(base_url, email or "")
     async with httpx.AsyncClient(timeout=timeout) as client:
         usage_response = await _logged_get(client, f"{base_url}/v1/usage", {"Authorization": f"Bearer {api_key}"}, log, account)
         usage_response.raise_for_status()
         active_plan_name = _extract_usage_plan_name(usage_response.json())
 
-        token = _get_cached_sub2api_token(token_cache_key)
-        used_cached_token = token is not None
+        token_result = await _resolve_sub2api_access_token(
+            client,
+            base_url,
+            configured_access_token,
+            configured_refresh_token,
+            email,
+            password,
+            token_cache_key,
+            log,
+            account,
+        )
+        if isinstance(token_result, dict) and token_result.get("is_valid") is False:
+            return token_result
+        token_state = token_result
+        token = token_state["access_token"]
+        used_cached_token = bool(token_state.get("used_cached_token"))
+        used_configured_token = bool(token_state.get("used_configured_token"))
         if not token:
             token_result = await _login_sub2api(client, base_url, email, password, token_cache_key, log, account)
             if isinstance(token_result, dict):
                 return token_result
-            token = token_result
+            token = token_result["access_token"]
+            token_state = token_result
         try:
             groups_payload, rates_payload = await _fetch_sub2api_group_payloads(client, base_url, token, log, account)
             groups = _extract_groups(groups_payload)
@@ -137,53 +160,103 @@ async def _query_sub2api_group(account: Any, secret_key: str, timeout: float, lo
                 )
             available_groups = [_summarize_group(group, rates) for group in groups]
         except httpx.HTTPError:
+            if used_configured_token:
+                return normalize_result({"is_valid": False, "invalid_message": _configured_sub2api_token_error_message(base_url)})
             if not used_cached_token:
                 raise
             _SUB2API_TOKEN_CACHE.pop(token_cache_key, None)
-            token_result = await _login_sub2api(client, base_url, email, password, token_cache_key, log, account)
+            token_result = await _resolve_sub2api_access_token(
+                client,
+                base_url,
+                configured_access_token,
+                configured_refresh_token,
+                email,
+                password,
+                token_cache_key,
+                log,
+                account,
+            )
             if isinstance(token_result, dict):
-                return token_result
-            groups_payload, rates_payload = await _fetch_sub2api_group_payloads(client, base_url, token_result, log, account)
+                if token_result.get("is_valid") is False:
+                    return token_result
+                token = token_result["access_token"]
+                token_state = token_result
+            groups_payload, rates_payload = await _fetch_sub2api_group_payloads(client, base_url, token, log, account)
             groups = _extract_groups(groups_payload)
             rates = _extract_group_rates(rates_payload)
             active_key_group_id = None
             summary = _build_current_group_rate_summary(key_id, active_key_group_id, active_plan_name, groups, rates)
             if _is_unrecognized_group_summary(summary):
                 summary = await _try_match_group_from_api_key(
-                    client, base_url, token_result, log, account, api_key, key_id, active_plan_name, groups, rates, summary
+                    client, base_url, token, log, account, api_key, key_id, active_plan_name, groups, rates, summary
                 )
             available_groups = [_summarize_group(group, rates) for group in groups]
 
     raw_json = _compact_json(summary)
-    return normalize_result({"is_valid": True, "plan_name": summary["title"], "extra": raw_json, "available_groups": available_groups})
+    return normalize_result(
+        {
+            "is_valid": True,
+            "plan_name": summary["title"],
+            "extra": raw_json,
+            "available_groups": available_groups,
+            "refreshed_access_token": token_state.get("persist_access_token"),
+            "refreshed_refresh_token": token_state.get("persist_refresh_token"),
+        }
+    )
 
 
 async def _query_sub2api_group_options(account: Any, secret_key: str, timeout: float, log: LogCallback | None = None) -> dict[str, Any]:
     selected_group_id = decrypt_value(_account_value(account, "key_id_enc"), secret_key)
     email = decrypt_value(_account_value(account, "email_enc"), secret_key)
     password = decrypt_value(_account_value(account, "password_enc"), secret_key)
-    if not email:
-        return normalize_result({"is_valid": False, "invalid_message": "缺少 email"})
-    if not password:
-        return normalize_result({"is_valid": False, "invalid_message": "缺少 password"})
+    configured_access_token = decrypt_value(_account_value(account, "access_token_enc"), secret_key)
+    configured_refresh_token = decrypt_value(_account_value(account, "refresh_token_enc"), secret_key)
+    if not configured_access_token and not configured_refresh_token:
+        if not email:
+            return normalize_result({"is_valid": False, "invalid_message": "缺少 refreshToken/accessToken 或 email"})
+        if not password:
+            return normalize_result({"is_valid": False, "invalid_message": "缺少 refreshToken/accessToken 或 password"})
 
     base_url = account["base_url"].rstrip("/")
-    token_cache_key = _sub2api_token_cache_key(base_url, email)
+    token_cache_key = _sub2api_token_cache_key(base_url, email or "")
     async with httpx.AsyncClient(timeout=timeout) as client:
-        token = _get_cached_sub2api_token(token_cache_key)
-        if not token:
-            token_result = await _login_sub2api(client, base_url, email, password, token_cache_key, log, account)
-            if isinstance(token_result, dict):
-                return token_result
-            token = token_result
+        token_result = await _resolve_sub2api_access_token(
+            client,
+            base_url,
+            configured_access_token,
+            configured_refresh_token,
+            email,
+            password,
+            token_cache_key,
+            log,
+            account,
+        )
+        if isinstance(token_result, dict) and token_result.get("is_valid") is False:
+            return token_result
+        token_state = token_result
+        token = token_state["access_token"]
+        used_configured_token = bool(token_state.get("used_configured_token"))
         try:
             groups_payload, rates_payload = await _fetch_sub2api_group_payloads(client, base_url, token, log, account)
         except httpx.HTTPError:
+            if used_configured_token:
+                return normalize_result({"is_valid": False, "invalid_message": _configured_sub2api_token_error_message(base_url)})
             _SUB2API_TOKEN_CACHE.pop(token_cache_key, None)
-            token_result = await _login_sub2api(client, base_url, email, password, token_cache_key, log, account)
-            if isinstance(token_result, dict):
+            token_result = await _resolve_sub2api_access_token(
+                client,
+                base_url,
+                configured_access_token,
+                configured_refresh_token,
+                email,
+                password,
+                token_cache_key,
+                log,
+                account,
+            )
+            if isinstance(token_result, dict) and token_result.get("is_valid") is False:
                 return token_result
-            groups_payload, rates_payload = await _fetch_sub2api_group_payloads(client, base_url, token_result, log, account)
+            token_state = token_result
+            groups_payload, rates_payload = await _fetch_sub2api_group_payloads(client, base_url, token_state["access_token"], log, account)
 
     groups = [_summarize_group(group, _extract_group_rates(rates_payload)) for group in _extract_groups(groups_payload)]
     return {
@@ -191,6 +264,8 @@ async def _query_sub2api_group_options(account: Any, secret_key: str, timeout: f
         "groups": groups,
         "selected_group_id": selected_group_id,
         "selectedGroupId": selected_group_id,
+        "refreshed_access_token": token_state.get("persist_access_token"),
+        "refreshed_refresh_token": token_state.get("persist_refresh_token"),
         "extra": _compact_json({"groups": groups, "selected_group_id": selected_group_id}),
     }
 
@@ -359,6 +434,84 @@ async def _logged_post_json(
     return response
 
 
+async def _resolve_sub2api_access_token(
+    client: httpx.AsyncClient,
+    base_url: str,
+    configured_access_token: str | None,
+    configured_refresh_token: str | None,
+    email: str | None,
+    password: str | None,
+    cache_key: str,
+    log: LogCallback | None,
+    account: Any,
+) -> dict[str, Any]:
+    configured_expires_at = _extract_jwt_expiry(configured_access_token) if configured_access_token else None
+    configured_token_needs_refresh = bool(
+        configured_access_token
+        and configured_refresh_token
+        and configured_expires_at is not None
+        and _now_timestamp() >= max(_now_timestamp(), configured_expires_at - SUB2API_TOKEN_REFRESH_SKEW_SECONDS)
+    )
+    if configured_access_token and not configured_token_needs_refresh:
+        return {
+            "access_token": configured_access_token,
+            "refresh_token": configured_refresh_token,
+            "used_cached_token": False,
+            "used_configured_token": True,
+        }
+    if configured_refresh_token:
+        refreshed = await _refresh_sub2api_access_token(client, base_url, configured_refresh_token, cache_key, log, account)
+        if isinstance(refreshed, dict) and refreshed.get("is_valid") is False:
+            if configured_access_token:
+                return {
+                    "access_token": configured_access_token,
+                    "used_cached_token": False,
+                    "used_configured_token": True,
+                }
+            return refreshed
+        return {
+            **refreshed,
+            "used_cached_token": False,
+            "used_configured_token": False,
+            "persist_access_token": refreshed.get("access_token"),
+            "persist_refresh_token": refreshed.get("refresh_token"),
+        }
+    if configured_access_token:
+        return {
+            "access_token": configured_access_token,
+            "used_cached_token": False,
+            "used_configured_token": True,
+        }
+    cached = _get_cached_sub2api_token_state(cache_key)
+    if cached:
+        if cached.get("refresh_token") and _token_needs_refresh(cached):
+            refreshed = await _refresh_sub2api_access_token(client, base_url, str(cached["refresh_token"]), cache_key, log, account)
+            if not (isinstance(refreshed, dict) and refreshed.get("is_valid") is False):
+                return {
+                    **refreshed,
+                    "used_cached_token": False,
+                    "used_configured_token": False,
+                    "persist_access_token": refreshed.get("access_token"),
+                    "persist_refresh_token": refreshed.get("refresh_token"),
+                }
+        return {
+            "access_token": str(cached["access_token"]),
+            "refresh_token": cached.get("refresh_token"),
+            "used_cached_token": True,
+            "used_configured_token": False,
+        }
+    token_result = await _login_sub2api(client, base_url, email or "", password or "", cache_key, log, account)
+    if isinstance(token_result, dict) and token_result.get("is_valid") is False:
+        return token_result
+    return {
+        **token_result,
+        "used_cached_token": False,
+        "used_configured_token": False,
+        "persist_access_token": token_result.get("access_token"),
+        "persist_refresh_token": token_result.get("refresh_token"),
+    }
+
+
 async def _login_sub2api(
     client: httpx.AsyncClient,
     base_url: str,
@@ -376,7 +529,8 @@ async def _login_sub2api(
         log,
         account,
     )
-    login_response.raise_for_status()
+    if login_response.status_code >= 400:
+        return normalize_result({"is_valid": False, "invalid_message": _sub2api_login_error_message(base_url, login_response)})
     login_payload = login_response.json()
     token = _extract_access_token(login_payload)
     if not token:
@@ -384,8 +538,84 @@ async def _login_sub2api(
         if isinstance(login_data, dict) and login_data.get("requires_2fa"):
             return normalize_result({"is_valid": False, "invalid_message": "账号启用了 2FA，无法自动登录查组"})
         return normalize_result({"is_valid": False, "invalid_message": "登录成功但响应中没有 access_token"})
-    _cache_sub2api_token(cache_key, token, login_payload)
-    return token
+    refresh_token = _extract_refresh_token(login_payload)
+    _cache_sub2api_token(cache_key, token, login_payload, refresh_token=refresh_token)
+    return {"access_token": token, "refresh_token": refresh_token}
+
+
+async def _refresh_sub2api_access_token(
+    client: httpx.AsyncClient,
+    base_url: str,
+    refresh_token: str,
+    cache_key: str,
+    log: LogCallback | None,
+    account: Any,
+) -> dict[str, Any]:
+    refresh_response = await _logged_post_json(
+        client,
+        f"{base_url}/api/v1/auth/refresh",
+        {"refresh_token": refresh_token},
+        {"Content-Type": "application/json"},
+        log,
+        account,
+    )
+    if refresh_response.status_code >= 400:
+        return normalize_result({"is_valid": False, "invalid_message": _sub2api_refresh_error_message(base_url, refresh_response)})
+    refresh_payload = refresh_response.json()
+    access_token = _extract_access_token(refresh_payload)
+    if not access_token:
+        return normalize_result({"is_valid": False, "invalid_message": "刷新成功但响应中没有 access_token"})
+    next_refresh_token = _extract_refresh_token(refresh_payload) or refresh_token
+    _cache_sub2api_token(cache_key, access_token, refresh_payload, refresh_token=next_refresh_token)
+    return {"access_token": access_token, "refresh_token": next_refresh_token}
+
+
+def _sub2api_login_error_message(base_url: str, response: httpx.Response) -> str:
+    detail = _extract_response_error_text(response)
+    if response.status_code == 400 and _is_2chat_url(base_url):
+        message = "2chat 登录接口返回 400，当前站点开启了 Turnstile，人机验证无法由服务端自动完成；请在账号里填写 2chat Web 登录后的 accessToken 再获取分组"
+        return f"{message}。{detail}" if detail else message
+    message = f"登录失败: HTTP {response.status_code}"
+    return f"{message}，{detail}" if detail else message
+
+
+def _sub2api_refresh_error_message(base_url: str, response: httpx.Response) -> str:
+    detail = _extract_response_error_text(response)
+    if response.status_code == 400 and _is_2chat_url(base_url):
+        message = "refreshToken 刷新 accessToken 失败，请重新从 2chat 登录后复制最新 auth_token 和 refresh_token"
+        return f"{message}。{detail}" if detail else message
+    message = f"刷新 accessToken 失败: HTTP {response.status_code}"
+    return f"{message}，{detail}" if detail else message
+
+
+def _configured_sub2api_token_error_message(base_url: str) -> str:
+    if _is_2chat_url(base_url):
+        return "accessToken 无效或已过期，请重新从 2chat 登录后复制最新 accessToken"
+    return "accessToken 无效或已过期，请重新登录后复制最新 accessToken"
+
+
+def _extract_response_error_text(response: httpx.Response) -> str:
+    try:
+        payload = response.json()
+    except Exception:
+        text = (getattr(response, "text", "") or "").strip()
+        return text[:300]
+    if isinstance(payload, dict):
+        for key in ("message", "detail", "error", "code"):
+            value = payload.get(key)
+            if value:
+                return str(value)[:300]
+        data = payload.get("data")
+        if isinstance(data, dict):
+            for key in ("message", "detail", "error", "code"):
+                value = data.get(key)
+                if value:
+                    return str(value)[:300]
+    return ""
+
+
+def _is_2chat_url(base_url: str) -> bool:
+    return "2chat.cc" in base_url.lower()
 
 
 async def _fetch_sub2api_group_payloads(
@@ -445,19 +675,37 @@ def _sub2api_token_cache_key(base_url: str, email: str) -> str:
 
 
 def _get_cached_sub2api_token(cache_key: str) -> Optional[str]:
+    cached = _get_cached_sub2api_token_state(cache_key)
+    if not cached:
+        return None
+    token = cached.get("access_token")
+    return str(token) if token else None
+
+
+def _get_cached_sub2api_token_state(cache_key: str) -> Optional[dict[str, Any]]:
     cached = _SUB2API_TOKEN_CACHE.get(cache_key)
     if not cached:
         return None
     if _now_timestamp() >= float(cached.get("expires_at", 0)):
         _SUB2API_TOKEN_CACHE.pop(cache_key, None)
         return None
-    token = cached.get("token")
-    return str(token) if token else None
+    return dict(cached)
 
 
-def _cache_sub2api_token(cache_key: str, token: str, payload: Any) -> None:
+def _cache_sub2api_token(cache_key: str, token: str, payload: Any, refresh_token: str | None = None) -> None:
     expires_at = _extract_token_expires_at(payload, token)
-    _SUB2API_TOKEN_CACHE[cache_key] = {"token": token, "expires_at": expires_at}
+    _SUB2API_TOKEN_CACHE[cache_key] = {
+        "access_token": token,
+        "refresh_token": refresh_token,
+        "expires_at": expires_at,
+    }
+
+
+def _token_needs_refresh(cached: dict[str, Any]) -> bool:
+    expires_at = _optional_number(cached.get("expires_at"))
+    if expires_at is None:
+        return False
+    return _now_timestamp() >= max(0.0, expires_at - SUB2API_TOKEN_REFRESH_SKEW_SECONDS)
 
 
 def _extract_token_expires_at(payload: Any, token: str) -> float:
@@ -596,6 +844,19 @@ def _extract_access_token(payload: Any) -> Optional[str]:
             return str(token)
     if isinstance(payload, dict):
         token = payload.get("access_token") or payload.get("accessToken") or payload.get("token")
+        if token:
+            return str(token)
+    return None
+
+
+def _extract_refresh_token(payload: Any) -> Optional[str]:
+    data = _unwrap_response_data(payload)
+    if isinstance(data, dict):
+        token = data.get("refresh_token") or data.get("refreshToken")
+        if token:
+            return str(token)
+    if isinstance(payload, dict):
+        token = payload.get("refresh_token") or payload.get("refreshToken")
         if token:
             return str(token)
     return None

@@ -45,6 +45,8 @@ SENSITIVE_FIELD_NAMES = {
     "keyId",
     "access_token",
     "accessToken",
+    "refresh_token",
+    "refreshToken",
     "password",
     "email",
     "token",
@@ -328,6 +330,7 @@ def public_account(row: Any) -> dict[str, Any]:
     data["has_email"] = bool(data.pop("email_enc", None))
     data["has_password"] = bool(data.pop("password_enc", None))
     data["has_access_token"] = bool(data.pop("access_token_enc", None))
+    data["has_refresh_token"] = bool(data.pop("refresh_token_enc", None))
     data["has_user_id"] = bool(data.pop("user_id_enc", None))
     data["group_rates"] = monitor_group_rates(monitor_groups) or group_rates_from_extra(data.get("last_extra"))
     data["recharge_paid_amount"] = float(data.get("recharge_paid_amount") or 1)
@@ -638,19 +641,7 @@ def summarize_consumption_period(grouped: dict[str, list[dict[str, Any]]], perio
 
 
 def summarize_consumption_periods(grouped: dict[str, list[dict[str, Any]]], custom_range: dict[str, Any]) -> list[dict[str, Any]]:
-    summaries = [summarize_consumption_period(grouped, period) for period in CONSUMPTION_PERIODS]
-    custom_period = {
-        "key": "custom",
-        "label": "筛选区间实际消耗总金额",
-        "count_label": "个 Base URL 有筛选区间记录",
-        "static": True,
-    }
-    if custom_range.get("active"):
-        custom_period = {**custom_period, "since": custom_range["since"], "until": custom_range["until"]}
-        summaries.append(summarize_consumption_period(grouped, custom_period))
-    else:
-        summaries.append({**custom_period, "totals": [], "account_count": 0})
-    return summaries
+    return [summarize_consumption_period(grouped, period) for period in CONSUMPTION_PERIODS]
 
 
 def _consumption_base_url_key(account: dict[str, Any]) -> str:
@@ -1437,6 +1428,7 @@ def _account_from_form(form: Any) -> dict[str, Any]:
             "email": form.get("email"),
             "password": form.get("password"),
             "access_token": form.get("access_token"),
+            "refresh_token": form.get("refresh_token"),
             "user_id": form.get("user_id"),
             "threshold": form.get("threshold"),
             "is_enabled": form.get("is_enabled") == "on",
@@ -1473,6 +1465,7 @@ def _account_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "email": payload.get("email"),
         "password": payload.get("password"),
         "access_token": payload.get("access_token") or payload.get("accessToken"),
+        "refresh_token": payload.get("refresh_token") or payload.get("refreshToken"),
         "user_id": payload.get("user_id") or payload.get("userId"),
         "threshold": payload.get("threshold"),
         "is_eliminated": is_eliminated,

@@ -61,6 +61,8 @@ class DummyClient:
         request = {"method": "POST", "url": url, "json": json, "headers": headers, "timeout": self.timeout}
         DummyClient.last_request = request
         DummyClient.requests.append(request)
+        if isinstance(DummyClient.post_payload, DummyResponse):
+            return DummyClient.post_payload
         return DummyResponse(DummyClient.post_payload)
 
 
@@ -168,6 +170,107 @@ async def test_sub2api_group_options_fetches_available_groups(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_sub2api_group_options_uses_configured_access_token_without_login(monkeypatch):
+    monkeypatch.setattr("app.services.balance.httpx.AsyncClient", DummyClient)
+    DummyClient.post_payload = {}
+    DummyClient.get_payloads = [
+        {"data": [{"id": "basic", "plan_name": "Basic Plan", "rate_multiplier": 1.2}]},
+        {"data": {"basic": 0.8}},
+    ]
+    DummyClient.requests = []
+    account = {
+        "platform": "sub2Api",
+        "name": "sub",
+        "base_url": "https://2chat.cc",
+        "key_id_enc": encrypt_value("basic", "test-key"),
+        "access_token_enc": encrypt_value("web-jwt", "test-key"),
+    }
+
+    result = await query_sub2api_group_options(account, "test-key", 3)
+
+    assert result["is_valid"] is True
+    assert result["groups"][0]["id"] == "basic"
+    assert [request["url"] for request in DummyClient.requests] == [
+        "https://2chat.cc/api/v1/groups/available",
+        "https://2chat.cc/api/v1/groups/rates",
+    ]
+    assert DummyClient.requests[0]["headers"]["Authorization"] == "Bearer web-jwt"
+
+
+@pytest.mark.asyncio
+async def test_sub2api_group_options_refreshes_access_token_from_refresh_token(monkeypatch):
+    monkeypatch.setattr("app.services.balance.httpx.AsyncClient", DummyClient)
+    DummyClient.post_payload = {"data": {"access_token": "fresh-at", "refresh_token": "fresh-rt", "expires_in": 3600}}
+    DummyClient.get_payloads = [
+        {"data": [{"id": "basic", "plan_name": "Basic Plan", "rate_multiplier": 1.2}]},
+        {"data": {"basic": 0.8}},
+    ]
+    DummyClient.requests = []
+    account = {
+        "platform": "sub2Api",
+        "name": "sub",
+        "base_url": "https://2chat.cc",
+        "key_id_enc": encrypt_value("basic", "test-key"),
+        "refresh_token_enc": encrypt_value("old-rt", "test-key"),
+    }
+
+    result = await query_sub2api_group_options(account, "test-key", 3)
+
+    assert result["is_valid"] is True
+    assert result["groups"][0]["id"] == "basic"
+    assert DummyClient.requests[0]["url"] == "https://2chat.cc/api/v1/auth/refresh"
+    assert DummyClient.requests[0]["json"]["refresh_token"] == "old-rt"
+
+
+@pytest.mark.asyncio
+async def test_sub2api_group_query_uses_refresh_token_before_access_token_expires(monkeypatch):
+    monkeypatch.setattr("app.services.balance.httpx.AsyncClient", DummyClient)
+    DummyClient.post_payload = {"data": {"access_token": "fresh-at", "refresh_token": "fresh-rt", "expires_in": 3600}}
+    DummyClient.get_payloads = [
+        {"planName": "team"},
+        {"data": [{"id": "basic", "plan_name": "Basic Plan", "rate_multiplier": 1.2}]},
+        {"data": {"basic": 0.8}},
+    ]
+    DummyClient.requests = []
+    account = {
+        "platform": "sub2Api",
+        "name": "sub",
+        "base_url": "https://2chat.cc",
+        "api_key_enc": encrypt_value("secret", "test-key"),
+        "refresh_token_enc": encrypt_value("old-rt", "test-key"),
+    }
+
+    result = await query_sub2api_group(account, "test-key", 3)
+
+    assert result["is_valid"] is True
+    assert result["refreshed_access_token"] == "fresh-at"
+    assert result["refreshed_refresh_token"] == "fresh-rt"
+    assert DummyClient.requests[0]["url"] == "https://2chat.cc/v1/usage"
+    assert DummyClient.requests[1]["url"] == "https://2chat.cc/api/v1/auth/refresh"
+
+
+@pytest.mark.asyncio
+async def test_sub2api_group_options_reports_2chat_turnstile_login_400(monkeypatch):
+    monkeypatch.setattr("app.services.balance.httpx.AsyncClient", DummyClient)
+    DummyClient.post_payload = DummyResponse({"message": "Bad Request"}, status_code=400)
+    DummyClient.get_payloads = None
+    DummyClient.requests = []
+    account = {
+        "platform": "sub2Api",
+        "name": "sub",
+        "base_url": "https://2chat.cc",
+        "email_enc": encrypt_value("user@example.com", "test-key"),
+        "password_enc": encrypt_value("password", "test-key"),
+    }
+
+    result = await query_sub2api_group_options(account, "test-key", 3)
+
+    assert result["is_valid"] is False
+    assert "Turnstile" in result["invalid_message"]
+    assert "accessToken" in result["invalid_message"]
+
+
+@pytest.mark.asyncio
 async def test_sub2api_group_query_allows_empty_key_id(monkeypatch):
     monkeypatch.setattr("app.services.balance.httpx.AsyncClient", DummyClient)
     DummyClient.post_payload = {"data": {"access_token": "jwt"}}
@@ -269,7 +372,7 @@ async def test_sub2api_group_query_relogs_when_cached_token_fails(monkeypatch):
         {"data": {"3": 0.8}},
     ]
     DummyClient.requests = []
-    _SUB2API_TOKEN_CACHE["https://sub.example|user@example.com"] = {"token": "stale-jwt", "expires_at": 9999999999}
+    _SUB2API_TOKEN_CACHE["https://sub.example|user@example.com"] = {"access_token": "stale-jwt", "expires_at": 9999999999}
     account = {
         "platform": "sub2Api",
         "name": "sub",

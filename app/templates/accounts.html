@@ -90,7 +90,18 @@
     <label data-platform-field="sub2Api">sub2Api email<input name="email" type="email" autocomplete="username"></label>
     <label data-platform-field="sub2Api">sub2Api password<input name="password" type="password" autocomplete="current-password"></label>
     <input name="key_id" type="hidden" data-newapi-selected-group>
-    <label data-platform-field="newApi">newApi accessToken<input name="access_token" type="password" autocomplete="off"></label>
+    <label data-platform-field="newApi sub2Api">accessToken（newApi 必填；sub2Api 可选）<input name="access_token" type="password" autocomplete="off"></label>
+    <div class="token-helper" data-platform-field="sub2Api" data-token-helper>
+      <p>2chat 登录后，可在浏览器控制台执行以下代码获取 accessToken，点击即可复制：</p>
+      <button type="button" class="token-helper-copy" data-copy-snippet="localStorage.getItem('auth_token')">localStorage.getItem('auth_token')</button>
+      <small class="inline-status" data-copy-status hidden></small>
+    </div>
+    <label data-platform-field="sub2Api">refreshToken（sub2Api 可选，优先用于刷新 accessToken）<input name="refresh_token" type="password" autocomplete="off"></label>
+    <div class="token-helper" data-platform-field="sub2Api" data-token-helper>
+      <p>2chat 登录后，可在浏览器控制台执行以下代码获取 refreshToken，点击即可复制：</p>
+      <button type="button" class="token-helper-copy" data-copy-snippet="localStorage.getItem('refresh_token')">localStorage.getItem('refresh_token')</button>
+      <small class="inline-status" data-copy-status hidden></small>
+    </div>
     <label data-platform-field="newApi">newApi userId<input name="user_id" autocomplete="off"></label>
     <label>预警阈值<input name="threshold" type="number" min="0" step="0.01"></label>
     <label class="check"><input name="is_visible" type="checkbox" checked> 显示在仪表盘</label>
@@ -165,7 +176,7 @@
           <td data-account-recharge-ratio data-label="充值比例">{{ account.recharge_paid_amount or 1 }}:{{ account.recharge_received_amount or 1 }}</td>
           <td data-account-credentials data-label="凭据">
             {% set group_text = account.selected_group_ids|join(", ") if account.selected_group_ids else "未选择" %}
-            {% if platform == "sub2Api" %}当前分组: {{ account.selected_group_id or "未选择" }} / 监控分组: {{ group_text }} / apiKey: {{ "已配置" if account.has_api_key else "未配置" }} / email: {{ "已配置" if account.has_email else "未配置" }} / password: {{ "已配置" if account.has_password else "未配置" }}{% endif %}
+            {% if platform == "sub2Api" %}当前分组: {{ account.selected_group_id or "未选择" }} / 监控分组: {{ group_text }} / apiKey: {{ "已配置" if account.has_api_key else "未配置" }} / refreshToken: {{ "已配置" if account.has_refresh_token else "未配置" }} / accessToken: {{ "已配置" if account.has_access_token else "未配置" }} / email: {{ "已配置" if account.has_email else "未配置" }} / password: {{ "已配置" if account.has_password else "未配置" }}{% endif %}
             {% if platform == "newApi" %}accessToken: {{ "已配置" if account.has_access_token else "未配置" }} / userId: {{ "已配置" if account.has_user_id else "未配置" }} / 当前分组: {{ account.selected_group_id or "未选择" }} / 监控分组: {{ group_text }}{% endif %}
           </td>
           <td data-account-threshold-cell data-label="阈值">{{ account.threshold if account.threshold is not none else settings.default_threshold }}</td>
@@ -268,7 +279,7 @@
 <script>
   const bulkPlaceholders = {
     newApi: "JSON 数组，或 CSV 行。newApi: name,baseUrl,accessToken,userId,threshold,note,rechargeUrl。",
-    sub2Api: "JSON 数组，或 CSV 行。sub2Api: name,baseUrl,email,password,apiKey,threshold,note,rechargeUrl；可选筛选指定组：name,baseUrl,groupId,email,password,apiKey,threshold,note,rechargeUrl。"
+    sub2Api: "JSON 数组可带 refresh_token/access_token；CSV 行。sub2Api: name,baseUrl,email,password,apiKey,threshold,note,rechargeUrl；可选筛选指定组：name,baseUrl,groupId,email,password,apiKey,threshold,note,rechargeUrl。"
   };
   const defaultThreshold = "{{ settings.default_threshold }}";
 
@@ -321,6 +332,30 @@
     }, delay);
     inlineStatusTimers.set(target, timer);
   };
+  const copyTextToClipboard = async (text) => {
+    if (navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return;
+      } catch (error) {
+        // Fallback below keeps copy working in non-secure or restricted contexts.
+      }
+    }
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "readonly");
+    textarea.style.position = "fixed";
+    textarea.style.top = "-9999px";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    const copied = document.execCommand("copy");
+    document.body.removeChild(textarea);
+    if (!copied) {
+      throw new Error("复制失败，请手动复制");
+    }
+  };
   const platformPanel = (platform) => document.querySelector(`[data-platform-panel="${platform}"]`);
   const syncPlatformTable = (platform) => {
     const panel = platformPanel(platform);
@@ -360,7 +395,7 @@
     const selectedGroupText = selectedGroupIdsFromAccount(account).join(", ");
     const currentGroupText = fieldValue(account, "selected_group_id", "selectedGroupId") || fieldValue(account, "key_id", "keyId");
     if (platform === "sub2Api") {
-      return `当前分组: ${escapeHtml(displayText(currentGroupText, "未选择"))} / 监控分组: ${escapeHtml(displayText(selectedGroupText, "未选择"))} / apiKey: ${configuredLabel(fieldValue(account, "has_api_key", "hasApiKey"))} / email: ${configuredLabel(fieldValue(account, "has_email", "hasEmail"))} / password: ${configuredLabel(fieldValue(account, "has_password", "hasPassword"))}`;
+      return `当前分组: ${escapeHtml(displayText(currentGroupText, "未选择"))} / 监控分组: ${escapeHtml(displayText(selectedGroupText, "未选择"))} / apiKey: ${configuredLabel(fieldValue(account, "has_api_key", "hasApiKey"))} / refreshToken: ${configuredLabel(fieldValue(account, "has_refresh_token", "hasRefreshToken"))} / accessToken: ${configuredLabel(fieldValue(account, "has_access_token", "hasAccessToken"))} / email: ${configuredLabel(fieldValue(account, "has_email", "hasEmail"))} / password: ${configuredLabel(fieldValue(account, "has_password", "hasPassword"))}`;
     }
     return `accessToken: ${configuredLabel(fieldValue(account, "has_access_token", "hasAccessToken"))} / userId: ${configuredLabel(fieldValue(account, "has_user_id", "hasUserId"))} / 当前分组: ${escapeHtml(displayText(currentGroupText, "未选择"))} / 监控分组: ${escapeHtml(displayText(selectedGroupText, "未选择"))}`;
   };
@@ -753,7 +788,7 @@
     };
     const syncFields = () => {
       fields.forEach((field) => {
-        const visible = field.dataset.platformField === select.value;
+        const visible = String(field.dataset.platformField || "").split(/\s+/).includes(select.value);
         field.hidden = !visible;
         field.querySelectorAll("input").forEach((input) => {
           input.disabled = !visible;
@@ -797,6 +832,7 @@
       form.elements.email.value = fieldValue(account, "email");
       form.elements.password.value = "";
       form.elements.access_token.value = "";
+      form.elements.refresh_token.value = "";
       form.elements.user_id.value = fieldValue(account, "user_id", "userId");
       title.textContent = "编辑账号";
       setSubmitLabel();
@@ -833,6 +869,9 @@
       const payload = Object.fromEntries(formData.entries());
       payload.is_visible = form.elements.is_visible.checked;
       payload.is_enabled = form.elements.is_enabled.checked;
+      if (!payload.refresh_token) {
+        delete payload.refresh_token;
+      }
       const currentSelectedGroupIds = selectedGroupIdsFromDataset({selectedGroupIds: form.elements.key_id.value});
       if (currentSelectedGroupIds.length) {
         payload.monitor_group_ids = currentSelectedGroupIds;
@@ -1028,6 +1067,32 @@
     form.querySelector("[data-close-bulk-dialog]")?.addEventListener("click", () => {
       closeModalDialog(bulkDialog);
     });
+  });
+
+  document.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-copy-snippet]");
+    if (!button || button.disabled) {
+      return;
+    }
+    const snippet = String(button.dataset.copySnippet || button.textContent || "").trim();
+    const status = button.closest("[data-token-helper]")?.querySelector("[data-copy-status]");
+    if (!snippet) {
+      setInlineStatus(status, "没有可复制的内容", "error");
+      return;
+    }
+    button.disabled = true;
+    setInlineStatus(status, "复制中", "pending");
+    try {
+      await copyTextToClipboard(snippet);
+      setInlineStatus(status, "已复制到剪贴板", "success");
+      clearInlineStatusLater(status);
+    } catch (error) {
+      setInlineStatus(status, error.message || "复制失败", "error");
+    } finally {
+      setTimeout(() => {
+        button.disabled = false;
+      }, 150);
+    }
   });
 
   const temporaryButtonStatus = (button, text, title = "") => {

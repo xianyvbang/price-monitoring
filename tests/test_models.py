@@ -51,6 +51,25 @@ def test_sub2api_saves_login_without_group_id(tmp_path):
     assert decrypt_value(account["password_enc"], "test-key") == "login-password"
 
 
+def test_sub2api_saves_refresh_token(tmp_path):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+
+    account_id = db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "sub-refresh",
+            "base_url": "https://example.com",
+            "api_key": "sk-test",
+            "refresh_token": "rt-test",
+        }
+    )
+
+    account = db.get_account(account_id)
+
+    assert decrypt_value(account["refresh_token_enc"], "test-key") == "rt-test"
+
+
 def test_account_note_is_saved_and_updated(tmp_path):
     db = Database(str(tmp_path / "app.db"), "test-key")
     db.init()

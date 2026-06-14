@@ -39,14 +39,6 @@
         <option value="sub2Api" {% if account_filter.platform == "sub2Api" %}selected{% endif %}>sub2Api</option>
       </select>
     </label>
-    <label>
-      开始日期
-      <input type="date" name="consumption_start" value="{{ consumption_filter.start }}">
-    </label>
-    <label>
-      结束日期
-      <input type="date" name="consumption_end" value="{{ consumption_filter.end }}">
-    </label>
     <div class="consumption-filter-actions">
       <button class="primary" type="submit">筛选</button>
       {% if account_filter.active or consumption_filter.active %}
