@@ -332,6 +332,7 @@ table {
 
 [data-accounts-table] {
   table-layout: fixed;
+  min-width: 1440px;
 }
 
 [data-accounts-table] th:nth-child(1),
@@ -356,16 +357,19 @@ table {
 
 [data-accounts-table] th:nth-child(5),
 [data-accounts-table] td:nth-child(5) {
-  width: 38%;
+  width: 7%;
 }
 
 [data-accounts-table] th:nth-child(6),
 [data-accounts-table] td:nth-child(6) {
-  width: 6%;
+  width: 22%;
 }
 
 [data-accounts-table] th:nth-child(7),
-[data-accounts-table] td:nth-child(7),
+[data-accounts-table] td:nth-child(7) {
+  width: 6%;
+}
+
 [data-accounts-table] th:nth-child(8),
 [data-accounts-table] td:nth-child(8) {
   width: 8%;
@@ -373,7 +377,12 @@ table {
 
 [data-accounts-table] th:nth-child(9),
 [data-accounts-table] td:nth-child(9) {
-  width: 10rem;
+  width: 8%;
+}
+
+[data-accounts-table] th:nth-child(10),
+[data-accounts-table] td:nth-child(10) {
+  width: 15rem;
 }
 
 th,
@@ -734,7 +743,7 @@ dialog::backdrop {
   display: grid;
   gap: 6px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  min-width: 9rem;
+  min-width: 14rem;
 }
 
 [data-accounts-table] td:last-child .actions > *,
