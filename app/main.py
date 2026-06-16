@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeTimedSerializer
@@ -37,6 +38,9 @@ db = Database(config.database_path, config.app_secret_key)
 templates = Jinja2Templates(directory="app/templates")
 serializer = URLSafeTimedSerializer(config.app_secret_key, salt="balance-monitor-session")
 scheduler = BalanceScheduler(db)
+FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
+FRONTEND_INDEX = FRONTEND_DIR / "index.html"
+FRONTEND_ASSETS_DIR = FRONTEND_DIR / "assets"
 SENSITIVE_HEADER_NAMES = {"authorization", "cookie", "set-cookie"}
 SENSITIVE_FIELD_NAMES = {
     "api_key",
@@ -80,6 +84,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="余额监控", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
+app.mount("/assets", StaticFiles(directory=FRONTEND_ASSETS_DIR, check_dir=False), name="frontend-assets")
 
 
 @app.middleware("http")
@@ -107,6 +112,12 @@ async def log_http_requests(request: Request, call_next):
 @app.get("/health")
 async def health():
     return {"ok": True}
+
+
+@app.get("/api/session")
+async def api_session(request: Request):
+    user = current_user(request)
+    return {"authenticated": bool(user), "user": {"username": user} if user else None}
 
 
 def current_user(request: Request) -> str | None:
@@ -153,6 +164,30 @@ def redirect_if_needed(request: Request) -> RedirectResponse | None:
 
 def template_context(request: Request, **extra: Any) -> dict[str, Any]:
     return {"request": request, "user": current_user(request), "format_time": format_china_time, **extra}
+
+
+def spa_response() -> FileResponse | HTMLResponse:
+    if FRONTEND_INDEX.exists():
+        return FileResponse(FRONTEND_INDEX)
+    return HTMLResponse(
+        """
+        <!doctype html>
+        <html lang="zh-CN">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>余额监控</title>
+          </head>
+          <body>
+            <main style="font-family: sans-serif; max-width: 720px; margin: 80px auto; line-height: 1.7;">
+              <h1>前端尚未构建</h1>
+              <p>请先在 <code>frontend</code> 目录执行 <code>npm install</code> 和 <code>npm run build</code>，或在开发模式运行 Vite。</p>
+            </main>
+          </body>
+        </html>
+        """,
+        status_code=503,
+    )
 
 
 def account_filter_from_query(request: Request) -> dict[str, Any]:
@@ -202,6 +237,10 @@ def _positive_query_int(value: Any, default: int) -> int:
 
 def should_log_http_request(request: Request) -> bool:
     path = request.url.path
+    if path == "/assets" or path.startswith("/assets/"):
+        return False
+    if path == "/favicon.ico":
+        return False
     if path == "/static" or path.startswith("/static/"):
         return False
     if path == "/logs" or path.startswith("/logs/"):
@@ -708,49 +747,32 @@ def public_edit_account(account_id: int | None) -> dict[str, Any] | None:
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
-    redirect = redirect_if_needed(request)
-    if redirect:
-        return redirect
-    account_filter = account_filter_from_query(request)
-    grouped = dashboard_grouped_accounts(account_filter)
-    consumption_filter = consumption_date_range_from_query(request)
-    return templates.TemplateResponse(
-        request,
-        "dashboard.html",
-        template_context(
-            request,
-            grouped=grouped,
-            settings=db.get_general_settings(),
-            consumption_summaries=summarize_consumption_periods(grouped, consumption_filter),
-            consumption_filter=consumption_filter,
-            account_filter=account_filter,
-        ),
-    )
+    return spa_response()
 
 
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
-    message = request.query_params.get("message")
-    return templates.TemplateResponse(request, "login.html", template_context(request, error=None, message=message))
+    return spa_response()
 
 
 @app.post("/login")
 async def login(request: Request):
-    form = await request.form()
-    username = str(form.get("username", ""))
-    password = str(form.get("password", ""))
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        payload = await request.json()
+    else:
+        payload = await request.form()
+    username = str(payload.get("username", ""))
+    password = str(payload.get("password", ""))
     user = db.get_user(username)
     if not user or not verify_password(password, user["password_hash"]):
         db.add_log("warning", "auth", f"登录失败: {username or '-'}")
-        return templates.TemplateResponse(
-            request,
-            "login.html",
-            template_context(request, error="用户名或密码错误"),
-            status_code=401,
-        )
+        if "application/json" in content_type:
+            return JSONResponse({"ok": False, "detail": "用户名或密码错误"}, status_code=401)
+        return RedirectResponse("/login?message=login_failed", status_code=303)
     db.add_log("info", "auth", f"登录成功: {username}")
     token = serializer.dumps({"username": username, "session_version": int(user["session_version"])})
-    response = RedirectResponse("/", status_code=303)
+    response = JSONResponse({"ok": True, "user": {"username": username}}) if "application/json" in content_type else RedirectResponse("/", status_code=303)
     response.set_cookie(
         config.session_cookie,
         token,
@@ -766,30 +788,16 @@ async def logout(request: Request):
     user = current_user(request)
     if user:
         db.add_log("info", "auth", f"退出登录: {user}")
-    response = RedirectResponse("/login", status_code=303)
+    content_type = request.headers.get("content-type", "")
+    wants_json = "application/json" in content_type or request.headers.get("accept", "").find("application/json") >= 0
+    response = JSONResponse({"ok": True}) if wants_json else RedirectResponse("/login", status_code=303)
     response.delete_cookie(config.session_cookie)
     return response
 
 
 @app.get("/accounts", response_class=HTMLResponse)
 async def accounts_page(request: Request):
-    redirect = redirect_if_needed(request)
-    if redirect:
-        return redirect
-    edit_id = _optional_int(request.query_params.get("edit_id"))
-    account_filter = account_filter_from_query(request)
-    return templates.TemplateResponse(
-        request,
-        "accounts.html",
-        template_context(
-            request,
-            grouped=grouped_accounts(platform=account_filter.get("platform"), name_query=account_filter.get("name") or None),
-            settings=db.get_general_settings(),
-            message=None,
-            edit_account=public_edit_account(edit_id),
-            account_filter=account_filter,
-        ),
-    )
+    return spa_response()
 
 
 @app.post("/accounts", response_class=HTMLResponse)
@@ -937,55 +945,17 @@ async def monitor_pause_form(request: Request):
 
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request):
-    redirect = redirect_if_needed(request)
-    if redirect:
-        return redirect
-    return templates.TemplateResponse(
-        request,
-        "settings.html",
-        template_context(request, settings=db.get_general_settings(), smtp=public_smtp_settings(), message=None),
-    )
+    return spa_response()
 
 
 @app.get("/accounts/{account_id}/group-rates", response_class=HTMLResponse)
 async def group_rates_page(request: Request, account_id: int):
-    redirect = redirect_if_needed(request)
-    if redirect:
-        return redirect
-    account = db.get_account(account_id)
-    if not account:
-        raise HTTPException(status_code=404, detail="账号不存在")
-    monitor_group_id = _optional_int(request.query_params.get("monitor_group_id") or request.query_params.get("monitorGroupId"))
-    monitor_group_row = db.get_monitor_group(monitor_group_id) if monitor_group_id else None
-    if monitor_group_row and monitor_group_row["account_id"] != account_id:
-        raise HTTPException(status_code=404, detail="分组不存在")
-    monitor_group = public_monitor_group(monitor_group_row) if monitor_group_row else None
-    return templates.TemplateResponse(
-        request,
-        "group_rates.html",
-        template_context(
-            request,
-            account=public_account(account),
-            monitor_group=monitor_group,
-            records=[row_to_dict(row) for row in db.list_group_rate_records(account_id, monitor_group_id=monitor_group_id)],
-        ),
-    )
+    return spa_response()
 
 
 @app.get("/logs", response_class=HTMLResponse)
 async def logs_page(request: Request):
-    redirect = redirect_if_needed(request)
-    if redirect:
-        return redirect
-    payload = log_page_payload(
-        _positive_query_int(request.query_params.get("page"), 1),
-        _positive_query_int(request.query_params.get("page_size"), LOG_PAGE_SIZE),
-    )
-    return templates.TemplateResponse(
-        request,
-        "logs.html",
-        template_context(request, logs=payload["logs"], pagination=payload["pagination"]),
-    )
+    return spa_response()
 
 
 @app.post("/logs/clear")
@@ -1100,6 +1070,25 @@ async def api_accounts(request: Request):
     return grouped_accounts(platform=account_filter.get("platform"), name_query=account_filter.get("name") or None)
 
 
+@app.get("/api/dashboard")
+async def api_dashboard(request: Request):
+    require_user(request)
+    account_filter = account_filter_from_query(request)
+    grouped = dashboard_grouped_accounts(account_filter)
+    consumption_filter = consumption_date_range_from_query(request)
+    consumption_summaries = summarize_consumption_periods(grouped, consumption_filter)
+    return {
+        "grouped": grouped,
+        "settings": db.get_general_settings(),
+        "consumption_summaries": consumption_summaries,
+        "consumptionSummaries": consumption_summaries,
+        "consumption_filter": consumption_filter,
+        "consumptionFilter": consumption_filter,
+        "account_filter": account_filter,
+        "accountFilter": account_filter,
+    }
+
+
 @app.get("/api/accounts/{account_id}")
 async def api_account_detail(request: Request, account_id: int):
     require_user(request)
@@ -1109,6 +1098,17 @@ async def api_account_detail(request: Request, account_id: int):
     return {"account": account}
 
 
+@app.delete("/api/accounts/{account_id}")
+async def api_delete_account(request: Request, account_id: int):
+    require_user(request)
+    account = db.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    db.delete_account(account_id)
+    db.add_log("warning", "account", f"API 删除账号: {account['platform']} / {account['name']}")
+    return {"ok": True}
+
+
 @app.get("/api/logs")
 async def api_logs(request: Request):
     require_user(request)
@@ -1116,6 +1116,13 @@ async def api_logs(request: Request):
         _positive_query_int(request.query_params.get("page"), 1),
         _positive_query_int(request.query_params.get("page_size"), LOG_PAGE_SIZE),
     )
+
+
+@app.delete("/api/logs")
+async def api_clear_logs(request: Request):
+    require_user(request)
+    db.clear_logs()
+    return {"ok": True}
 
 
 @app.get("/api/accounts/{account_id}/group-rates")
@@ -1273,9 +1280,14 @@ async def api_bulk_accounts(request: Request):
     require_user(request)
     payload = await request.json()
     platform = payload.get("platform")
-    accounts = payload.get("accounts", [])
     if platform not in {"newApi", "sub2Api"}:
         raise HTTPException(status_code=400, detail="platform 必须是 newApi 或 sub2Api")
+    bulk_text = str(payload.get("bulk_text") or payload.get("bulkText") or "").strip()
+    if bulk_text:
+        count = import_bulk_accounts(platform, bulk_text)
+        db.add_log("info", "account", f"API 批量导入 {platform} 账号 {count} 个")
+        return {"ok": True, "count": count}
+    accounts = payload.get("accounts", [])
     count = 0
     for item in accounts:
         item["platform"] = platform
@@ -1376,6 +1388,12 @@ async def api_monitor_pause(request: Request):
     return {"ok": True, "settings": db.get_general_settings()}
 
 
+@app.get("/api/settings")
+async def api_settings(request: Request):
+    require_user(request)
+    return {"settings": db.get_general_settings(), "smtp": public_smtp_settings()}
+
+
 @app.post("/api/settings/general")
 async def api_general_settings(request: Request):
     require_user(request)
@@ -1420,6 +1438,28 @@ async def api_test_smtp(request: Request):
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
     db.add_log("info", "email", "API SMTP 测试邮件发送成功")
     return {"ok": True}
+
+
+@app.post("/api/settings/password")
+async def api_change_password(request: Request):
+    username = require_user(request)
+    payload = await request.json()
+    current_password = str(payload.get("current_password") or payload.get("currentPassword") or "")
+    new_password = str(payload.get("new_password") or payload.get("newPassword") or "")
+    confirm_password = str(payload.get("confirm_password") or payload.get("confirmPassword") or "")
+    user = db.get_user(username)
+    if not user or not verify_password(current_password, user["password_hash"]):
+        db.add_log("warning", "auth", f"API 修改密码失败: {username}")
+        return JSONResponse({"ok": False, "message": "当前密码错误"}, status_code=400)
+    if len(new_password) < 8:
+        return JSONResponse({"ok": False, "message": "新密码至少需要 8 位"}, status_code=400)
+    if new_password != confirm_password:
+        return JSONResponse({"ok": False, "message": "两次输入的新密码不一致"}, status_code=400)
+    db.update_user_password(username, new_password)
+    db.add_log("info", "auth", f"API 修改密码成功: {username}")
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(config.session_cookie)
+    return response
 
 
 def _account_from_form(form: Any) -> dict[str, Any]:

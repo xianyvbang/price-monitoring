@@ -5,3 +5,7 @@ data/
 .env
 *.pyc
 *.log
+node_modules/
+frontend/node_modules/
+.pytest_tmp/
+.codegraph/

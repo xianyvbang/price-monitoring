@@ -1,6 +1,6 @@
 # 余额监控
 
-一个用于批量查询 `newApi` 和 `sub2Api` 余额的 Python Web 项目，支持 SQLite 持久化、管理员登录、自动查询、低余额邮件预警和 Docker Compose 部署。
+一个用于批量查询 `newApi` 和 `sub2Api` 余额的 Web 项目。后端使用 FastAPI + SQLite，前端使用 Vue 3 + Element Plus，支持管理员登录、自动查询、低余额邮件预警和 Docker Compose 部署。
 
 ## 快速启动
 
@@ -28,6 +28,23 @@ python -m venv .venv
 pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
+
+前端开发：
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+生产构建前端：
+
+```bash
+cd frontend
+npm run build
+```
+
+构建产物会写入 `app/frontend`，FastAPI 会托管这个 Vue 单页应用。
 
 ## 批量导入格式
 
@@ -82,12 +99,18 @@ JSON 示例：
 ## 接口
 
 - `GET /api/accounts`
+- `GET /api/dashboard`
+- `GET /api/settings`
 - `POST /api/accounts`
 - `POST /api/accounts/bulk`
 - `POST /api/accounts/{id}/query`
+- `DELETE /api/accounts/{id}`
 - `POST /api/query-all`
 - `POST /api/settings/general`
 - `POST /api/settings/smtp`
 - `POST /api/settings/smtp/test`
+- `POST /api/settings/password`
+- `GET /api/logs`
+- `DELETE /api/logs`
 
 所有接口都需要先通过 Web 登录获取 Cookie。

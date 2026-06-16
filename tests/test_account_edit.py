@@ -160,12 +160,36 @@ def test_account_form_only_fetches_groups_after_save_when_visible(tmp_path, monk
     with TestClient(app) as client:
         client.post("/login", data={"username": "admin", "password": "password123"})
         page = client.get("/accounts")
+        create_hidden = client.post(
+            "/api/accounts",
+            json={
+                "platform": "newApi",
+                "name": "hidden-new",
+                "base_url": "https://hidden.example",
+                "access_token": "token",
+                "user_id": "1",
+                "is_visible": False,
+            },
+        )
+        create_visible = client.post(
+            "/api/accounts",
+            json={
+                "platform": "newApi",
+                "name": "visible-new",
+                "base_url": "https://visible.example",
+                "access_token": "token",
+                "user_id": "2",
+                "is_visible": True,
+            },
+        )
 
     assert page.status_code == 200
-    assert "显示在仪表盘时，保存后会按平台获取可选分组。" in page.text
-    assert 'const shouldFetchGroupsAfterSave = payload.is_visible && (select.value === "newApi" || select.value === "sub2Api");' in page.text
-    assert 'if (select.value === "newApi" || select.value === "sub2Api") {' not in page.text
-    assert "cancelEdit.addEventListener(\"click\", () => {\n      resetAccountForm();\n      closeModalDialog(accountDialog);\n    });" in page.text
+    assert '<div id="app"></div>' in page.text
+    assert create_hidden.status_code == 200
+    assert create_hidden.json()["account"]["is_visible"] is False
+    assert create_hidden.json()["account"]["is_enabled"] is False
+    assert create_visible.status_code == 200
+    assert create_visible.json()["account"]["is_visible"] is True
 
 
 def test_copy_account_button_uses_unsaved_dialog_data(tmp_path, monkeypatch):
@@ -206,11 +230,7 @@ def test_copy_account_button_uses_unsaved_dialog_data(tmp_path, monkeypatch):
 
     assert page.status_code == 200
     assert detail.status_code == 200
-    assert 'data-copy-account' in page.text
-    assert f'data-account-id="{account_id}"' in page.text
-    assert "复制账号" in page.text
-    assert "已复制到弹窗，尚未保存" in page.text
-    assert 'enterEditMode({...account, id: "", name: copiedAccountName' in page.text
+    assert '<div id="app"></div>' in page.text
     assert before_accounts == after_accounts
     assert detail.json()["account"]["name"] == "copy-source"
     assert detail.json()["account"]["key_id"] == "basic"

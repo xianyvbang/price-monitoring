@@ -64,16 +64,18 @@ def test_clear_logs_page_action(tmp_path, monkeypatch):
     with TestClient(app) as client:
         client.post("/login", data={"username": "admin", "password": "password123"})
         page = client.get("/logs")
-        response = client.post("/logs/clear", follow_redirects=False)
-        cleared = client.get("/logs")
+        api = client.get("/api/logs")
+        response = client.delete("/api/logs")
+        cleared = client.get("/api/logs")
 
     assert page.status_code == 200
-    assert "清空日志" in page.text
-    assert "clear me" in page.text
-    assert response.status_code == 303
-    assert response.headers["location"] == "/logs"
-    assert "暂无日志" in cleared.text
-    assert "clear me" not in cleared.text
+    assert '<div id="app"></div>' in page.text
+    assert api.status_code == 200
+    assert any(log["message"] == "clear me" for log in api.json()["logs"])
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert cleared.status_code == 200
+    assert cleared.json()["logs"] == []
     assert test_db.list_logs() == []
 
 
@@ -99,10 +101,7 @@ def test_logs_page_and_api_are_paginated(tmp_path, monkeypatch):
         api = client.get("/api/logs?page=2&page_size=2")
 
     assert page.status_code == 200
-    assert "paged log 5" in page.text
-    assert "paged log 4" in page.text
-    assert "paged log 3" not in page.text
-    assert "第 1 / 3 页 · 共 5 条" in page.text
+    assert '<div id="app"></div>' in page.text
     assert api.status_code == 200
     assert [log["message"] for log in api.json()["logs"]] == ["paged log 3", "paged log 2"]
     assert api.json()["pagination"] == {
