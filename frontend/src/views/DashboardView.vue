@@ -26,6 +26,9 @@ const balanceLoading = ref(false);
 const balanceAccount = ref(null);
 const balanceRecords = ref([]);
 const chartCanvas = ref(null);
+const chartPoints = ref([]);
+const chartBounds = ref(null);
+const chartHover = ref(null);
 
 const platformEntries = computed(() => Object.entries(grouped.value).filter(([, rows]) => Array.isArray(rows)));
 const monitorPaused = computed(() => boolValue(settings.value.monitor_paused));
@@ -250,6 +253,9 @@ async function openBalanceHistory(row) {
   balanceLoading.value = true;
   balanceAccount.value = row;
   balanceRecords.value = [];
+  chartPoints.value = [];
+  chartBounds.value = null;
+  chartHover.value = null;
   try {
     const payload = await api.balanceHistory(row.id);
     balanceRecords.value = payload.records || [];
@@ -269,8 +275,127 @@ async function clearBalanceHistory() {
   await ElMessageBox.confirm("确定清除这条平台的余额历史吗？", "清除余额历史", { type: "warning" });
   await api.clearBalanceHistory(balanceAccount.value.id);
   balanceRecords.value = [];
+  chartHover.value = null;
   drawChart();
   ElMessage.success("余额历史已清除");
+}
+
+function normalizedBalanceRecords() {
+  return balanceRecords.value
+    .map((record) => ({ ...record, remaining: Number(record.remaining), time: new Date(record.checked_at).getTime() }))
+    .filter((record) => Number.isFinite(record.remaining) && Number.isFinite(record.time))
+    .sort((a, b) => a.time - b.time);
+}
+
+function clearChartHover() {
+  if (!chartHover.value) {
+    return;
+  }
+  chartHover.value = null;
+  drawChart();
+}
+
+function handleChartMouseMove(event) {
+  const canvas = chartCanvas.value;
+  const points = chartPoints.value;
+  const bounds = chartBounds.value;
+  if (!canvas || !points.length || !bounds) {
+    clearChartHover();
+    return;
+  }
+
+  const rect = canvas.getBoundingClientRect();
+  const mouseX = event.clientX - rect.left;
+  const mouseY = event.clientY - rect.top;
+  if (mouseX < bounds.left - 12 || mouseX > bounds.right + 12 || mouseY < bounds.top - 18 || mouseY > bounds.bottom + 18) {
+    clearChartHover();
+    return;
+  }
+
+  const nearest = points.reduce((best, point) => {
+    const xDistance = Math.abs(point.x - mouseX);
+    const bestXDistance = Math.abs(best.x - mouseX);
+    if (xDistance !== bestXDistance) {
+      return xDistance < bestXDistance ? point : best;
+    }
+    return Math.abs(point.y - mouseY) < Math.abs(best.y - mouseY) ? point : best;
+  }, points[0]);
+  const maxDistance = Math.max(24, (bounds.right - bounds.left) / Math.max(points.length - 1, 1) / 2);
+  if (Math.abs(nearest.x - mouseX) > maxDistance) {
+    clearChartHover();
+    return;
+  }
+
+  if (chartHover.value?.index !== nearest.index) {
+    chartHover.value = { index: nearest.index };
+    drawChart();
+  }
+}
+
+function drawRoundedRect(ctx, x, y, width, height, radius) {
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.lineTo(x + width - radius, y);
+  ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
+  ctx.lineTo(x + width, y + height - radius);
+  ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+  ctx.lineTo(x + radius, y + height);
+  ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
+  ctx.lineTo(x, y + radius);
+  ctx.quadraticCurveTo(x, y, x + radius, y);
+  ctx.closePath();
+}
+
+function drawChartHover(ctx, point, rect, bounds) {
+  const valueText = `Y: ${displayValue(point.record.remaining)}`;
+  const timeText = formatTime(point.record.checked_at);
+  ctx.save();
+  ctx.strokeStyle = "#94a3b8";
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath();
+  ctx.moveTo(point.x, bounds.top);
+  ctx.lineTo(point.x, bounds.bottom);
+  ctx.moveTo(bounds.left, point.y);
+  ctx.lineTo(bounds.right, point.y);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  ctx.fillStyle = "#ffffff";
+  ctx.strokeStyle = "#2563eb";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(point.x, point.y, 5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.font = "600 12px sans-serif";
+  const valueWidth = ctx.measureText(valueText).width;
+  ctx.font = "12px sans-serif";
+  const timeWidth = ctx.measureText(timeText).width;
+  const boxWidth = Math.max(valueWidth, timeWidth) + 20;
+  const boxHeight = 48;
+  let boxX = point.x + 12;
+  let boxY = point.y - boxHeight - 12;
+  if (boxX + boxWidth > rect.width - 8) {
+    boxX = point.x - boxWidth - 12;
+  }
+  if (boxY < 8) {
+    boxY = point.y + 12;
+  }
+  boxX = Math.max(8, Math.min(boxX, rect.width - boxWidth - 8));
+  boxY = Math.max(8, Math.min(boxY, rect.height - boxHeight - 8));
+
+  ctx.fillStyle = "rgba(15, 23, 42, 0.92)";
+  drawRoundedRect(ctx, boxX, boxY, boxWidth, boxHeight, 6);
+  ctx.fill();
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "600 12px sans-serif";
+  ctx.fillText(valueText, boxX + 10, boxY + 18);
+  ctx.fillStyle = "#cbd5e1";
+  ctx.font = "12px sans-serif";
+  ctx.fillText(timeText, boxX + 10, boxY + 36);
+  ctx.restore();
 }
 
 function drawChart() {
@@ -285,11 +410,11 @@ function drawChart() {
   const ctx = canvas.getContext("2d");
   ctx.scale(scale, scale);
   ctx.clearRect(0, 0, rect.width, rect.height);
-  const records = balanceRecords.value
-    .map((record) => ({ ...record, remaining: Number(record.remaining), time: new Date(record.checked_at).getTime() }))
-    .filter((record) => Number.isFinite(record.remaining) && Number.isFinite(record.time))
-    .sort((a, b) => a.time - b.time);
+  const records = normalizedBalanceRecords();
   if (!records.length) {
+    chartPoints.value = [];
+    chartBounds.value = null;
+    chartHover.value = null;
     return;
   }
   const padding = { top: 24, right: 20, bottom: 34, left: 54 };
@@ -303,6 +428,11 @@ function drawChart() {
   const timeSpan = maxTime - minTime || 1;
   const x = (record) => padding.left + ((record.time - minTime) / timeSpan) * width;
   const y = (record) => padding.top + (1 - (record.remaining - minValue) / valueSpan) * height;
+  const points = records.map((record, index) => ({ index, record, x: x(record), y: y(record) }));
+  const bounds = { left: padding.left, right: padding.left + width, top: padding.top, bottom: padding.top + height };
+  chartPoints.value = points;
+  chartBounds.value = bounds;
+
   ctx.strokeStyle = "#d0d7e2";
   ctx.lineWidth = 1;
   ctx.beginPath();
@@ -313,21 +443,26 @@ function drawChart() {
   ctx.strokeStyle = "#2563eb";
   ctx.lineWidth = 2;
   ctx.beginPath();
-  records.forEach((record, index) => {
-    if (index === 0) ctx.moveTo(x(record), y(record));
-    else ctx.lineTo(x(record), y(record));
+  points.forEach((point, index) => {
+    if (index === 0) ctx.moveTo(point.x, point.y);
+    else ctx.lineTo(point.x, point.y);
   });
   ctx.stroke();
   ctx.fillStyle = "#2563eb";
-  records.forEach((record) => {
+  points.forEach((point) => {
     ctx.beginPath();
-    ctx.arc(x(record), y(record), 3, 0, Math.PI * 2);
+    ctx.arc(point.x, point.y, 3, 0, Math.PI * 2);
     ctx.fill();
   });
   ctx.fillStyle = "#667085";
   ctx.font = "12px sans-serif";
   ctx.fillText(String(maxValue), 8, padding.top + 4);
   ctx.fillText(String(minValue), 8, padding.top + height);
+
+  const activePoint = Number.isInteger(chartHover.value?.index) ? points[chartHover.value.index] : null;
+  if (activePoint) {
+    drawChartHover(ctx, activePoint, rect, bounds);
+  }
 }
 
 onMounted(async () => {
@@ -515,7 +650,7 @@ onBeforeUnmount(() => {
     <el-dialog v-model="balanceDialogVisible" title="余额趋势" width="860px" @opened="drawChart">
       <p class="muted">{{ balanceAccount?.platform }} / {{ balanceAccount?.name }} · 最近 3 天</p>
       <div v-loading="balanceLoading" class="chart-box">
-        <canvas ref="chartCanvas"></canvas>
+        <canvas ref="chartCanvas" @mousemove="handleChartMouseMove" @mouseleave="clearChartHover"></canvas>
         <div v-if="!balanceRecords.length" class="empty-chart">暂无余额数据</div>
       </div>
       <template #footer>

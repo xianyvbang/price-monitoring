@@ -273,6 +273,7 @@ a {
 }
 
 .chart-box canvas {
+  cursor: crosshair;
   display: block;
   height: 100%;
   width: 100%;
