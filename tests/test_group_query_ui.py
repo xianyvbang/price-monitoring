@@ -336,20 +336,26 @@ def test_dashboard_merges_site_cells_for_multi_group_account(tmp_path, monkeypat
         dashboard = client.get("/")
 
     assert dashboard.status_code == 200
+    dashboard_markup = dashboard.text.split("<script>", 1)[0]
     assert 'data-dashboard-table' in dashboard.text
-    assert 'rowspan="2"' in dashboard.text
-    assert '<td data-label="名称" rowspan="2">multi-group-site</td>' in dashboard.text
-    assert dashboard.text.count("merged note") == 1
-    assert dashboard.text.count('href="https://multi.example"') == 1
-    assert 'data-account-query data-account-id="' in dashboard.text
-    assert dashboard.text.count(f'data-group-query data-account-id="{account_id}"') == 2
-    assert dashboard.text.count(f"/accounts/{account_id}/group-rates") == 2
-    assert "Basic Plan: 0.8" in dashboard.text
-    assert "Pro Plan: 1.5" in dashboard.text
+    assert 'rowspan="2"' not in dashboard_markup
+    assert 'class="dashboard-account-row"' in dashboard_markup
+    assert dashboard_markup.count(f'data-account-summary-row\n          data-account-id="{account_id}"') == 1
+    assert dashboard_markup.count(f'data-account-group-row\n          data-account-id="{account_id}"') == 2
+    assert '<td data-label="名称">multi-group-site</td>' in dashboard_markup
+    assert dashboard_markup.count("merged note") == 1
+    assert dashboard_markup.count('href="https://multi.example"') == 1
+    assert 'data-account-query data-account-id="' in dashboard_markup
+    assert dashboard_markup.count(f'data-group-query data-account-id="{account_id}"') == 2
+    assert dashboard_markup.count(f"/accounts/{account_id}/group-rates") == 2
+    assert "Basic Plan: 0.8" in dashboard_markup
+    assert "Pro Plan: 1.5" in dashboard_markup
     styles = Path("app/static/styles.css").read_text(encoding="utf-8")
     assert "[data-dashboard-table]" in styles
+    assert ".dashboard-page" in styles
     assert ".dashboard-table-wrap" in styles
     assert "min-width: 1900px" in styles
+    assert "overflow: visible" in styles
 
 
 def test_dashboard_shows_today_consumption_column(tmp_path, monkeypatch):

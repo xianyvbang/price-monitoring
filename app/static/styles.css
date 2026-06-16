@@ -125,6 +125,15 @@ a {
   padding: 24px;
 }
 
+.page.dashboard-shell {
+  max-width: none;
+  width: max-content;
+}
+
+.dashboard-page {
+  min-width: 1960px;
+}
+
 .page-head {
   align-items: center;
   display: flex;
@@ -461,6 +470,10 @@ button:disabled {
   border: 1px solid var(--line);
 }
 
+.dashboard-table-wrap {
+  overflow: visible;
+}
+
 .pagination {
   align-items: center;
   color: var(--muted);
@@ -527,6 +540,27 @@ table {
 
 [data-dashboard-table] td {
   vertical-align: top;
+}
+
+[data-dashboard-table] .dashboard-account-row td {
+  vertical-align: middle;
+}
+
+[data-dashboard-table] .dashboard-group-row td {
+  background: #fbfcff;
+}
+
+[data-dashboard-table] .dashboard-group-spacer,
+[data-dashboard-table] .dashboard-group-tail,
+[data-dashboard-table] .dashboard-group-placeholder {
+  background: #f8fafc;
+  color: transparent;
+  pointer-events: none;
+}
+
+[data-dashboard-table] .dashboard-group-row:hover .dashboard-group-spacer,
+[data-dashboard-table] .dashboard-group-row:hover .dashboard-group-tail {
+  background: #f8fafc;
 }
 
 [data-accounts-table] th:nth-child(1),
@@ -615,6 +649,14 @@ tbody tr {
 }
 
 tbody tr:hover {
+  background: var(--primary-soft);
+}
+
+[data-dashboard-table] tbody tr:hover {
+  background: transparent;
+}
+
+[data-dashboard-table] tbody tr:hover td:not(.dashboard-group-spacer, .dashboard-group-tail, .dashboard-group-placeholder) {
   background: var(--primary-soft);
 }
 
@@ -1455,7 +1497,7 @@ pre {
   }
 
   .dashboard-table-wrap {
-    overflow-x: auto;
+    overflow: visible;
   }
 
   [data-dashboard-table] {
