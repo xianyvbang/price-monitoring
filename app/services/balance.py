@@ -103,6 +103,34 @@ async def query_sub2api_group_options(account: Any, secret_key: str, timeout: fl
         return normalize_result({"is_valid": False, "invalid_message": f"查询异常: {exc}"})
 
 
+async def login_sub2api_tokens(
+    base_url: str,
+    email: str,
+    password: str,
+    timeout: float,
+    log: LogCallback | None = None,
+    account: Any | None = None,
+) -> dict[str, Any]:
+    email = str(email or "").strip()
+    password = str(password or "").strip()
+    base_url = str(base_url or "").rstrip("/")
+    if not email:
+        return normalize_result({"is_valid": False, "invalid_message": "缺少 email，无法重新登录"})
+    if not password:
+        return normalize_result({"is_valid": False, "invalid_message": "缺少 password，无法重新登录"})
+    account_context = account or {"platform": "sub2Api", "name": email, "base_url": base_url}
+    cache_key = _sub2api_token_cache_key(base_url, email)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        token_result = await _login_sub2api(client, base_url, email, password, cache_key, log, account_context)
+    if isinstance(token_result, dict) and token_result.get("is_valid") is False:
+        return token_result
+    return {
+        "is_valid": True,
+        "access_token": token_result.get("access_token"),
+        "refresh_token": token_result.get("refresh_token"),
+    }
+
+
 async def _query_sub2api_group(account: Any, secret_key: str, timeout: float, log: LogCallback | None = None) -> dict[str, Any]:
     key_id = decrypt_value(_account_value(account, "key_id_enc"), secret_key)
     api_key = decrypt_value(_account_value(account, "api_key_enc"), secret_key)

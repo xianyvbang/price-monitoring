@@ -29,7 +29,7 @@ from app.models import (
 )
 from app.security import decrypt_value
 from app.security import verify_password
-from app.services.balance import query_newapi_group_options, query_sub2api_group_options
+from app.services.balance import login_sub2api_tokens, query_newapi_group_options, query_sub2api_group_options
 from app.services.emailer import send_email
 from app.services.scheduler import BalanceScheduler, query_all_accounts, query_group_rate_for_account, query_one_account, query_sub2api_group_for_account
 
@@ -808,27 +808,46 @@ async def save_account_form(request: Request):
     form = await request.form()
     account_data = _account_from_form(form)
     account_id = _optional_int(form.get("account_id"))
-    if account_id:
-        try:
+    try:
+        if account_id:
+            current_account = db.get_account(account_id)
+            if not current_account:
+                raise ValueError
+            account_data = await _prepare_sub2api_account_data_for_save(account_data, current_account)
             db.update_account(account_id, account_data)
-        except ValueError:
-            return templates.TemplateResponse(
+            db.add_log("info", "account", f"编辑账号: {account_data['platform']} / {account_data['name']}")
+        else:
+            account_data = await _prepare_sub2api_account_data_for_save(account_data)
+            db.upsert_account(account_data)
+            db.add_log("info", "account", f"保存账号: {account_data['platform']} / {account_data['name']}")
+    except ValueError:
+        return templates.TemplateResponse(
+            request,
+            "accounts.html",
+            template_context(
                 request,
-                "accounts.html",
-                template_context(
-                    request,
-                    grouped=grouped_accounts(),
-                    settings=db.get_general_settings(),
-                    message="账号不存在或已删除",
-                    edit_account=None,
-                    account_filter=account_filter_from_query(request),
-                ),
-                status_code=404,
-            )
-        db.add_log("info", "account", f"编辑账号: {account_data['platform']} / {account_data['name']}")
-    else:
-        db.upsert_account(account_data)
-        db.add_log("info", "account", f"保存账号: {account_data['platform']} / {account_data['name']}")
+                grouped=grouped_accounts(),
+                settings=db.get_general_settings(),
+                message="账号不存在或已删除",
+                edit_account=None,
+                account_filter=account_filter_from_query(request),
+            ),
+            status_code=404,
+        )
+    except HTTPException as exc:
+        return templates.TemplateResponse(
+            request,
+            "accounts.html",
+            template_context(
+                request,
+                grouped=grouped_accounts(),
+                settings=db.get_general_settings(),
+                message=exc.detail,
+                edit_account=None,
+                account_filter=account_filter_from_query(request),
+            ),
+            status_code=exc.status_code,
+        )
     return RedirectResponse("/accounts", status_code=303)
 
 
@@ -1258,7 +1277,9 @@ async def api_account_visible(request: Request, account_id: int):
 async def api_create_account(request: Request):
     require_user(request)
     payload = await request.json()
-    account_id = db.upsert_account(_account_from_payload(payload))
+    account_data = _account_from_payload(payload)
+    account_data = await _prepare_sub2api_account_data_for_save(account_data)
+    account_id = db.upsert_account(account_data)
     db.add_log("info", "account", f"API 保存账号: {payload.get('platform')} / {payload.get('name')}")
     return {"id": account_id, "ok": True, "account": public_edit_account(account_id)}
 
@@ -1267,12 +1288,42 @@ async def api_create_account(request: Request):
 async def api_update_account(request: Request, account_id: int):
     require_user(request)
     payload = await request.json()
+    current_account = db.get_account(account_id)
+    if not current_account:
+        raise HTTPException(status_code=404, detail="账号不存在")
     try:
-        db.update_account(account_id, _account_from_payload(payload))
+        account_data = _account_from_payload(payload)
+        account_data = await _prepare_sub2api_account_data_for_save(account_data, current_account)
+        db.update_account(account_id, account_data)
     except ValueError:
         raise HTTPException(status_code=404, detail="账号不存在") from None
     db.add_log("info", "account", f"API 更新账号: {payload.get('platform')} / {payload.get('name')}")
     return {"id": account_id, "ok": True, "account": public_edit_account(account_id)}
+
+
+async def _prepare_sub2api_account_data_for_save(account_data: dict[str, Any], current_account: Any | None = None) -> dict[str, Any]:
+    if account_data["platform"] != "sub2Api":
+        return account_data
+    email = str(account_data.get("email") or "").strip() or (
+        decrypt_value(current_account["email_enc"], config.app_secret_key) if current_account else ""
+    )
+    password = str(account_data.get("password") or "").strip() or (
+        decrypt_value(current_account["password_enc"], config.app_secret_key) if current_account else ""
+    )
+    settings = db.get_general_settings()
+    token_result = await login_sub2api_tokens(
+        account_data["base_url"],
+        email,
+        password,
+        settings["request_timeout"],
+        db.add_log,
+        current_account or account_data,
+    )
+    if not token_result.get("is_valid"):
+        raise HTTPException(status_code=400, detail=token_result.get("invalid_message") or "sub2Api 重新登录失败")
+    account_data["access_token"] = token_result.get("access_token")
+    account_data["refresh_token"] = token_result.get("refresh_token")
+    return account_data
 
 
 @app.post("/api/accounts/bulk")

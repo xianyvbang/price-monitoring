@@ -234,7 +234,7 @@ onMounted(async () => {
         </el-table-column>
         <el-table-column label="充值路径" width="105">
           <template #default="{ row }">
-            <el-button v-if="row.recharge_url" link type="primary" tag="a" :href="row.recharge_url" target="_blank">充值</el-button>
+            <el-button v-if="row.recharge_url" link type="success" tag="a" :href="row.recharge_url" target="_blank">充值</el-button>
             <span v-else>-</span>
           </template>
         </el-table-column>

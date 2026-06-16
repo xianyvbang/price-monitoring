@@ -103,7 +103,14 @@ def test_api_update_returns_account_for_local_row_refresh(tmp_path, monkeypatch)
     async def stop_scheduler():
         return None
 
+    async def fake_login(base_url, email, password, timeout, log=None, account=None):
+        assert base_url == "https://new.example"
+        assert email == "new@example.com"
+        assert password == "new-password"
+        return {"is_valid": True, "access_token": "fresh-at", "refresh_token": "fresh-rt"}
+
     monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+    monkeypatch.setattr("app.main.login_sub2api_tokens", fake_login)
 
     with TestClient(app) as client:
         client.post("/login", data={"username": "admin", "password": "password123"})
@@ -190,6 +197,97 @@ def test_account_form_only_fetches_groups_after_save_when_visible(tmp_path, monk
     assert create_hidden.json()["account"]["is_enabled"] is False
     assert create_visible.status_code == 200
     assert create_visible.json()["account"]["is_visible"] is True
+
+
+def test_api_create_sub2api_relogs_and_persists_tokens(tmp_path, monkeypatch):
+    test_db = Database(str(tmp_path / "app.db"), config.app_secret_key)
+    test_db.init()
+    test_db.ensure_admin("admin", "password123")
+    monkeypatch.setattr("app.main.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
+
+    async def stop_scheduler():
+        return None
+
+    async def fake_login(base_url, email, password, timeout, log=None, account=None):
+        assert base_url == "https://sub.example"
+        assert email == "user@example.com"
+        assert password == "login-password"
+        return {"is_valid": True, "access_token": "fresh-at", "refresh_token": "fresh-rt"}
+
+    monkeypatch.setattr("app.main.login_sub2api_tokens", fake_login)
+    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+
+    with TestClient(app) as client:
+        client.post("/login", data={"username": "admin", "password": "password123"})
+        response = client.post(
+            "/api/accounts",
+            json={
+                "platform": "sub2Api",
+                "name": "sub-create",
+                "base_url": "https://sub.example",
+                "api_key": "sk-test",
+                "email": "user@example.com",
+                "password": "login-password",
+            },
+        )
+
+    assert response.status_code == 200
+    account_id = response.json()["id"]
+    account = test_db.get_account(account_id)
+    assert decrypt_value(account["access_token_enc"], config.app_secret_key) == "fresh-at"
+    assert decrypt_value(account["refresh_token_enc"], config.app_secret_key) == "fresh-rt"
+
+
+def test_api_update_sub2api_relogs_with_saved_credentials_when_form_leaves_them_blank(tmp_path, monkeypatch):
+    test_db = Database(str(tmp_path / "app.db"), config.app_secret_key)
+    test_db.init()
+    test_db.ensure_admin("admin", "password123")
+    account_id = test_db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "sub-update",
+            "base_url": "https://sub.example",
+            "api_key": "sk-old",
+            "email": "saved@example.com",
+            "password": "saved-password",
+        }
+    )
+    monkeypatch.setattr("app.main.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
+
+    async def stop_scheduler():
+        return None
+
+    async def fake_login(base_url, email, password, timeout, log=None, account=None):
+        assert base_url == "https://sub.example"
+        assert email == "saved@example.com"
+        assert password == "saved-password"
+        return {"is_valid": True, "access_token": "updated-at", "refresh_token": "updated-rt"}
+
+    monkeypatch.setattr("app.main.login_sub2api_tokens", fake_login)
+    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+
+    with TestClient(app) as client:
+        client.post("/login", data={"username": "admin", "password": "password123"})
+        response = client.put(
+            f"/api/accounts/{account_id}",
+            json={
+                "platform": "sub2Api",
+                "name": "sub-update",
+                "base_url": "https://sub.example",
+                "api_key": "",
+                "email": "",
+                "password": "",
+            },
+        )
+
+    assert response.status_code == 200
+    account = test_db.get_account(account_id)
+    assert decrypt_value(account["access_token_enc"], config.app_secret_key) == "updated-at"
+    assert decrypt_value(account["refresh_token_enc"], config.app_secret_key) == "updated-rt"
 
 
 def test_copy_account_button_uses_unsaved_dialog_data(tmp_path, monkeypatch):

@@ -1,8 +1,8 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { Money, Refresh, VideoPause, VideoPlay } from "@element-plus/icons-vue";
+import { Money, Operation, Refresh, VideoPause, VideoPlay } from "@element-plus/icons-vue";
 import { api } from "../api";
 import GroupPickerDialog from "../components/GroupPickerDialog.vue";
 import { boolValue, displayValue, formatTime } from "../utils";
@@ -29,9 +29,113 @@ const chartCanvas = ref(null);
 const chartPoints = ref([]);
 const chartBounds = ref(null);
 const chartHover = ref(null);
+const dashboardPlatforms = ["newApi", "sub2Api"];
+const columnConfigStorageKey = "dashboard-column-config-v4";
+
+const columnDefs = [
+  { key: "name", label: "名称", defaultVisible: true },
+  { key: "note", label: "备注", defaultVisible: true, defaultVisibleByPlatform: { newApi: false, sub2Api: false } },
+  { key: "status", label: "状态", defaultVisible: true, defaultVisibleByPlatform: { newApi: false, sub2Api: false } },
+  { key: "group_rates", label: "分组倍率", defaultVisible: true },
+  { key: "group_rate_changed", label: "倍率变化", defaultVisible: true },
+  { key: "remaining", label: "剩余", defaultVisible: true },
+  { key: "today_consumption", label: "今日消耗", defaultVisible: false },
+  { key: "actual_today_consumption", label: "今日实际消耗", defaultVisible: true },
+  { key: "used", label: "已用", defaultVisible: true, platforms: ["newApi"], defaultVisibleByPlatform: { newApi: false } },
+  { key: "total", label: "总额", defaultVisible: false, platforms: ["newApi"] },
+  { key: "threshold", label: "阈值", defaultVisible: true, defaultVisibleByPlatform: { newApi: false, sub2Api: false } },
+  { key: "low_balance", label: "低于阈值", defaultVisible: true },
+  { key: "enabled", label: "自动查询", defaultVisible: true },
+  { key: "eliminated", label: "是否淘汰", defaultVisible: true },
+  { key: "checked_at", label: "最近查询", defaultVisible: true, defaultVisibleByPlatform: { newApi: false, sub2Api: false } },
+  { key: "group_actions", label: "分组操作", defaultVisible: true },
+  { key: "account_actions", label: "账号操作", defaultVisible: true }
+];
 
 const platformEntries = computed(() => Object.entries(grouped.value).filter(([, rows]) => Array.isArray(rows)));
 const monitorPaused = computed(() => boolValue(settings.value.monitor_paused));
+const columnConfig = reactive(loadColumnConfig());
+
+function columnDefsForPlatform(platform) {
+  return columnDefs.filter((column) => !column.platforms || column.platforms.includes(platform));
+}
+
+function columnDefaultVisible(column, platform) {
+  if (typeof column.defaultVisibleByPlatform?.[platform] === "boolean") {
+    return column.defaultVisibleByPlatform[platform];
+  }
+  return column.defaultVisible;
+}
+
+function defaultColumnConfigForPlatform(platform) {
+  return Object.fromEntries(columnDefsForPlatform(platform).map((column) => [column.key, columnDefaultVisible(column, platform)]));
+}
+
+function columnControlOptions(platform) {
+  return columnDefsForPlatform(platform).map((column) => ({ label: column.label, value: column.key }));
+}
+
+function columnControlValues(platform) {
+  return columnDefsForPlatform(platform)
+    .filter((column) => columnConfig[platform]?.[column.key] !== false)
+    .map((column) => column.key);
+}
+
+function setPlatformColumnVisibility(platform, values) {
+  const visibleKeys = new Set(values);
+  columnDefsForPlatform(platform).forEach((column) => {
+    columnConfig[platform][column.key] = visibleKeys.has(column.key);
+  });
+}
+
+function resetColumnVisibility(platform) {
+  setPlatformColumnVisibility(
+    platform,
+    columnDefsForPlatform(platform)
+      .filter((column) => columnDefaultVisible(column, platform))
+      .map((column) => column.key)
+  );
+}
+
+function loadColumnConfig() {
+  const defaults = Object.fromEntries(dashboardPlatforms.map((platform) => [platform, defaultColumnConfigForPlatform(platform)]));
+  if (typeof window === "undefined") {
+    return defaults;
+  }
+  try {
+    const raw = window.localStorage.getItem(columnConfigStorageKey);
+    if (!raw) {
+      return defaults;
+    }
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") {
+      return defaults;
+    }
+    const legacyConfig = !parsed.newApi && !parsed.sub2Api ? parsed : null;
+    return Object.fromEntries(
+      dashboardPlatforms.map((platform) => {
+        const source = parsed[platform] && typeof parsed[platform] === "object" ? parsed[platform] : legacyConfig;
+        return [
+          platform,
+          {
+            ...defaults[platform],
+            ...Object.fromEntries(
+              columnDefsForPlatform(platform)
+                .filter((column) => typeof source?.[column.key] === "boolean")
+                .map((column) => [column.key, source[column.key]])
+            )
+          }
+        ];
+      })
+    );
+  } catch {
+    return defaults;
+  }
+}
+
+function showColumn(platform, key) {
+  return columnConfig[platform]?.[key] !== false;
+}
 
 async function loadDashboard() {
   loading.value = true;
@@ -118,6 +222,10 @@ function dashboardSpanMethod({ row, column }) {
     return { rowspan: row.dashboard_rowspan || 1, colspan: 1 };
   }
   return { rowspan: 0, colspan: 0 };
+}
+
+function dashboardRowClassName({ row }) {
+  return row.dashboard_is_first_row ? "account-block-start" : "account-block-child";
 }
 
 async function runQueryAll(trigger = "manual") {
@@ -479,6 +587,17 @@ onMounted(async () => {
   window.addEventListener("resize", drawChart);
 });
 
+watch(
+  columnConfig,
+  (value) => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(columnConfigStorageKey, JSON.stringify(value));
+  },
+  { deep: true }
+);
+
 onBeforeUnmount(() => {
   if (timer.value) {
     window.clearInterval(timer.value);
@@ -534,111 +653,142 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <div v-for="[platform, rows] in platformEntries" :key="platform" class="panel table-card">
-      <div class="panel-head">
-        <h2>{{ platform }}</h2>
-        <el-tag>{{ accountCount(rows) }} 个账号<span v-if="rows.length !== accountCount(rows)"> / {{ rows.length }} 个分组</span></el-tag>
+    <div v-for="[platform, rows] in platformEntries" :key="platform" :class="['panel', 'table-card', 'platform-table', `platform-table--${platform}`]">
+      <div class="panel-head platform-panel-head">
+        <div class="platform-title">
+          <h2>{{ platform }}</h2>
+          <p>主体网站</p>
+        </div>
+        <div class="platform-head-actions">
+          <el-popover placement="bottom-end" trigger="click" width="320">
+            <template #reference>
+              <el-button :icon="Operation">列显示</el-button>
+            </template>
+            <div class="column-visibility-panel">
+              <div class="column-visibility-head">
+                <strong>列显示</strong>
+                <el-button link type="primary" @click="resetColumnVisibility(platform)">默认</el-button>
+              </div>
+              <el-checkbox-group :model-value="columnControlValues(platform)" class="column-visibility-list" @update:model-value="(values) => setPlatformColumnVisibility(platform, values)">
+                <el-checkbox v-for="option in columnControlOptions(platform)" :key="option.value" :label="option.value">
+                  {{ option.label }}
+                </el-checkbox>
+              </el-checkbox-group>
+            </div>
+          </el-popover>
+          <el-tag>{{ accountCount(rows) }} 个账号<span v-if="rows.length !== accountCount(rows)"> / {{ rows.length }} 个分组</span></el-tag>
+        </div>
       </div>
-      <el-table :data="rows" border stripe row-key="dashboard_row_id" :span-method="dashboardSpanMethod" style="width: 100%">
-        <el-table-column prop="name" label="名称" min-width="150" fixed>
+      <el-table
+        :data="rows"
+        border
+        stripe
+        row-key="dashboard_row_id"
+        :span-method="dashboardSpanMethod"
+        :row-class-name="dashboardRowClassName"
+        style="width: 100%"
+      >
+        <el-table-column v-if="showColumn(platform, 'name')" prop="name" label="名称" min-width="150">
           <template #default="{ row }">
             <strong>{{ row.name }}</strong>
           </template>
         </el-table-column>
-        <el-table-column prop="note" label="备注" min-width="170">
+        <el-table-column v-if="showColumn(platform, 'note')" prop="note" label="备注" min-width="110">
           <template #default="{ row }">
             <span class="note-text">{{ row.note || "-" }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="status" label="状态" width="105">
+        <el-table-column v-if="showColumn(platform, 'status')" prop="status" label="状态" width="105">
           <template #default="{ row }">
             <el-tag class="status-tag" :type="row.last_status === 'valid' ? 'success' : row.last_status === 'invalid' ? 'danger' : 'info'">
               {{ row.last_status }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="分组倍率" min-width="190">
+        <el-table-column v-if="showColumn(platform, 'group_rates')" label="分组倍率" min-width="190">
           <template #default="{ row }">
             <div class="group-rate-list">
               <span v-for="text in groupRateText(row)" :key="text">{{ text }}</span>
             </div>
           </template>
         </el-table-column>
-        <el-table-column v-if="platform === 'newApi' || platform === 'sub2Api'" label="倍率变化" width="130">
+        <el-table-column v-if="showColumn(platform, 'group_rate_changed') && (platform === 'newApi' || platform === 'sub2Api')" label="倍率变化" width="170">
           <template #default="{ row }">
-            <el-tag :type="row.last_group_rate_changed ? 'danger' : 'info'">{{ row.last_group_rate_changed ? "变化" : "未变化" }}</el-tag>
+            <div class="change-status-actions">
+              <el-tag :type="row.last_group_rate_changed ? 'danger' : 'info'">{{ row.last_group_rate_changed ? "变化" : "未变化" }}</el-tag>
+              <el-button v-if="row.last_group_rate_changed" size="small" link type="primary" @click="resetGroupRate(row)">重置</el-button>
+            </div>
           </template>
         </el-table-column>
-        <el-table-column prop="remaining" label="剩余" width="125">
+        <el-table-column v-if="showColumn(platform, 'remaining')" prop="remaining" label="剩余" width="125">
           <template #default="{ row }">
             <span>{{ displayValue(row.last_remaining) }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="today_consumption" label="今日消耗" width="125">
+        <el-table-column v-if="showColumn(platform, 'today_consumption')" prop="today_consumption" label="今日消耗" width="125">
           <template #default="{ row }">
             <span>{{ displayValue(row.today_consumption) }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="actual_today_consumption" label="今日实际消耗" width="140">
+        <el-table-column v-if="showColumn(platform, 'actual_today_consumption')" prop="actual_today_consumption" label="今日实际消耗" width="140">
           <template #default="{ row }">
             <span>{{ displayValue(row.actual_today_consumption) }}</span>
           </template>
         </el-table-column>
-        <el-table-column v-if="platform !== 'sub2Api'" prop="used" label="已用" width="105">
+        <el-table-column v-if="showColumn(platform, 'used') && platform !== 'sub2Api'" prop="used" label="已用" width="105">
           <template #default="{ row }">
             <span>{{ displayValue(row.last_used) }}</span>
           </template>
         </el-table-column>
-        <el-table-column v-if="platform !== 'sub2Api'" prop="total" label="总额" width="105">
+        <el-table-column v-if="showColumn(platform, 'total') && platform !== 'sub2Api'" prop="total" label="总额" width="105">
           <template #default="{ row }">
             <span>{{ displayValue(row.last_total) }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="threshold" label="阈值" width="90">
+        <el-table-column v-if="showColumn(platform, 'threshold')" prop="threshold" label="阈值" width="90">
           <template #default="{ row }">
             <span>{{ row.threshold ?? settings.default_threshold }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="low_balance" label="低于阈值" width="105">
+        <el-table-column v-if="showColumn(platform, 'low_balance')" prop="low_balance" label="低于阈值" width="105">
           <template #default="{ row }">
             <span :class="{ 'low-balance': lowBalanceText(row) === '是' }">{{ lowBalanceText(row) }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="enabled" label="自动查询" width="105">
+        <el-table-column v-if="showColumn(platform, 'enabled')" prop="enabled" label="自动查询" width="105">
           <template #default="{ row }">
             <el-switch :model-value="boolValue(row.is_enabled)" @change="toggleEnabled(row)" />
           </template>
         </el-table-column>
-        <el-table-column prop="eliminated" label="是否淘汰" width="105">
+        <el-table-column v-if="showColumn(platform, 'eliminated')" prop="eliminated" label="是否淘汰" width="105">
           <template #default="{ row }">
             <el-switch :model-value="boolValue(row.is_eliminated)" @change="toggleEliminated(row)" />
           </template>
         </el-table-column>
-        <el-table-column prop="checked_at" label="最近查询" width="165">
+        <el-table-column v-if="showColumn(platform, 'checked_at')" prop="checked_at" label="最近查询" width="165">
           <template #default="{ row }">
             <span>{{ formatTime(row.last_checked_at) }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="account_actions" label="账号操作" min-width="270" fixed="right">
+        <el-table-column v-if="showColumn(platform, 'group_actions') && (platform === 'newApi' || platform === 'sub2Api')" label="分组操作" min-width="145" fixed="right">
           <template #default="{ row }">
-            <div class="table-actions">
-              <el-button size="small" tag="a" :href="row.base_url" target="_blank">打开</el-button>
-              <el-button v-if="row.recharge_url" size="small" tag="a" :href="row.recharge_url" target="_blank">充值</el-button>
-              <el-button size="small" :loading="row._querying" @click="queryOne(row)">查询</el-button>
-              <el-button size="small" @click="router.push({ path: '/accounts', query: { edit_id: row.id } })">修改</el-button>
-              <el-button size="small" :icon="Money" @click="openBalanceHistory(row)">余额趋势</el-button>
+            <div class="table-actions group-actions">
+              <el-button v-if="row.platform === 'newApi' || row.platform === 'sub2Api'" size="small" :loading="row._groupQuerying" @click="queryGroup(row)">查组</el-button>
+              <el-button v-if="row.platform === 'newApi' || row.platform === 'sub2Api'" size="small" @click="router.push({ name: 'group-rates', params: { id: row.id }, query: row.current_monitor_group_id ? { monitor_group_id: row.current_monitor_group_id } : {} })">分组变化</el-button>
             </div>
           </template>
         </el-table-column>
-        <el-table-column v-if="platform === 'newApi' || platform === 'sub2Api'" label="分组操作" min-width="210" fixed="right">
+        <el-table-column v-if="showColumn(platform, 'account_actions')" prop="account_actions" label="账号操作" min-width="170" fixed="right">
           <template #default="{ row }">
-            <div class="table-actions group-actions">
+            <div class="table-actions">
+              <el-button size="small" tag="a" :href="row.base_url" target="_blank">打开</el-button>
+              <el-button v-if="row.recharge_url" size="small" type="success" tag="a" :href="row.recharge_url" target="_blank">充值</el-button>
+              <el-button size="small" :loading="row._querying" @click="queryOne(row)">查询</el-button>
               <el-button v-if="row.dashboard_is_first_row" size="small" :loading="row._fetchingGroups" @click="fetchGroups(row)">
-                {{ row.platform === "newApi" ? "重新获取分组" : "选择分组" }}
+                {{ row.platform === "newApi" ? "获取分组" : "选择分组" }}
               </el-button>
-              <el-button v-if="row.platform === 'newApi' || row.platform === 'sub2Api'" size="small" :loading="row._groupQuerying" @click="queryGroup(row)">查组</el-button>
-              <el-button v-if="row.platform === 'newApi' || row.platform === 'sub2Api'" size="small" @click="router.push({ name: 'group-rates', params: { id: row.id }, query: row.current_monitor_group_id ? { monitor_group_id: row.current_monitor_group_id } : {} })">分组变化</el-button>
-              <el-button v-if="row.last_group_rate_changed" size="small" link type="primary" @click="resetGroupRate(row)">重置</el-button>
+              <el-button size="small" @click="router.push({ path: '/accounts', query: { edit_id: row.id } })">修改</el-button>
+              <el-button size="small" :icon="Money" @click="openBalanceHistory(row)">余额趋势</el-button>
             </div>
           </template>
         </el-table-column>
