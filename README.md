@@ -44,7 +44,7 @@ cd frontend
 npm run build
 ```
 
-构建产物会写入 `app/frontend`，FastAPI 会托管这个 Vue 单页应用。
+构建产物会写入 `app/frontend`，FastAPI 会托管这个 Vue 单页应用。Docker 镜像直接使用仓库中的 `app/frontend` 构建产物；如果修改了 `frontend` 源码，请先运行 `npm run build` 再重新构建镜像。
 
 ## 批量导入格式
 
