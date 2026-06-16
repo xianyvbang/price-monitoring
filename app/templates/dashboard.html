@@ -73,10 +73,33 @@
 <section class="panel">
   <div class="panel-title">
     <h2>{{ platform }}</h2>
-    <span>{{ accounts|length }} 个账号</span>
+    {% set account_count = accounts|selectattr("dashboard_is_first_row")|list|length %}
+    <span>{{ account_count }} 个账号{% if accounts|length != account_count %} / {{ accounts|length }} 个分组{% endif %}</span>
   </div>
-  <div class="table-wrap">
-    <table>
+  <div class="table-wrap dashboard-table-wrap">
+    <table data-dashboard-table>
+      <colgroup>
+        <col class="dashboard-col-name">
+        <col class="dashboard-col-note">
+        <col class="dashboard-col-status">
+        <col class="dashboard-col-group-rates">
+        {% if platform in ["sub2Api", "newApi"] %}
+        <col class="dashboard-col-group-change">
+        {% endif %}
+        <col class="dashboard-col-remaining">
+        <col class="dashboard-col-today">
+        <col class="dashboard-col-actual-today">
+        {% if platform != "sub2Api" %}
+        <col class="dashboard-col-used">
+        <col class="dashboard-col-total">
+        {% endif %}
+        <col class="dashboard-col-threshold">
+        <col class="dashboard-col-low">
+        <col class="dashboard-col-enabled">
+        <col class="dashboard-col-eliminated">
+        <col class="dashboard-col-checked-at">
+        <col class="dashboard-col-actions">
+      </colgroup>
       <thead>
         <tr>
           <th>名称</th>
@@ -119,9 +142,11 @@
           data-account-consumption-this-month="{{ account.actual_consumption_stats.this_month if account.actual_consumption_stats.this_month is not none else '' }}"
           data-account-consumption-last-month="{{ account.actual_consumption_stats.last_month if account.actual_consumption_stats.last_month is not none else '' }}"
         >
-          <td data-label="名称">{{ account.name }}{% if account.current_group_id %}<br><small>分组: {{ account.current_group_id }}</small>{% endif %}</td>
-          <td class="note-cell" data-label="备注">{{ account.note or "-" }}</td>
-          <td data-label="状态"><span class="status {{ account.last_status }}" data-account-status>{{ account.last_status }}</span></td>
+          {% if account.dashboard_is_first_row %}
+          <td data-label="名称"{% if account.dashboard_rowspan > 1 %} rowspan="{{ account.dashboard_rowspan }}"{% endif %}>{{ account.name }}</td>
+          <td class="note-cell" data-label="备注"{% if account.dashboard_rowspan > 1 %} rowspan="{{ account.dashboard_rowspan }}"{% endif %}>{{ account.note or "-" }}</td>
+          <td data-label="状态"{% if account.dashboard_rowspan > 1 %} rowspan="{{ account.dashboard_rowspan }}"{% endif %}><span class="status {{ account.last_status }}" data-account-status>{{ account.last_status }}</span></td>
+          {% endif %}
           <td data-account-group-rates data-label="分组倍率">
             {% if account.group_rates %}
             <div class="group-rates">
@@ -150,28 +175,36 @@
             </div>
           </td>
           {% endif %}
-          <td data-account-remaining data-account-remaining-value="{{ account.last_remaining if account.last_remaining is not none else '' }}" data-label="剩余">{{ account.last_remaining if account.last_remaining is not none else "-" }}{% if account.last_remaining is not none %} {{ account.last_unit or "USD" }}{% endif %}</td>
+          {% if account.dashboard_is_first_row %}
+          <td
+            data-account-remaining
+            data-account-remaining-value="{{ account.last_remaining if account.last_remaining is not none else '' }}"
+            data-label="剩余"
+            {% if account.dashboard_rowspan > 1 %}rowspan="{{ account.dashboard_rowspan }}"{% endif %}
+          >{{ account.last_remaining if account.last_remaining is not none else "-" }}{% if account.last_remaining is not none %} {{ account.last_unit or "USD" }}{% endif %}</td>
           <td
             data-account-today-consumption
             data-account-today-consumption-value="{{ account.today_consumption if account.today_consumption is not none else '' }}"
             data-account-today-consumption-unit="{{ account.last_unit or 'USD' }}"
             data-label="今日消耗"
+            {% if account.dashboard_rowspan > 1 %}rowspan="{{ account.dashboard_rowspan }}"{% endif %}
           >{{ account.today_consumption if account.today_consumption is not none else "-" }}{% if account.today_consumption is not none %} {{ account.last_unit or "USD" }}{% endif %}</td>
           <td
             data-account-actual-today-consumption
             data-account-actual-today-consumption-value="{{ account.actual_today_consumption if account.actual_today_consumption is not none else '' }}"
             data-account-actual-today-consumption-unit="{{ account.last_unit or 'USD' }}"
             data-label="今日实际消耗"
+            {% if account.dashboard_rowspan > 1 %}rowspan="{{ account.dashboard_rowspan }}"{% endif %}
           >{{ account.actual_today_consumption if account.actual_today_consumption is not none else "-" }}{% if account.actual_today_consumption is not none %} {{ account.last_unit or "USD" }}{% endif %}</td>
           {% if platform != "sub2Api" %}
-          <td data-account-used data-label="已用">{{ account.last_used if account.last_used is not none else "-" }}</td>
-          <td data-account-total data-label="总额">{{ account.last_total if account.last_total is not none else "-" }}</td>
+          <td data-account-used data-label="已用"{% if account.dashboard_rowspan > 1 %} rowspan="{{ account.dashboard_rowspan }}"{% endif %}>{{ account.last_used if account.last_used is not none else "-" }}</td>
+          <td data-account-total data-label="总额"{% if account.dashboard_rowspan > 1 %} rowspan="{{ account.dashboard_rowspan }}"{% endif %}>{{ account.last_total if account.last_total is not none else "-" }}</td>
           {% endif %}
-          <td data-account-threshold="{{ account.threshold if account.threshold is not none else settings.default_threshold }}" data-label="阈值">{{ account.threshold if account.threshold is not none else settings.default_threshold }}</td>
+          <td data-account-threshold="{{ account.threshold if account.threshold is not none else settings.default_threshold }}" data-label="阈值"{% if account.dashboard_rowspan > 1 %} rowspan="{{ account.dashboard_rowspan }}"{% endif %}>{{ account.threshold if account.threshold is not none else settings.default_threshold }}</td>
           {% set effective_threshold = account.threshold if account.threshold is not none else settings.default_threshold %}
           {% set is_low = (not account.is_eliminated) and account.last_remaining is not none and account.last_remaining < effective_threshold %}
-          <td class="{{ 'low-balance' if is_low else '' }}" data-account-low data-label="低于阈值">{{ "不提醒" if account.is_eliminated else "是" if is_low else "否" }}</td>
-          <td data-label="自动查询">
+          <td class="{{ 'low-balance' if is_low else '' }}" data-account-low data-label="低于阈值"{% if account.dashboard_rowspan > 1 %} rowspan="{{ account.dashboard_rowspan }}"{% endif %}>{{ "不提醒" if account.is_eliminated else "是" if is_low else "否" }}</td>
+          <td data-label="自动查询"{% if account.dashboard_rowspan > 1 %} rowspan="{{ account.dashboard_rowspan }}"{% endif %}>
             <button
               type="button"
               class="toggle-button {{ 'active' if not account.is_enabled else '' }}"
@@ -180,7 +213,7 @@
               aria-pressed="{{ 'true' if account.is_enabled else 'false' }}"
             ><span data-account-enabled-text>{{ "启用" if account.is_enabled else "暂停" }}</span></button>
           </td>
-          <td data-label="是否淘汰">
+          <td data-label="是否淘汰"{% if account.dashboard_rowspan > 1 %} rowspan="{{ account.dashboard_rowspan }}"{% endif %}>
             <button
               type="button"
               class="toggle-button {{ 'active' if account.is_eliminated else '' }}"
@@ -189,26 +222,16 @@
               aria-pressed="{{ 'true' if account.is_eliminated else 'false' }}"
             ><span data-account-eliminated-text>{{ "已淘汰" if account.is_eliminated else "未淘汰" }}</span></button>
           </td>
-          <td data-account-checked-at data-label="最近查询">{{ format_time(account.last_checked_at) }}</td>
+          <td data-account-checked-at data-label="最近查询"{% if account.dashboard_rowspan > 1 %} rowspan="{{ account.dashboard_rowspan }}"{% endif %}>{{ format_time(account.last_checked_at) }}</td>
+          {% endif %}
           <td data-label="操作">
             <div class="actions">
+              {% if account.dashboard_is_first_row %}
               <a class="button-link" href="{{ account.base_url }}" target="_blank" rel="noopener noreferrer">打开</a>
               {% if account.recharge_url %}
               <a class="button-link" href="{{ account.recharge_url }}" target="_blank" rel="noopener noreferrer">充值</a>
               {% endif %}
               <button type="button" data-account-query data-account-id="{{ account.id }}">查询</button>
-              {% if platform in ["sub2Api", "newApi"] %}
-              <button type="button" data-group-query data-account-id="{{ account.id }}">查组</button>
-              {% endif %}
-              {% if platform == "sub2Api" %}
-              <button type="button" data-sub2api-groups data-platform="sub2Api" data-account-id="{{ account.id }}">选择分组</button>
-              {% endif %}
-              {% if platform == "newApi" %}
-              <button type="button" data-newapi-groups data-platform="newApi" data-account-id="{{ account.id }}">重新获取分组</button>
-              {% endif %}
-              {% if platform in ["sub2Api", "newApi"] %}
-              <a class="button-link" href="/accounts/{{ account.id }}/group-rates{% if account.current_monitor_group_id %}?monitor_group_id={{ account.current_monitor_group_id }}{% endif %}">分组变化</a>
-              {% endif %}
               <a class="button-link" href="/accounts?edit_id={{ account.id }}">修改</a>
               <button
                 type="button"
@@ -217,10 +240,21 @@
                 data-account-name="{{ account.name }}"
                 data-account-platform="{{ account.platform }}"
               >余额趋势</button>
+              {% if platform == "sub2Api" %}
+              <button type="button" data-sub2api-groups data-platform="sub2Api" data-account-id="{{ account.id }}">选择分组</button>
+              {% endif %}
+              {% if platform == "newApi" %}
+              <button type="button" data-newapi-groups data-platform="newApi" data-account-id="{{ account.id }}">重新获取分组</button>
+              {% endif %}
+              {% endif %}
+              {% if platform in ["sub2Api", "newApi"] %}
+              <button type="button" data-group-query data-account-id="{{ account.id }}">查组</button>
+              <a class="button-link" href="/accounts/{{ account.id }}/group-rates{% if account.current_monitor_group_id %}?monitor_group_id={{ account.current_monitor_group_id }}{% endif %}">分组变化</a>
+              {% endif %}
             </div>
           </td>
         </tr>
-        {% if account.last_error %}
+        {% if account.dashboard_is_last_row and account.last_error %}
         <tr class="detail-row">
           <td colspan="{{ 14 if platform == 'sub2Api' else 16 if platform == 'newApi' else 15 }}">{{ account.last_error }}</td>
         </tr>
@@ -370,6 +404,13 @@
   };
   const rowsForAccount = (accountId) => Array.from(document.querySelectorAll(`[data-account-id="${String(accountId)}"]`));
   const rowForMonitorGroup = (accountId, monitorGroupId) => rowsForAccount(accountId).find((row) => row.dataset.monitorGroupId === String(monitorGroupId));
+  const accountRowsWithDetail = (accountId) => {
+    const rows = rowsForAccount(accountId);
+    const detailRow = rows[rows.length - 1]?.nextElementSibling?.classList.contains("detail-row")
+      ? rows[rows.length - 1].nextElementSibling
+      : null;
+    return detailRow ? [...rows, detailRow] : rows;
+  };
   const setGroupRateChangeCell = (button, changed) => {
     const row = button.closest("[data-account-row]");
     if (!row) {
@@ -850,26 +891,20 @@
     low.textContent = isLow ? "是" : "否";
     low.classList.toggle("low-balance", isLow);
   };
-  const moveAccountRowForEliminatedState = (row, isEliminated) => {
-    const tbody = row?.parentElement;
+  const moveAccountRowsForEliminatedState = (accountId, isEliminated) => {
+    const rowsToMove = accountRowsWithDetail(accountId);
+    const tbody = rowsToMove[0]?.parentElement;
     if (!tbody) {
       return;
     }
-    const detailRow = row.nextElementSibling?.classList.contains("detail-row") ? row.nextElementSibling : null;
     if (isEliminated) {
-      tbody.appendChild(row);
-      if (detailRow) {
-        tbody.appendChild(detailRow);
-      }
+      rowsToMove.forEach((targetRow) => tbody.appendChild(targetRow));
       return;
     }
     const firstEliminatedRow = Array.from(tbody.querySelectorAll("[data-account-row]"))
-      .find((candidate) => candidate !== row && candidate.dataset.accountEliminated === "true");
+      .find((candidate) => candidate.dataset.accountId !== String(accountId) && candidate.dataset.accountEliminated === "true");
     if (firstEliminatedRow) {
-      tbody.insertBefore(row, firstEliminatedRow);
-      if (detailRow) {
-        tbody.insertBefore(detailRow, firstEliminatedRow);
-      }
+      rowsToMove.forEach((targetRow) => tbody.insertBefore(targetRow, firstEliminatedRow));
     }
   };
   const updateOneBalanceRow = (row, result) => {
@@ -889,6 +924,14 @@
     const stats = result.consumption_stats || result.consumptionStats || {};
     const actualStats = result.actual_consumption_stats || result.actualConsumptionStats || stats;
     const unit = result.unit || row.getAttribute("data-account-consumption-unit") || todayConsumption?.dataset.accountTodayConsumptionUnit || actualTodayConsumption?.dataset.accountActualTodayConsumptionUnit || defaultBalanceUnit;
+    const actualConsumption = actualStats.today ?? result.actual_today_consumption ?? result.actualTodayConsumption;
+    row.setAttribute("data-account-consumption-unit", unit);
+    ["today", "yesterday", "last_24h", "last_7d", "last_14d", "this_month", "last_month"].forEach((period) => {
+      const value = period === "today" ? actualConsumption : actualStats[period];
+      if (value !== undefined) {
+        row.setAttribute(consumptionAttributeName(period), value ?? "");
+      }
+    });
     if (status) {
       status.textContent = isValid ? "valid" : "invalid";
       status.className = `status ${isValid ? "valid" : "invalid"}`;
@@ -907,14 +950,6 @@
       todayConsumption.dataset.accountTodayConsumptionUnit = unit;
     }
     if (actualTodayConsumption) {
-      const actualConsumption = actualStats.today ?? result.actual_today_consumption ?? result.actualTodayConsumption;
-      row.setAttribute("data-account-consumption-unit", unit);
-      ["today", "yesterday", "last_24h", "last_7d", "last_14d", "this_month", "last_month"].forEach((period) => {
-        const value = period === "today" ? actualConsumption : actualStats[period];
-        if (value !== undefined) {
-          row.setAttribute(consumptionAttributeName(period), value ?? "");
-        }
-      });
       actualTodayConsumption.textContent = formatAmountWithUnit(actualConsumption, unit);
       actualTodayConsumption.dataset.accountActualTodayConsumptionValue = actualConsumption ?? "";
       actualTodayConsumption.dataset.accountActualTodayConsumptionUnit = unit;
@@ -1042,8 +1077,8 @@
           setEliminatedButtonState(targetButton, isEliminated);
           const remaining = targetRow.querySelector("[data-account-remaining]")?.dataset.accountRemainingValue;
           updateLowBalanceCell(targetRow, result.account?.last_remaining ?? remaining);
-          moveAccountRowForEliminatedState(targetRow, isEliminated);
         });
+        moveAccountRowsForEliminatedState(button.dataset.accountId, isEliminated);
       } catch (error) {
         if (text) {
           text.textContent = originalText;

@@ -605,12 +605,21 @@ def dashboard_grouped_accounts(account_filter: dict[str, Any] | None = None) -> 
     ).items():
         for account in accounts:
             monitor_groups = account.get("monitor_groups") if isinstance(account.get("monitor_groups"), list) else []
+            account_rows = []
             if monitor_groups:
                 for monitor_group in monitor_groups:
-                    grouped[platform].append(public_dashboard_account(account, monitor_group))
+                    account_rows.append(public_dashboard_account(account, monitor_group))
             else:
-                grouped[platform].append(public_dashboard_account(account, None))
-        grouped[platform].sort(key=lambda item: (1 if item.get("is_eliminated") else 0, str(item.get("name") or "").lower(), str(item.get("current_group_id") or "")))
+                account_rows.append(public_dashboard_account(account, None))
+            row_count = len(account_rows)
+            for index, row in enumerate(account_rows):
+                row["dashboard_rowspan"] = row_count
+                row["dashboardRowspan"] = row_count
+                row["dashboard_is_first_row"] = index == 0
+                row["dashboardIsFirstRow"] = row["dashboard_is_first_row"]
+                row["dashboard_is_last_row"] = index == row_count - 1
+                row["dashboardIsLastRow"] = row["dashboard_is_last_row"]
+                grouped[platform].append(row)
     return grouped
 
 

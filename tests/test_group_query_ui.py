@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -287,6 +288,68 @@ def test_dashboard_shows_group_rate_column(tmp_path, monkeypatch):
     assert 'change-status changed' in dashboard.text
     assert "Basic Plan: 0.8" in dashboard.text
     assert "Pro Plan: 2.0" in dashboard.text
+
+
+def test_dashboard_merges_site_cells_for_multi_group_account(tmp_path, monkeypatch):
+    test_db = Database(str(tmp_path / "app.db"), config.app_secret_key)
+    test_db.init()
+    test_db.ensure_admin("admin", "password123")
+    account_id = test_db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "multi-group-site",
+            "base_url": "https://multi.example",
+            "api_key": "secret",
+            "note": "merged note",
+            "recharge_url": "https://multi.example/recharge",
+        }
+    )
+    test_db.replace_account_monitor_groups(
+        account_id,
+        [
+            {
+                "group_id": "basic",
+                "plan_name": "Basic Plan",
+                "effective_rate_multiplier": 0.8,
+                "last_group_rate_changed": False,
+            },
+            {
+                "group_id": "pro",
+                "plan_name": "Pro Plan",
+                "effective_rate_multiplier": 1.5,
+                "last_group_rate_changed": True,
+            },
+        ],
+    )
+    test_db.update_account_result(account_id, {"is_valid": True, "remaining": 42, "unit": "USD"})
+    monkeypatch.setattr("app.main.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
+
+    async def stop_scheduler():
+        return None
+
+    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+
+    with TestClient(app) as client:
+        client.post("/login", data={"username": "admin", "password": "password123"})
+        dashboard = client.get("/")
+
+    assert dashboard.status_code == 200
+    assert 'data-dashboard-table' in dashboard.text
+    assert 'rowspan="2"' in dashboard.text
+    assert '<td data-label="名称" rowspan="2">multi-group-site</td>' in dashboard.text
+    assert dashboard.text.count("merged note") == 1
+    assert dashboard.text.count('href="https://multi.example"') == 1
+    assert 'data-account-query data-account-id="' in dashboard.text
+    assert dashboard.text.count(f'data-group-query data-account-id="{account_id}"') == 2
+    assert dashboard.text.count(f"/accounts/{account_id}/group-rates") == 2
+    assert "Basic Plan: 0.8" in dashboard.text
+    assert "Pro Plan: 1.5" in dashboard.text
+    styles = Path("app/static/styles.css").read_text(encoding="utf-8")
+    assert "[data-dashboard-table]" in styles
+    assert ".dashboard-table-wrap" in styles
+    assert "min-width: 1900px" in styles
 
 
 def test_dashboard_shows_today_consumption_column(tmp_path, monkeypatch):

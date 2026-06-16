@@ -480,6 +480,55 @@ table {
   min-width: 1120px;
 }
 
+[data-dashboard-table] {
+  table-layout: fixed;
+  min-width: 1900px;
+}
+
+[data-dashboard-table] .dashboard-col-name {
+  width: 140px;
+}
+
+[data-dashboard-table] .dashboard-col-note {
+  width: 180px;
+}
+
+[data-dashboard-table] .dashboard-col-status,
+[data-dashboard-table] .dashboard-col-threshold,
+[data-dashboard-table] .dashboard-col-low,
+[data-dashboard-table] .dashboard-col-enabled,
+[data-dashboard-table] .dashboard-col-eliminated {
+  width: 105px;
+}
+
+[data-dashboard-table] .dashboard-col-group-rates {
+  width: 220px;
+}
+
+[data-dashboard-table] .dashboard-col-group-change {
+  width: 145px;
+}
+
+[data-dashboard-table] .dashboard-col-remaining,
+[data-dashboard-table] .dashboard-col-today,
+[data-dashboard-table] .dashboard-col-actual-today,
+[data-dashboard-table] .dashboard-col-used,
+[data-dashboard-table] .dashboard-col-total {
+  width: 130px;
+}
+
+[data-dashboard-table] .dashboard-col-checked-at {
+  width: 170px;
+}
+
+[data-dashboard-table] .dashboard-col-actions {
+  width: 270px;
+}
+
+[data-dashboard-table] td {
+  vertical-align: top;
+}
+
 [data-accounts-table] th:nth-child(1),
 [data-accounts-table] td:nth-child(1) {
   width: 9%;
@@ -727,6 +776,10 @@ tbody tr:last-child td {
 
 .group-rate-item {
   word-break: break-word;
+}
+
+[data-dashboard-table] .actions {
+  align-items: flex-start;
 }
 
 .low-balance {
@@ -1399,5 +1452,65 @@ pre {
   pre {
     max-height: 64dvh;
     word-break: break-word;
+  }
+
+  .dashboard-table-wrap {
+    overflow-x: auto;
+  }
+
+  [data-dashboard-table] {
+    border-collapse: collapse;
+    display: table;
+    table-layout: fixed;
+  }
+
+  [data-dashboard-table] thead {
+    display: table-header-group;
+  }
+
+  [data-dashboard-table] tbody {
+    display: table-row-group;
+  }
+
+  [data-dashboard-table] tr {
+    border: 0;
+    border-radius: 0;
+    display: table-row;
+    overflow: visible;
+  }
+
+  [data-dashboard-table] th,
+  [data-dashboard-table] td {
+    display: table-cell;
+    padding: 10px 12px;
+    white-space: normal;
+    width: auto;
+    word-break: break-word;
+  }
+
+  [data-dashboard-table] td::before {
+    content: "";
+    display: none;
+  }
+
+  [data-dashboard-table] td:last-child {
+    border-bottom: 1px solid var(--line);
+  }
+
+  [data-dashboard-table] td:last-child .actions {
+    display: flex;
+    min-width: 0;
+  }
+
+  [data-dashboard-table] .empty-row,
+  [data-dashboard-table] .detail-row {
+    display: table-row;
+  }
+
+  [data-dashboard-table] .empty-row td,
+  [data-dashboard-table] .detail-row td {
+    border: 1px solid var(--line);
+    border-radius: 0;
+    display: table-cell;
   }
 }
