@@ -722,7 +722,7 @@ onBeforeUnmount(() => {
         </el-table-column>
         <el-table-column v-if="showColumn(platform, 'remaining')" prop="remaining" label="剩余" width="125">
           <template #default="{ row }">
-            <span>{{ displayValue(row.last_remaining) }}</span>
+            <span class="metric-value">{{ displayValue(row.last_remaining) }}</span>
           </template>
         </el-table-column>
         <el-table-column v-if="showColumn(platform, 'today_consumption')" prop="today_consumption" label="今日消耗" width="125">
@@ -732,7 +732,7 @@ onBeforeUnmount(() => {
         </el-table-column>
         <el-table-column v-if="showColumn(platform, 'actual_today_consumption')" prop="actual_today_consumption" label="今日实际消耗" width="140">
           <template #default="{ row }">
-            <span>{{ displayValue(row.actual_today_consumption) }}</span>
+            <span class="metric-value">{{ displayValue(row.actual_today_consumption) }}</span>
           </template>
         </el-table-column>
         <el-table-column v-if="showColumn(platform, 'used') && platform !== 'sub2Api'" prop="used" label="已用" width="105">

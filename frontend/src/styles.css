@@ -392,6 +392,10 @@ a {
   font-weight: 700;
 }
 
+.metric-value {
+  font-weight: 700;
+}
+
 .danger-text {
   color: var(--danger);
 }
