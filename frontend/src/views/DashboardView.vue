@@ -90,6 +90,33 @@ function lowBalanceText(row) {
   return row.last_remaining !== null && row.last_remaining !== undefined && Number(row.last_remaining) < Number(threshold) ? "是" : "否";
 }
 
+const accountMergedColumns = new Set([
+  "name",
+  "note",
+  "status",
+  "remaining",
+  "today_consumption",
+  "actual_today_consumption",
+  "used",
+  "total",
+  "threshold",
+  "low_balance",
+  "enabled",
+  "eliminated",
+  "checked_at",
+  "account_actions"
+]);
+
+function dashboardSpanMethod({ row, column }) {
+  if (!accountMergedColumns.has(column.property)) {
+    return { rowspan: 1, colspan: 1 };
+  }
+  if (row.dashboard_is_first_row) {
+    return { rowspan: row.dashboard_rowspan || 1, colspan: 1 };
+  }
+  return { rowspan: 0, colspan: 0 };
+}
+
 async function runQueryAll(trigger = "manual") {
   if (queryAllLoading.value || (trigger === "auto" && monitorPaused.value)) {
     return;
@@ -377,20 +404,20 @@ onBeforeUnmount(() => {
         <h2>{{ platform }}</h2>
         <el-tag>{{ accountCount(rows) }} 个账号<span v-if="rows.length !== accountCount(rows)"> / {{ rows.length }} 个分组</span></el-tag>
       </div>
-      <el-table :data="rows" border stripe row-key="dashboard_row_id" style="width: 100%">
-        <el-table-column label="名称" min-width="150" fixed>
+      <el-table :data="rows" border stripe row-key="dashboard_row_id" :span-method="dashboardSpanMethod" style="width: 100%">
+        <el-table-column prop="name" label="名称" min-width="150" fixed>
           <template #default="{ row }">
-            <strong v-if="row.dashboard_is_first_row">{{ row.name }}</strong>
+            <strong>{{ row.name }}</strong>
           </template>
         </el-table-column>
-        <el-table-column label="备注" min-width="170">
+        <el-table-column prop="note" label="备注" min-width="170">
           <template #default="{ row }">
-            <span v-if="row.dashboard_is_first_row" class="note-text">{{ row.note || "-" }}</span>
+            <span class="note-text">{{ row.note || "-" }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="105">
+        <el-table-column prop="status" label="状态" width="105">
           <template #default="{ row }">
-            <el-tag v-if="row.dashboard_is_first_row" class="status-tag" :type="row.last_status === 'valid' ? 'success' : row.last_status === 'invalid' ? 'danger' : 'info'">
+            <el-tag class="status-tag" :type="row.last_status === 'valid' ? 'success' : row.last_status === 'invalid' ? 'danger' : 'info'">
               {{ row.last_status }}
             </el-tag>
           </template>
@@ -405,74 +432,78 @@ onBeforeUnmount(() => {
         <el-table-column v-if="platform === 'newApi' || platform === 'sub2Api'" label="倍率变化" width="130">
           <template #default="{ row }">
             <el-tag :type="row.last_group_rate_changed ? 'danger' : 'info'">{{ row.last_group_rate_changed ? "变化" : "未变化" }}</el-tag>
-            <el-button v-if="row.last_group_rate_changed" link type="primary" @click="resetGroupRate(row)">重置</el-button>
           </template>
         </el-table-column>
-        <el-table-column label="剩余" width="125">
+        <el-table-column prop="remaining" label="剩余" width="125">
           <template #default="{ row }">
-            <span v-if="row.dashboard_is_first_row">{{ amountWithUnit(row.last_remaining, row.last_unit || 'USD') }}</span>
+            <span>{{ amountWithUnit(row.last_remaining, row.last_unit || 'USD') }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="今日消耗" width="125">
+        <el-table-column prop="today_consumption" label="今日消耗" width="125">
           <template #default="{ row }">
-            <span v-if="row.dashboard_is_first_row">{{ amountWithUnit(row.today_consumption, row.last_unit || 'USD') }}</span>
+            <span>{{ amountWithUnit(row.today_consumption, row.last_unit || 'USD') }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="今日实际消耗" width="140">
+        <el-table-column prop="actual_today_consumption" label="今日实际消耗" width="140">
           <template #default="{ row }">
-            <span v-if="row.dashboard_is_first_row">{{ amountWithUnit(row.actual_today_consumption, row.last_unit || 'USD') }}</span>
+            <span>{{ amountWithUnit(row.actual_today_consumption, row.last_unit || 'USD') }}</span>
           </template>
         </el-table-column>
-        <el-table-column v-if="platform !== 'sub2Api'" label="已用" width="105">
+        <el-table-column v-if="platform !== 'sub2Api'" prop="used" label="已用" width="105">
           <template #default="{ row }">
-            <span v-if="row.dashboard_is_first_row">{{ displayValue(row.last_used) }}</span>
+            <span>{{ displayValue(row.last_used) }}</span>
           </template>
         </el-table-column>
-        <el-table-column v-if="platform !== 'sub2Api'" label="总额" width="105">
+        <el-table-column v-if="platform !== 'sub2Api'" prop="total" label="总额" width="105">
           <template #default="{ row }">
-            <span v-if="row.dashboard_is_first_row">{{ displayValue(row.last_total) }}</span>
+            <span>{{ displayValue(row.last_total) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="阈值" width="90">
+        <el-table-column prop="threshold" label="阈值" width="90">
           <template #default="{ row }">
-            <span v-if="row.dashboard_is_first_row">{{ row.threshold ?? settings.default_threshold }}</span>
+            <span>{{ row.threshold ?? settings.default_threshold }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="低于阈值" width="105">
+        <el-table-column prop="low_balance" label="低于阈值" width="105">
           <template #default="{ row }">
-            <span v-if="row.dashboard_is_first_row" :class="{ 'low-balance': lowBalanceText(row) === '是' }">{{ lowBalanceText(row) }}</span>
+            <span :class="{ 'low-balance': lowBalanceText(row) === '是' }">{{ lowBalanceText(row) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="自动查询" width="105">
+        <el-table-column prop="enabled" label="自动查询" width="105">
           <template #default="{ row }">
-            <el-switch v-if="row.dashboard_is_first_row" :model-value="boolValue(row.is_enabled)" @change="toggleEnabled(row)" />
+            <el-switch :model-value="boolValue(row.is_enabled)" @change="toggleEnabled(row)" />
           </template>
         </el-table-column>
-        <el-table-column label="是否淘汰" width="105">
+        <el-table-column prop="eliminated" label="是否淘汰" width="105">
           <template #default="{ row }">
-            <el-switch v-if="row.dashboard_is_first_row" :model-value="boolValue(row.is_eliminated)" @change="toggleEliminated(row)" />
+            <el-switch :model-value="boolValue(row.is_eliminated)" @change="toggleEliminated(row)" />
           </template>
         </el-table-column>
-        <el-table-column label="最近查询" width="165">
+        <el-table-column prop="checked_at" label="最近查询" width="165">
           <template #default="{ row }">
-            <span v-if="row.dashboard_is_first_row">{{ formatTime(row.last_checked_at) }}</span>
+            <span>{{ formatTime(row.last_checked_at) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" min-width="300" fixed="right">
+        <el-table-column prop="account_actions" label="账号操作" min-width="270" fixed="right">
           <template #default="{ row }">
             <div class="table-actions">
-              <template v-if="row.dashboard_is_first_row">
-                <el-button size="small" tag="a" :href="row.base_url" target="_blank">打开</el-button>
-                <el-button v-if="row.recharge_url" size="small" tag="a" :href="row.recharge_url" target="_blank">充值</el-button>
-                <el-button size="small" :loading="row._querying" @click="queryOne(row)">查询</el-button>
-                <el-button size="small" @click="router.push({ path: '/accounts', query: { edit_id: row.id } })">修改</el-button>
-                <el-button size="small" :icon="Money" @click="openBalanceHistory(row)">余额趋势</el-button>
-                <el-button v-if="row.platform === 'newApi' || row.platform === 'sub2Api'" size="small" :loading="row._fetchingGroups" @click="fetchGroups(row)">
-                  {{ row.platform === "newApi" ? "重新获取分组" : "选择分组" }}
-                </el-button>
-              </template>
+              <el-button size="small" tag="a" :href="row.base_url" target="_blank">打开</el-button>
+              <el-button v-if="row.recharge_url" size="small" tag="a" :href="row.recharge_url" target="_blank">充值</el-button>
+              <el-button size="small" :loading="row._querying" @click="queryOne(row)">查询</el-button>
+              <el-button size="small" @click="router.push({ path: '/accounts', query: { edit_id: row.id } })">修改</el-button>
+              <el-button size="small" :icon="Money" @click="openBalanceHistory(row)">余额趋势</el-button>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column v-if="platform === 'newApi' || platform === 'sub2Api'" label="分组操作" min-width="210" fixed="right">
+          <template #default="{ row }">
+            <div class="table-actions group-actions">
+              <el-button v-if="row.dashboard_is_first_row" size="small" :loading="row._fetchingGroups" @click="fetchGroups(row)">
+                {{ row.platform === "newApi" ? "重新获取分组" : "选择分组" }}
+              </el-button>
               <el-button v-if="row.platform === 'newApi' || row.platform === 'sub2Api'" size="small" :loading="row._groupQuerying" @click="queryGroup(row)">查组</el-button>
               <el-button v-if="row.platform === 'newApi' || row.platform === 'sub2Api'" size="small" @click="router.push({ name: 'group-rates', params: { id: row.id }, query: row.current_monitor_group_id ? { monitor_group_id: row.current_monitor_group_id } : {} })">分组变化</el-button>
+              <el-button v-if="row.last_group_rate_changed" size="small" link type="primary" @click="resetGroupRate(row)">重置</el-button>
             </div>
           </template>
         </el-table-column>

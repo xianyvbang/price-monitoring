@@ -193,6 +193,18 @@ a {
   gap: 6px;
 }
 
+.table-actions .el-button + .el-button {
+  margin-left: 0;
+}
+
+.group-actions {
+  align-items: flex-start;
+}
+
+.table-card .el-table__cell {
+  vertical-align: middle;
+}
+
 .status-tag {
   text-transform: lowercase;
 }
