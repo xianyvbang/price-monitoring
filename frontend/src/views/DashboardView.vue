@@ -5,7 +5,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { Money, Refresh, VideoPause, VideoPlay } from "@element-plus/icons-vue";
 import { api } from "../api";
 import GroupPickerDialog from "../components/GroupPickerDialog.vue";
-import { amountWithUnit, boolValue, displayValue, formatTime } from "../utils";
+import { boolValue, displayValue, formatTime } from "../utils";
 
 const route = useRoute();
 const router = useRouter();
@@ -436,17 +436,17 @@ onBeforeUnmount(() => {
         </el-table-column>
         <el-table-column prop="remaining" label="剩余" width="125">
           <template #default="{ row }">
-            <span>{{ amountWithUnit(row.last_remaining, row.last_unit || 'USD') }}</span>
+            <span>{{ displayValue(row.last_remaining) }}</span>
           </template>
         </el-table-column>
         <el-table-column prop="today_consumption" label="今日消耗" width="125">
           <template #default="{ row }">
-            <span>{{ amountWithUnit(row.today_consumption, row.last_unit || 'USD') }}</span>
+            <span>{{ displayValue(row.today_consumption) }}</span>
           </template>
         </el-table-column>
         <el-table-column prop="actual_today_consumption" label="今日实际消耗" width="140">
           <template #default="{ row }">
-            <span>{{ amountWithUnit(row.actual_today_consumption, row.last_unit || 'USD') }}</span>
+            <span>{{ displayValue(row.actual_today_consumption) }}</span>
           </template>
         </el-table-column>
         <el-table-column v-if="platform !== 'sub2Api'" prop="used" label="已用" width="105">
