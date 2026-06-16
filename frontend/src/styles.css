@@ -60,8 +60,23 @@ a {
   display: inline-flex;
   font-size: 18px;
   font-weight: 800;
-  gap: 8px;
+  gap: 10px;
   white-space: nowrap;
+}
+
+.brand-mark {
+  display: block;
+  flex: none;
+  height: 30px;
+  width: 30px;
+  filter: drop-shadow(0 10px 16px rgba(37, 99, 235, 0.28));
+}
+
+.brand-text {
+  background: linear-gradient(135deg, #153a8a 0%, #2563eb 58%, #0f766e 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }
 
 .nav-menu {
@@ -431,7 +446,27 @@ a {
 
 .login-panel h1 {
   font-size: 24px;
-  margin: 0 0 18px;
+  margin: 0;
+}
+
+.login-brand {
+  align-items: center;
+  display: flex;
+  gap: 14px;
+  margin-bottom: 20px;
+}
+
+.login-brand-mark {
+  display: block;
+  flex: none;
+  height: 56px;
+  width: 56px;
+  filter: drop-shadow(0 16px 24px rgba(17, 133, 238, 0.28));
+}
+
+.login-brand-copy p {
+  color: var(--muted);
+  margin: 4px 0 0;
 }
 
 .chart-box {

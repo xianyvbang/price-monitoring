@@ -83,13 +83,27 @@ a {
 }
 
 .brand {
+  align-items: center;
+  display: inline-flex;
+  gap: 12px;
   font-size: 18px;
   font-weight: 800;
   letter-spacing: 0.2px;
+}
+
+.brand span {
   background: linear-gradient(120deg, var(--primary), #7aa2ff);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
+}
+
+.brand-mark {
+  display: block;
+  flex: none;
+  height: 30px;
+  width: 30px;
+  filter: drop-shadow(0 10px 16px rgba(59, 108, 255, 0.24));
 }
 
 .nav {

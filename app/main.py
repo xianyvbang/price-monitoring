@@ -41,6 +41,10 @@ scheduler = BalanceScheduler(db)
 FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
 FRONTEND_INDEX = FRONTEND_DIR / "index.html"
 FRONTEND_ASSETS_DIR = FRONTEND_DIR / "assets"
+FRONTEND_SOURCE_DIR = Path(__file__).resolve().parent.parent / "frontend"
+FRONTEND_PUBLIC_DIR = FRONTEND_SOURCE_DIR / "public"
+FRONTEND_FAVICON = FRONTEND_DIR / "favicon.svg"
+SOURCE_FAVICON = FRONTEND_PUBLIC_DIR / "favicon.svg"
 SENSITIVE_HEADER_NAMES = {"authorization", "cookie", "set-cookie"}
 SENSITIVE_FIELD_NAMES = {
     "api_key",
@@ -114,6 +118,20 @@ async def health():
     return {"ok": True}
 
 
+@app.get("/favicon.svg", include_in_schema=False)
+async def favicon_svg():
+    if FRONTEND_FAVICON.exists():
+        return FileResponse(FRONTEND_FAVICON, media_type="image/svg+xml")
+    if SOURCE_FAVICON.exists():
+        return FileResponse(SOURCE_FAVICON, media_type="image/svg+xml")
+    raise HTTPException(status_code=404, detail="favicon not found")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon_ico():
+    return RedirectResponse("/favicon.svg", status_code=307)
+
+
 @app.get("/api/session")
 async def api_session(request: Request):
     user = current_user(request)
@@ -176,6 +194,8 @@ def spa_response() -> FileResponse | HTMLResponse:
           <head>
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
+            <meta name="theme-color" content="#0b67ef">
+            <link rel="icon" type="image/svg+xml" href="/favicon.svg">
             <title>余额监控</title>
           </head>
           <body>
@@ -239,7 +259,7 @@ def should_log_http_request(request: Request) -> bool:
     path = request.url.path
     if path == "/assets" or path.startswith("/assets/"):
         return False
-    if path == "/favicon.ico":
+    if path == "/favicon.ico" or path == "/favicon.svg":
         return False
     if path == "/static" or path.startswith("/static/"):
         return False

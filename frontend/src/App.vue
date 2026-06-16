@@ -2,7 +2,7 @@
 import { computed, onMounted, provide, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
-import { HomeFilled, List, Monitor, Setting, SwitchButton, Tickets } from "@element-plus/icons-vue";
+import { HomeFilled, List, Setting, SwitchButton, Tickets } from "@element-plus/icons-vue";
 import { api } from "./api";
 
 const router = useRouter();
@@ -62,8 +62,8 @@ onMounted(refreshSession);
   <el-container class="app-shell" :class="{ 'is-login': isLogin }">
     <el-header v-if="!isLogin && session.authenticated" class="topbar">
       <router-link class="brand" to="/">
-        <el-icon><Monitor /></el-icon>
-        <span>余额监控</span>
+        <img class="brand-mark" src="/favicon.svg" alt="" />
+        <span class="brand-text">余额监控</span>
       </router-link>
       <el-menu :default-active="route.path" mode="horizontal" router class="nav-menu" :ellipsis="false">
         <el-menu-item index="/">

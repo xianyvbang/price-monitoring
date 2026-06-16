@@ -29,7 +29,13 @@ async function submit() {
 <template>
   <section class="login-page">
     <el-form class="login-panel" :model="form" label-position="top" @submit.prevent="submit">
-      <h1>管理员登录</h1>
+      <div class="login-brand">
+        <img class="login-brand-mark" src="/favicon.svg" alt="" />
+        <div class="login-brand-copy">
+          <h1>余额监控</h1>
+          <p>管理员登录</p>
+        </div>
+      </div>
       <el-alert v-if="route.query.message === 'password_changed'" title="密码已更新，请使用新密码登录。" type="success" show-icon :closable="false" />
       <el-form-item label="用户名">
         <el-input v-model="form.username" :prefix-icon="User" autocomplete="username" />

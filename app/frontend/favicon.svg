@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="10" y1="8" x2="56" y2="58" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0F5BFF"/>
+      <stop offset="0.56" stop-color="#1185EE"/>
+      <stop offset="1" stop-color="#13C6B4"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="16" y1="14" x2="47" y2="50" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fff" stop-opacity=".32"/>
+      <stop offset="1" stop-color="#fff" stop-opacity=".06"/>
+    </linearGradient>
+    <linearGradient id="trend" x1="18" y1="40" x2="46" y2="22" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fff"/>
+      <stop offset="1" stop-color="#DFFAFF"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="56" height="56" rx="18" fill="url(#bg)"/>
+  <rect x="4.75" y="4.75" width="54.5" height="54.5" rx="17.25" stroke="#fff" stroke-opacity=".18" stroke-width="1.5"/>
+  <path d="M16 18c0-3.314 2.686-6 6-6h20c3.314 0 6 2.686 6 6v20c0 6.627-5.373 12-12 12H22c-3.314 0-6-2.686-6-6V18Z" fill="url(#sheen)"/>
+  <rect x="18" y="37" width="6" height="9" rx="3" fill="#fff" fill-opacity=".25"/>
+  <rect x="28" y="31" width="6" height="15" rx="3" fill="#fff" fill-opacity=".3"/>
+  <rect x="38" y="25" width="6" height="21" rx="3" fill="#fff" fill-opacity=".38"/>
+  <path d="M18 40.5 28 32l8.5 3.5L46 22" stroke="url(#trend)" stroke-linecap="round" stroke-linejoin="round" stroke-width="4.5"/>
+  <circle cx="18" cy="40.5" r="3" fill="#fff" fill-opacity=".9"/>
+  <circle cx="46" cy="22" r="4.5" fill="#ECFEFF"/>
+  <circle cx="46" cy="22" r="2.2" fill="#1197EA"/>
+  <path d="M20 48h25" stroke="#fff" stroke-linecap="round" stroke-opacity=".2" stroke-width="2.5"/>
+</svg>
