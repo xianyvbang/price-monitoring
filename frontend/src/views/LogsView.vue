@@ -3,6 +3,7 @@ import { onMounted, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Delete, Refresh } from "@element-plus/icons-vue";
 import { api } from "../api";
+import { useViewport } from "../composables/useViewport";
 
 const loading = ref(false);
 const logs = ref([]);
@@ -12,6 +13,7 @@ const pagination = reactive({
   total: 0,
   total_pages: 1
 });
+const { isMobile } = useViewport();
 
 async function loadLogs(page = pagination.page) {
   loading.value = true;
@@ -56,22 +58,41 @@ onMounted(() => loadLogs(1));
     </div>
 
     <div class="panel table-card">
-      <el-table v-loading="loading" :data="logs" border stripe row-key="id" style="width: 100%">
-        <el-table-column label="时间" prop="created_at_formatted" width="180" />
-        <el-table-column label="级别" width="100">
-          <template #default="{ row }"><el-tag :type="levelType(row.level)">{{ row.level }}</el-tag></template>
-        </el-table-column>
-        <el-table-column label="分类" prop="category" width="140" />
-        <el-table-column label="内容" min-width="420">
-          <template #default="{ row }"><span class="note-text">{{ row.message }}</span></template>
-        </el-table-column>
-      </el-table>
+      <template v-if="!isMobile">
+        <el-table v-loading="loading" :data="logs" border stripe row-key="id" style="width: 100%">
+          <el-table-column label="时间" prop="created_at_formatted" width="180" />
+          <el-table-column label="级别" width="100">
+            <template #default="{ row }"><el-tag :type="levelType(row.level)">{{ row.level }}</el-tag></template>
+          </el-table-column>
+          <el-table-column label="分类" prop="category" width="140" />
+          <el-table-column label="内容" min-width="420">
+            <template #default="{ row }"><span class="note-text">{{ row.message }}</span></template>
+          </el-table-column>
+        </el-table>
+      </template>
+      <div v-else class="mobile-stack">
+        <article v-for="row in logs" :key="row.id" class="mobile-card">
+          <div class="mobile-card-head">
+            <div class="mobile-card-title">
+              <strong>{{ row.category || "-" }}</strong>
+              <div class="mobile-card-meta">
+                <span>{{ row.created_at_formatted }}</span>
+              </div>
+            </div>
+            <el-tag :type="levelType(row.level)">{{ row.level }}</el-tag>
+          </div>
+          <div class="mobile-field">
+            <span>内容</span>
+            <strong class="note-text">{{ row.message }}</strong>
+          </div>
+        </article>
+      </div>
       <el-pagination
         v-model:current-page="pagination.page"
         :page-size="pagination.page_size"
         :total="pagination.total"
-        layout="prev, pager, next, total"
-        style="justify-content: flex-end; margin-top: 14px"
+        :layout="isMobile ? 'prev, next, total' : 'prev, pager, next, total'"
+        class="logs-pagination"
         @current-change="loadLogs"
       />
     </div>

@@ -88,7 +88,7 @@ defineExpose({ open });
   <el-dialog v-model="visible" :title="form.id ? '编辑账号' : mode === 'copy' ? '复制账号' : '添加账号'" width="760px">
     <el-form ref="formRef" :model="form" :rules="rules" label-position="top">
       <el-row :gutter="12">
-        <el-col :span="8">
+        <el-col :xs="24" :md="8">
           <el-form-item label="平台" prop="platform">
             <el-select v-model="form.platform" style="width: 100%">
               <el-option label="newApi" value="newApi" />
@@ -96,7 +96,7 @@ defineExpose({ open });
             </el-select>
           </el-form-item>
         </el-col>
-        <el-col :span="16">
+        <el-col :xs="24" :md="16">
           <el-form-item label="名称" prop="name">
             <el-input v-model="form.name" />
           </el-form-item>
@@ -109,12 +109,12 @@ defineExpose({ open });
         <el-input v-model="form.recharge_url" />
       </el-form-item>
       <el-row :gutter="12">
-        <el-col :span="12">
+        <el-col :xs="24" :md="12">
           <el-form-item label="充值金额">
             <el-input-number v-model="form.recharge_paid_amount" :min="0.000001" :step="0.000001" :precision="6" style="width: 100%" />
           </el-form-item>
         </el-col>
-        <el-col :span="12">
+        <el-col :xs="24" :md="12">
           <el-form-item label="实际得到金额">
             <el-input-number v-model="form.recharge_received_amount" :min="0.000001" :step="0.000001" :precision="6" style="width: 100%" />
           </el-form-item>
@@ -130,12 +130,12 @@ defineExpose({ open });
         <el-input v-model="form.api_key" type="password" show-password autocomplete="off" placeholder="留空则不修改已保存密钥" />
       </el-form-item>
       <el-row v-if="form.platform === 'sub2Api'" :gutter="12">
-        <el-col :span="12">
+        <el-col :xs="24" :md="12">
           <el-form-item label="sub2Api email">
             <el-input v-model="form.email" autocomplete="username" />
           </el-form-item>
         </el-col>
-        <el-col :span="12">
+        <el-col :xs="24" :md="12">
           <el-form-item label="sub2Api password">
             <el-input v-model="form.password" type="password" show-password autocomplete="current-password" placeholder="留空则不修改" />
           </el-form-item>
@@ -151,17 +151,17 @@ defineExpose({ open });
         <el-input v-model="form.user_id" />
       </el-form-item>
       <el-row :gutter="12">
-        <el-col :span="8">
+        <el-col :xs="24" :md="8">
           <el-form-item label="预警阈值">
             <el-input-number v-model="form.threshold" :min="0" :step="0.01" style="width: 100%" />
           </el-form-item>
         </el-col>
-        <el-col :span="8">
+        <el-col :xs="24" :md="8">
           <el-form-item label="显示在仪表盘">
             <el-switch v-model="form.is_visible" active-text="显示" inactive-text="隐藏" @change="syncEnabled" />
           </el-form-item>
         </el-col>
-        <el-col :span="8">
+        <el-col :xs="24" :md="8">
           <el-form-item label="自动查询">
             <el-switch v-model="form.is_enabled" :disabled="!form.is_visible" active-text="启用" inactive-text="暂停" />
           </el-form-item>

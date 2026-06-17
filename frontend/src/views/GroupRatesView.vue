@@ -4,6 +4,7 @@ import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { ArrowLeft, View } from "@element-plus/icons-vue";
 import { api } from "../api";
+import { useViewport } from "../composables/useViewport";
 import { displayValue, formatTime, parseJsonLoose } from "../utils";
 
 const route = useRoute();
@@ -14,6 +15,7 @@ const monitorGroup = ref(null);
 const records = ref([]);
 const jsonDialogVisible = ref(false);
 const activeJson = ref("");
+const { isMobile } = useViewport();
 
 async function loadRecords() {
   loading.value = true;
@@ -52,20 +54,38 @@ onMounted(loadRecords);
     </div>
 
     <div class="panel table-card">
-      <el-table :data="records" border stripe style="width: 100%">
-        <el-table-column label="名称" prop="plan_name" min-width="220" />
-        <el-table-column label="分组倍率" width="140">
-          <template #default="{ row }">{{ displayValue(row.rate_multiplier) }}</template>
-        </el-table-column>
-        <el-table-column label="查询时间" width="180">
-          <template #default="{ row }">{{ formatTime(row.checked_at) }}</template>
-        </el-table-column>
-        <el-table-column label="操作" width="130">
-          <template #default="{ row }">
+      <template v-if="!isMobile">
+        <el-table :data="records" border stripe style="width: 100%">
+          <el-table-column label="名称" prop="plan_name" min-width="220" />
+          <el-table-column label="分组倍率" width="140">
+            <template #default="{ row }">{{ displayValue(row.rate_multiplier) }}</template>
+          </el-table-column>
+          <el-table-column label="查询时间" width="180">
+            <template #default="{ row }">{{ formatTime(row.checked_at) }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="130">
+            <template #default="{ row }">
+              <el-button size="small" :icon="View" @click="showJson(row)">查看 JSON</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </template>
+      <div v-else class="mobile-stack">
+        <article v-for="row in records" :key="`${row.plan_name}-${row.checked_at}`" class="mobile-card">
+          <div class="mobile-card-head">
+            <div class="mobile-card-title">
+              <strong>{{ row.plan_name }}</strong>
+              <div class="mobile-card-meta">
+                <span>{{ formatTime(row.checked_at) }}</span>
+              </div>
+            </div>
+            <el-tag>倍率 {{ displayValue(row.rate_multiplier) }}</el-tag>
+          </div>
+          <div class="mobile-actions">
             <el-button size="small" :icon="View" @click="showJson(row)">查看 JSON</el-button>
-          </template>
-        </el-table-column>
-      </el-table>
+          </div>
+        </article>
+      </div>
     </div>
 
     <el-dialog v-model="jsonDialogVisible" title="接口摘要 JSON" width="760px">

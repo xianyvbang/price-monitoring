@@ -6,6 +6,7 @@ import { CopyDocument, Delete, Edit, Plus, Upload } from "@element-plus/icons-vu
 import { api } from "../api";
 import AccountDialog from "../components/AccountDialog.vue";
 import GroupPickerDialog from "../components/GroupPickerDialog.vue";
+import { useViewport } from "../composables/useViewport";
 import { accountCredentialsText, boolValue, displayValue, platforms } from "../utils";
 
 const route = useRoute();
@@ -24,6 +25,7 @@ const bulkForm = reactive({
   platform: "newApi",
   bulk_text: ""
 });
+const { isMobile } = useViewport();
 
 async function loadAccounts() {
   loading.value = true;
@@ -175,6 +177,10 @@ function bulkPlaceholder(platform) {
   return "JSON 数组，或 CSV 行：name,baseUrl,accessToken,userId,threshold,note,rechargeUrl";
 }
 
+function mobileAccounts(platform) {
+  return rows(platform);
+}
+
 onMounted(async () => {
   await loadAccounts();
   if (route.query.edit_id) {
@@ -222,55 +228,117 @@ onMounted(async () => {
         <h2>{{ platform }}</h2>
         <el-tag>{{ rows(platform).length }} 个账号</el-tag>
       </div>
-      <el-table :data="rows(platform)" border stripe row-key="id" style="width: 100%">
-        <el-table-column label="名称" min-width="150" fixed>
-          <template #default="{ row }"><strong>{{ row.name }}</strong></template>
-        </el-table-column>
-        <el-table-column label="备注" min-width="160">
-          <template #default="{ row }"><span class="note-text">{{ row.note || "-" }}</span></template>
-        </el-table-column>
-        <el-table-column label="Base URL" min-width="210">
-          <template #default="{ row }"><span class="url-text">{{ row.base_url }}</span></template>
-        </el-table-column>
-        <el-table-column label="充值路径" width="105">
-          <template #default="{ row }">
-            <el-button v-if="row.recharge_url" link type="success" tag="a" :href="row.recharge_url" target="_blank">充值</el-button>
-            <span v-else>-</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="充值比例" width="110">
-          <template #default="{ row }">{{ row.recharge_paid_amount || 1 }}:{{ row.recharge_received_amount || 1 }}</template>
-        </el-table-column>
-        <el-table-column label="凭据" min-width="330">
-          <template #default="{ row }"><span class="credentials-text">{{ accountCredentialsText(row) }}</span></template>
-        </el-table-column>
-        <el-table-column label="阈值" width="90">
-          <template #default="{ row }">{{ displayValue(row.threshold) }}</template>
-        </el-table-column>
-        <el-table-column label="仪表盘显示" width="120">
-          <template #default="{ row }">
-            <el-switch :model-value="boolValue(row.is_visible)" @change="toggleVisible(row)" />
-          </template>
-        </el-table-column>
-        <el-table-column label="自动查询" width="105">
-          <template #default="{ row }">
-            <el-switch :model-value="boolValue(row.is_enabled)" :disabled="!boolValue(row.is_visible)" @change="toggleEnabled(row)" />
-          </template>
-        </el-table-column>
-        <el-table-column label="操作" min-width="280" fixed="right">
-          <template #default="{ row }">
-            <div class="table-actions">
-              <el-button size="small" :icon="Edit" @click="openEdit(row)">编辑</el-button>
-              <el-button size="small" :icon="CopyDocument" @click="openCopy(row)">复制</el-button>
-              <el-button v-if="row.platform === 'sub2Api'" size="small" :loading="row._groupQuerying" @click="queryGroup(row)">查组</el-button>
-              <el-button v-if="row.platform === 'newApi' || row.platform === 'sub2Api'" size="small" :loading="row._fetchingGroups" @click="fetchGroups(row)">
-                {{ row.platform === "newApi" ? "重新获取分组" : "选择分组" }}
-              </el-button>
-              <el-button size="small" type="danger" :icon="Delete" @click="deleteAccount(row)">删除</el-button>
+      <template v-if="!isMobile">
+        <el-table :data="rows(platform)" border stripe row-key="id" style="width: 100%">
+          <el-table-column label="名称" min-width="150" fixed>
+            <template #default="{ row }"><strong>{{ row.name }}</strong></template>
+          </el-table-column>
+          <el-table-column label="备注" min-width="160">
+            <template #default="{ row }"><span class="note-text">{{ row.note || "-" }}</span></template>
+          </el-table-column>
+          <el-table-column label="Base URL" min-width="210">
+            <template #default="{ row }"><span class="url-text">{{ row.base_url }}</span></template>
+          </el-table-column>
+          <el-table-column label="充值路径" width="105">
+            <template #default="{ row }">
+              <el-button v-if="row.recharge_url" link type="success" tag="a" :href="row.recharge_url" target="_blank">充值</el-button>
+              <span v-else>-</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="充值比例" width="110">
+            <template #default="{ row }">{{ row.recharge_paid_amount || 1 }}:{{ row.recharge_received_amount || 1 }}</template>
+          </el-table-column>
+          <el-table-column label="凭据" min-width="330">
+            <template #default="{ row }"><span class="credentials-text">{{ accountCredentialsText(row) }}</span></template>
+          </el-table-column>
+          <el-table-column label="阈值" width="90">
+            <template #default="{ row }">{{ displayValue(row.threshold) }}</template>
+          </el-table-column>
+          <el-table-column label="仪表盘显示" width="120">
+            <template #default="{ row }">
+              <el-switch :model-value="boolValue(row.is_visible)" @change="toggleVisible(row)" />
+            </template>
+          </el-table-column>
+          <el-table-column label="自动查询" width="105">
+            <template #default="{ row }">
+              <el-switch :model-value="boolValue(row.is_enabled)" :disabled="!boolValue(row.is_visible)" @change="toggleEnabled(row)" />
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" min-width="280" fixed="right">
+            <template #default="{ row }">
+              <div class="table-actions">
+                <el-button size="small" :icon="Edit" @click="openEdit(row)">编辑</el-button>
+                <el-button size="small" :icon="CopyDocument" @click="openCopy(row)">复制</el-button>
+                <el-button v-if="row.platform === 'sub2Api'" size="small" :loading="row._groupQuerying" @click="queryGroup(row)">查组</el-button>
+                <el-button v-if="row.platform === 'newApi' || row.platform === 'sub2Api'" size="small" :loading="row._fetchingGroups" @click="fetchGroups(row)">
+                  {{ row.platform === "newApi" ? "重新获取分组" : "选择分组" }}
+                </el-button>
+                <el-button size="small" type="danger" :icon="Delete" @click="deleteAccount(row)">删除</el-button>
+              </div>
+            </template>
+          </el-table-column>
+        </el-table>
+      </template>
+      <div v-else class="mobile-stack">
+        <article v-for="row in mobileAccounts(platform)" :key="row.id" class="mobile-card">
+          <div class="mobile-card-head">
+            <div class="mobile-card-title">
+              <strong>{{ row.name }}</strong>
+              <div class="mobile-card-meta">
+                <span>{{ row.note || "-" }}</span>
+                <span>{{ row.base_url }}</span>
+              </div>
             </div>
-          </template>
-        </el-table-column>
-      </el-table>
+            <el-tag>{{ row.platform }}</el-tag>
+          </div>
+
+          <div class="mobile-metrics">
+            <div class="mobile-metric">
+              <span>充值比例</span>
+              <strong>{{ row.recharge_paid_amount || 1 }} : {{ row.recharge_received_amount || 1 }}</strong>
+            </div>
+            <div class="mobile-metric">
+              <span>阈值</span>
+              <strong>{{ displayValue(row.threshold) }}</strong>
+            </div>
+          </div>
+
+          <div class="mobile-field-list">
+            <div class="mobile-field">
+              <span>凭据</span>
+              <strong class="credentials-text">{{ accountCredentialsText(row) }}</strong>
+            </div>
+            <div class="mobile-field">
+              <span>充值路径</span>
+              <strong>
+                <el-button v-if="row.recharge_url" link type="success" tag="a" :href="row.recharge_url" target="_blank">打开</el-button>
+                <span v-else>-</span>
+              </strong>
+            </div>
+          </div>
+
+          <div class="mobile-switches">
+            <div class="mobile-switch-row">
+              <span>仪表盘显示</span>
+              <el-switch :model-value="boolValue(row.is_visible)" @change="toggleVisible(row)" />
+            </div>
+            <div class="mobile-switch-row">
+              <span>自动查询</span>
+              <el-switch :model-value="boolValue(row.is_enabled)" :disabled="!boolValue(row.is_visible)" @change="toggleEnabled(row)" />
+            </div>
+          </div>
+
+          <div class="mobile-actions">
+            <el-button size="small" :icon="Edit" @click="openEdit(row)">编辑</el-button>
+            <el-button size="small" :icon="CopyDocument" @click="openCopy(row)">复制</el-button>
+            <el-button v-if="row.platform === 'sub2Api'" size="small" :loading="row._groupQuerying" @click="queryGroup(row)">查组</el-button>
+            <el-button v-if="row.platform === 'newApi' || row.platform === 'sub2Api'" size="small" :loading="row._fetchingGroups" @click="fetchGroups(row)">
+              {{ row.platform === "newApi" ? "重新获取分组" : "选择分组" }}
+            </el-button>
+            <el-button size="small" type="danger" :icon="Delete" @click="deleteAccount(row)">删除</el-button>
+          </div>
+        </article>
+      </div>
     </div>
 
     <AccountDialog ref="accountDialog" @saved="upsertLocal" @pick-groups="groupPicker.open($event)" />

@@ -117,7 +117,7 @@ onMounted(loadSettings);
     </div>
 
     <el-row :gutter="16">
-      <el-col :xs="24" :lg="12">
+      <el-col :xs="24" :lg="12" class="settings-col">
         <el-card class="panel-card">
           <template #header>
             <strong><el-icon><Setting /></el-icon> 查询设置</strong>
@@ -143,17 +143,17 @@ onMounted(loadSettings);
         </el-card>
       </el-col>
 
-      <el-col :xs="24" :lg="12">
+      <el-col :xs="24" :lg="12" class="settings-col">
         <el-card class="panel-card">
           <template #header>
             <strong><el-icon><Message /></el-icon> SMTP 邮件</strong>
           </template>
           <el-form :model="smtp" label-position="top" @submit.prevent="saveSmtp">
             <el-row :gutter="12">
-              <el-col :span="16">
+              <el-col :xs="24" :md="16">
                 <el-form-item label="Host"><el-input v-model="smtp.host" /></el-form-item>
               </el-col>
-              <el-col :span="8">
+              <el-col :xs="24" :md="8">
                 <el-form-item label="Port"><el-input-number v-model="smtp.port" :min="1" style="width: 100%" /></el-form-item>
               </el-col>
             </el-row>
@@ -162,8 +162,8 @@ onMounted(loadSettings);
               <el-input v-model="smtp.password" type="password" show-password :placeholder="smtp.has_password ? '已配置，留空不修改' : ''" />
             </el-form-item>
             <el-row :gutter="12">
-              <el-col :span="12"><el-form-item label="Sender"><el-input v-model="smtp.sender" /></el-form-item></el-col>
-              <el-col :span="12"><el-form-item label="Sender Name"><el-input v-model="smtp.sender_name" /></el-form-item></el-col>
+              <el-col :xs="24" :md="12"><el-form-item label="Sender"><el-input v-model="smtp.sender" /></el-form-item></el-col>
+              <el-col :xs="24" :md="12"><el-form-item label="Sender Name"><el-input v-model="smtp.sender_name" /></el-form-item></el-col>
             </el-row>
             <el-form-item label="Receiver"><el-input v-model="smtp.receiver" /></el-form-item>
             <el-form-item label="安全模式">
@@ -182,8 +182,8 @@ onMounted(loadSettings);
       </el-col>
     </el-row>
 
-    <el-row :gutter="16" style="margin-top: 16px">
-      <el-col :xs="24" :lg="12">
+    <el-row :gutter="16" class="settings-bottom">
+      <el-col :xs="24" :lg="12" class="settings-col">
         <el-card class="panel-card">
           <template #header><strong>修改登录密码</strong></template>
           <el-form :model="password" label-position="top" @submit.prevent="changePassword">

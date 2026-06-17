@@ -78,8 +78,10 @@ defineExpose({ open });
     <el-empty v-if="!groups.length" description="暂无可选分组" />
     <el-checkbox-group v-else v-model="selected" class="group-option-list">
       <el-checkbox v-for="group in groups" :key="groupId(group)" :label="groupId(group)" border class="group-option">
-        <span>{{ groupLabel(group) }}</span>
-        <small class="muted">ID: {{ groupId(group) }} · 倍率 {{ rateLabel(group) }}</small>
+        <div class="group-option-copy">
+          <span class="group-option-title">{{ groupLabel(group) }}</span>
+          <small class="muted">ID: {{ groupId(group) }} · 倍率 {{ rateLabel(group) }}</small>
+        </div>
       </el-checkbox>
     </el-checkbox-group>
     <template #footer>
