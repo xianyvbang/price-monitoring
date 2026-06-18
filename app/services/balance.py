@@ -171,8 +171,8 @@ async def _query_sub2api_group(account: Any, secret_key: str, timeout: float, lo
         used_cached_token = bool(token_state.get("used_cached_token"))
         used_configured_token = bool(token_state.get("used_configured_token"))
         if not token:
-            token_result = await _login_sub2api(client, base_url, email, password, token_cache_key, log, account)
-            if isinstance(token_result, dict):
+            token_result = await _login_sub2api_token_state(client, base_url, email, password, token_cache_key, log, account)
+            if token_result.get("is_valid") is False:
                 return token_result
             token = token_result["access_token"]
             token_state = token_result
@@ -188,27 +188,29 @@ async def _query_sub2api_group(account: Any, secret_key: str, timeout: float, lo
                 )
             available_groups = [_summarize_group(group, rates) for group in groups]
         except httpx.HTTPError:
-            if used_configured_token:
-                return normalize_result({"is_valid": False, "invalid_message": _configured_sub2api_token_error_message(base_url)})
-            if not used_cached_token:
+            if not (
+                used_configured_token
+                or used_cached_token
+                or token_state.get("used_refresh_token")
+            ):
                 raise
-            _SUB2API_TOKEN_CACHE.pop(token_cache_key, None)
-            token_result = await _resolve_sub2api_access_token(
+            if used_cached_token:
+                _SUB2API_TOKEN_CACHE.pop(token_cache_key, None)
+            token_result = await _recover_sub2api_token_after_access_failure(
                 client,
                 base_url,
-                configured_access_token,
-                configured_refresh_token,
+                configured_refresh_token if used_configured_token else token_state.get("refresh_token"),
                 email,
                 password,
                 token_cache_key,
                 log,
                 account,
+                allow_refresh=not bool(token_state.get("used_refresh_token")),
             )
-            if isinstance(token_result, dict):
-                if token_result.get("is_valid") is False:
-                    return token_result
-                token = token_result["access_token"]
-                token_state = token_result
+            if token_result.get("is_valid") is False:
+                return token_result
+            token = token_result["access_token"]
+            token_state = token_result
             groups_payload, rates_payload = await _fetch_sub2api_group_payloads(client, base_url, token, log, account)
             groups = _extract_groups(groups_payload)
             rates = _extract_group_rates(rates_payload)
@@ -267,24 +269,26 @@ async def _query_sub2api_group_options(account: Any, secret_key: str, timeout: f
         try:
             groups_payload, rates_payload = await _fetch_sub2api_group_payloads(client, base_url, token, log, account)
         except httpx.HTTPError:
-            if used_configured_token:
-                return normalize_result({"is_valid": False, "invalid_message": _configured_sub2api_token_error_message(base_url)})
-            _SUB2API_TOKEN_CACHE.pop(token_cache_key, None)
-            token_result = await _resolve_sub2api_access_token(
-                client,
-                base_url,
-                configured_access_token,
-                configured_refresh_token,
-                email,
-                password,
-                token_cache_key,
-                log,
-                account,
-            )
-            if isinstance(token_result, dict) and token_result.get("is_valid") is False:
-                return token_result
-            token_state = token_result
-            groups_payload, rates_payload = await _fetch_sub2api_group_payloads(client, base_url, token_state["access_token"], log, account)
+            if used_configured_token or token_state.get("used_refresh_token") or token_state.get("used_cached_token"):
+                if token_state.get("used_cached_token"):
+                    _SUB2API_TOKEN_CACHE.pop(token_cache_key, None)
+                token_result = await _recover_sub2api_token_after_access_failure(
+                    client,
+                    base_url,
+                    configured_refresh_token if used_configured_token else token_state.get("refresh_token"),
+                    email,
+                    password,
+                    token_cache_key,
+                    log,
+                    account,
+                    allow_refresh=not bool(token_state.get("used_refresh_token")),
+                )
+                if token_result.get("is_valid") is False:
+                    return token_result
+                token_state = token_result
+                groups_payload, rates_payload = await _fetch_sub2api_group_payloads(client, base_url, token_state["access_token"], log, account)
+            else:
+                raise
 
     groups = [_summarize_group(group, _extract_group_rates(rates_payload)) for group in _extract_groups(groups_payload)]
     return {
@@ -488,56 +492,96 @@ async def _resolve_sub2api_access_token(
             "used_configured_token": True,
         }
     if configured_refresh_token:
-        refreshed = await _refresh_sub2api_access_token(client, base_url, configured_refresh_token, cache_key, log, account)
-        if isinstance(refreshed, dict) and refreshed.get("is_valid") is False:
-            if configured_access_token:
-                return {
-                    "access_token": configured_access_token,
-                    "used_cached_token": False,
-                    "used_configured_token": True,
-                }
-            return refreshed
-        return {
-            **refreshed,
-            "used_cached_token": False,
-            "used_configured_token": False,
-            "persist_access_token": refreshed.get("access_token"),
-            "persist_refresh_token": refreshed.get("refresh_token"),
-        }
+        refreshed = await _refresh_sub2api_token_state(client, base_url, configured_refresh_token, cache_key, log, account)
+        if refreshed.get("is_valid") is False:
+            return await _login_sub2api_token_state(client, base_url, email, password, cache_key, log, account)
+        return refreshed
     if configured_access_token:
         return {
             "access_token": configured_access_token,
+            "refresh_token": configured_refresh_token,
             "used_cached_token": False,
             "used_configured_token": True,
         }
     cached = _get_cached_sub2api_token_state(cache_key)
     if cached:
         if cached.get("refresh_token") and _token_needs_refresh(cached):
-            refreshed = await _refresh_sub2api_access_token(client, base_url, str(cached["refresh_token"]), cache_key, log, account)
-            if not (isinstance(refreshed, dict) and refreshed.get("is_valid") is False):
-                return {
-                    **refreshed,
-                    "used_cached_token": False,
-                    "used_configured_token": False,
-                    "persist_access_token": refreshed.get("access_token"),
-                    "persist_refresh_token": refreshed.get("refresh_token"),
-                }
+            refreshed = await _refresh_sub2api_token_state(client, base_url, str(cached["refresh_token"]), cache_key, log, account)
+            if refreshed.get("is_valid") is not False:
+                return refreshed
         return {
             "access_token": str(cached["access_token"]),
             "refresh_token": cached.get("refresh_token"),
             "used_cached_token": True,
             "used_configured_token": False,
         }
-    token_result = await _login_sub2api(client, base_url, email or "", password or "", cache_key, log, account)
+    return await _login_sub2api_token_state(client, base_url, email, password, cache_key, log, account)
+
+
+async def _refresh_sub2api_token_state(
+    client: httpx.AsyncClient,
+    base_url: str,
+    refresh_token: str,
+    cache_key: str,
+    log: LogCallback | None,
+    account: Any,
+) -> dict[str, Any]:
+    refreshed = await _refresh_sub2api_access_token(client, base_url, refresh_token, cache_key, log, account)
+    if isinstance(refreshed, dict) and refreshed.get("is_valid") is False:
+        return refreshed
+    return {
+        **refreshed,
+        "used_cached_token": False,
+        "used_configured_token": False,
+        "used_refresh_token": True,
+        "persist_access_token": refreshed.get("access_token"),
+        "persist_refresh_token": refreshed.get("refresh_token"),
+    }
+
+
+async def _login_sub2api_token_state(
+    client: httpx.AsyncClient,
+    base_url: str,
+    email: str | None,
+    password: str | None,
+    cache_key: str,
+    log: LogCallback | None,
+    account: Any,
+) -> dict[str, Any]:
+    if not email:
+        return normalize_result({"is_valid": False, "invalid_message": "缺少 email，无法重新登录"})
+    if not password:
+        return normalize_result({"is_valid": False, "invalid_message": "缺少 password，无法重新登录"})
+    token_result = await _login_sub2api(client, base_url, email, password, cache_key, log, account)
     if isinstance(token_result, dict) and token_result.get("is_valid") is False:
         return token_result
     return {
         **token_result,
         "used_cached_token": False,
         "used_configured_token": False,
+        "used_login_token": True,
         "persist_access_token": token_result.get("access_token"),
         "persist_refresh_token": token_result.get("refresh_token"),
     }
+
+
+async def _recover_sub2api_token_after_access_failure(
+    client: httpx.AsyncClient,
+    base_url: str,
+    refresh_token: str | None,
+    email: str | None,
+    password: str | None,
+    cache_key: str,
+    log: LogCallback | None,
+    account: Any,
+    *,
+    allow_refresh: bool = True,
+) -> dict[str, Any]:
+    if refresh_token and allow_refresh:
+        refreshed = await _refresh_sub2api_token_state(client, base_url, refresh_token, cache_key, log, account)
+        if refreshed.get("is_valid") is not False:
+            return refreshed
+    return await _login_sub2api_token_state(client, base_url, email, password, cache_key, log, account)
 
 
 async def _login_sub2api(

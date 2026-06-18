@@ -35,6 +35,7 @@ class DummyResponse:
 class DummyClient:
     payload = {}
     post_payload = {}
+    post_payloads = None
     get_payloads = None
     last_request = None
     requests = []
@@ -61,6 +62,9 @@ class DummyClient:
         request = {"method": "POST", "url": url, "json": json, "headers": headers, "timeout": self.timeout}
         DummyClient.last_request = request
         DummyClient.requests.append(request)
+        if DummyClient.post_payloads is not None:
+            payload = DummyClient.post_payloads.pop(0)
+            return payload if isinstance(payload, DummyResponse) else DummyResponse(payload)
         if isinstance(DummyClient.post_payload, DummyResponse):
             return DummyClient.post_payload
         return DummyResponse(DummyClient.post_payload)
@@ -69,6 +73,12 @@ class DummyClient:
 @pytest.fixture(autouse=True)
 def clear_sub2api_token_cache():
     _SUB2API_TOKEN_CACHE.clear()
+    DummyClient.payload = {}
+    DummyClient.post_payload = {}
+    DummyClient.post_payloads = None
+    DummyClient.get_payloads = None
+    DummyClient.last_request = None
+    DummyClient.requests = []
 
 
 @pytest.mark.asyncio
@@ -220,6 +230,125 @@ async def test_sub2api_group_options_refreshes_access_token_from_refresh_token(m
     assert result["groups"][0]["id"] == "basic"
     assert DummyClient.requests[0]["url"] == "https://2chat.cc/api/v1/auth/refresh"
     assert DummyClient.requests[0]["json"]["refresh_token"] == "old-rt"
+
+
+@pytest.mark.asyncio
+async def test_sub2api_group_options_refreshes_when_configured_access_token_fails(monkeypatch):
+    monkeypatch.setattr("app.services.balance.httpx.AsyncClient", DummyClient)
+    DummyClient.post_payload = {"data": {"access_token": "fresh-at", "refresh_token": "fresh-rt", "expires_in": 3600}}
+    DummyClient.get_payloads = [
+        DummyResponse({"message": "expired"}, status_code=401),
+        {"data": [{"id": "basic", "plan_name": "Basic Plan", "rate_multiplier": 1.2}]},
+        {"data": {"basic": 0.8}},
+    ]
+    account = {
+        "platform": "sub2Api",
+        "name": "sub",
+        "base_url": "https://2chat.cc",
+        "key_id_enc": encrypt_value("basic", "test-key"),
+        "email_enc": encrypt_value("user@example.com", "test-key"),
+        "password_enc": encrypt_value("password", "test-key"),
+        "access_token_enc": encrypt_value("stale-at", "test-key"),
+        "refresh_token_enc": encrypt_value("old-rt", "test-key"),
+    }
+
+    result = await query_sub2api_group_options(account, "test-key", 3)
+
+    assert result["is_valid"] is True
+    assert result["groups"][0]["id"] == "basic"
+    assert result["refreshed_access_token"] == "fresh-at"
+    assert result["refreshed_refresh_token"] == "fresh-rt"
+    assert [request["url"] for request in DummyClient.requests] == [
+        "https://2chat.cc/api/v1/groups/available",
+        "https://2chat.cc/api/v1/auth/refresh",
+        "https://2chat.cc/api/v1/groups/available",
+        "https://2chat.cc/api/v1/groups/rates",
+    ]
+    assert DummyClient.requests[0]["headers"]["Authorization"] == "Bearer stale-at"
+    assert DummyClient.requests[1]["json"]["refresh_token"] == "old-rt"
+    assert DummyClient.requests[2]["headers"]["Authorization"] == "Bearer fresh-at"
+
+
+@pytest.mark.asyncio
+async def test_sub2api_group_options_logs_in_when_refresh_after_access_token_failure_fails(monkeypatch):
+    monkeypatch.setattr("app.services.balance.httpx.AsyncClient", DummyClient)
+    DummyClient.post_payloads = [
+        DummyResponse({"message": "refresh expired"}, status_code=401),
+        {"data": {"access_token": "login-at", "refresh_token": "login-rt", "expires_in": 3600}},
+    ]
+    DummyClient.get_payloads = [
+        DummyResponse({"message": "expired"}, status_code=401),
+        {"data": [{"id": "basic", "plan_name": "Basic Plan", "rate_multiplier": 1.2}]},
+        {"data": {"basic": 0.8}},
+    ]
+    account = {
+        "platform": "sub2Api",
+        "name": "sub",
+        "base_url": "https://sub.example",
+        "key_id_enc": encrypt_value("basic", "test-key"),
+        "email_enc": encrypt_value("user@example.com", "test-key"),
+        "password_enc": encrypt_value("password", "test-key"),
+        "access_token_enc": encrypt_value("stale-at", "test-key"),
+        "refresh_token_enc": encrypt_value("old-rt", "test-key"),
+    }
+
+    result = await query_sub2api_group_options(account, "test-key", 3)
+
+    assert result["is_valid"] is True
+    assert result["groups"][0]["id"] == "basic"
+    assert result["refreshed_access_token"] == "login-at"
+    assert result["refreshed_refresh_token"] == "login-rt"
+    assert [request["url"] for request in DummyClient.requests] == [
+        "https://sub.example/api/v1/groups/available",
+        "https://sub.example/api/v1/auth/refresh",
+        "https://sub.example/api/v1/auth/login",
+        "https://sub.example/api/v1/groups/available",
+        "https://sub.example/api/v1/groups/rates",
+    ]
+    assert DummyClient.requests[0]["headers"]["Authorization"] == "Bearer stale-at"
+    assert DummyClient.requests[1]["json"]["refresh_token"] == "old-rt"
+    assert DummyClient.requests[2]["json"] == {"email": "user@example.com", "password": "password"}
+    assert DummyClient.requests[3]["headers"]["Authorization"] == "Bearer login-at"
+
+
+@pytest.mark.asyncio
+async def test_sub2api_group_query_refreshes_when_configured_access_token_fails(monkeypatch):
+    monkeypatch.setattr("app.services.balance.httpx.AsyncClient", DummyClient)
+    DummyClient.post_payload = {"data": {"access_token": "fresh-at", "refresh_token": "fresh-rt", "expires_in": 3600}}
+    DummyClient.get_payloads = [
+        {"planName": "Basic Plan"},
+        DummyResponse({"message": "expired"}, status_code=401),
+        {"data": [{"id": "basic", "plan_name": "Basic Plan", "rate_multiplier": 1.2}]},
+        {"data": {"basic": 0.8}},
+    ]
+    account = {
+        "platform": "sub2Api",
+        "name": "sub",
+        "base_url": "https://sub.example",
+        "key_id_enc": encrypt_value("basic", "test-key"),
+        "api_key_enc": encrypt_value("secret", "test-key"),
+        "email_enc": encrypt_value("user@example.com", "test-key"),
+        "password_enc": encrypt_value("password", "test-key"),
+        "access_token_enc": encrypt_value("stale-at", "test-key"),
+        "refresh_token_enc": encrypt_value("old-rt", "test-key"),
+    }
+
+    result = await query_sub2api_group(account, "test-key", 3)
+
+    assert result["is_valid"] is True
+    assert result["plan_name"] == "Basic Plan 倍率 0.8"
+    assert result["refreshed_access_token"] == "fresh-at"
+    assert result["refreshed_refresh_token"] == "fresh-rt"
+    assert [request["url"] for request in DummyClient.requests] == [
+        "https://sub.example/v1/usage",
+        "https://sub.example/api/v1/groups/available",
+        "https://sub.example/api/v1/auth/refresh",
+        "https://sub.example/api/v1/groups/available",
+        "https://sub.example/api/v1/groups/rates",
+    ]
+    assert DummyClient.requests[1]["headers"]["Authorization"] == "Bearer stale-at"
+    assert DummyClient.requests[2]["json"]["refresh_token"] == "old-rt"
+    assert DummyClient.requests[3]["headers"]["Authorization"] == "Bearer fresh-at"
 
 
 @pytest.mark.asyncio
