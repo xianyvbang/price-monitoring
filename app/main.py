@@ -1374,8 +1374,7 @@ async def api_update_account(request: Request, account_id: int):
     if not current_account:
         raise HTTPException(status_code=404, detail="账号不存在")
     try:
-        account_data = _account_from_payload(payload)
-        account_data = await _prepare_account_data_for_save(account_data, current_account)
+        account_data = _account_patch_from_payload(payload, current_account)
         db.update_account(account_id, account_data)
     except ValueError:
         raise HTTPException(status_code=404, detail="账号不存在") from None
@@ -1708,6 +1707,72 @@ def _account_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if "is_visible" in payload or "isVisible" in payload or "visible" in payload:
         account_data["is_visible"] = is_visible
     return account_data
+
+
+def _account_patch_from_payload(payload: dict[str, Any], current_account: Any) -> dict[str, Any]:
+    current_public = public_edit_account(int(current_account["id"])) or {}
+    current_platform = str(current_account["platform"] or "")
+    patch: dict[str, Any] = {
+        "platform": str(payload.get("platform") or current_platform).strip() or current_platform,
+        "name": str(payload["name"]).strip() if "name" in payload else str(current_account["name"] or ""),
+        "base_url": (
+            str(payload.get("base_url") or payload.get("baseUrl") or "").strip()
+            if ("base_url" in payload or "baseUrl" in payload)
+            else str(current_account["base_url"] or "")
+        ),
+        "note": (
+            payload.get("note") or payload.get("remark") or payload.get("remarks") or ""
+            if ("note" in payload or "remark" in payload or "remarks" in payload)
+            else str(current_account["note"] or "")
+        ),
+        "recharge_url": (
+            payload.get("recharge_url") or payload.get("rechargeUrl") or ""
+            if ("recharge_url" in payload or "rechargeUrl" in payload)
+            else str(current_account["recharge_url"] or "")
+        ),
+        "recharge_paid_amount": payload.get("recharge_paid_amount", payload.get("rechargePaidAmount", current_account["recharge_paid_amount"])),
+        "recharge_received_amount": payload.get(
+            "recharge_received_amount",
+            payload.get("rechargeReceivedAmount", current_account["recharge_received_amount"]),
+        ),
+        "key_id": (
+            payload.get("key_id") or payload.get("keyId")
+            if ("key_id" in payload or "keyId" in payload)
+            else (current_public.get("key_id") or "")
+        ),
+        "api_key": payload.get("api_key", payload.get("apiKey")) if ("api_key" in payload or "apiKey" in payload) else None,
+        "email": payload.get("email") if "email" in payload else (current_public.get("email") or ""),
+        "password": payload.get("password") if "password" in payload else None,
+        "access_token": payload.get("access_token", payload.get("accessToken")) if ("access_token" in payload or "accessToken" in payload) else None,
+        "refresh_token": payload.get("refresh_token", payload.get("refreshToken")) if ("refresh_token" in payload or "refreshToken" in payload) else None,
+        "user_id": payload.get("user_id", payload.get("userId")) if ("user_id" in payload or "userId" in payload) else (current_public.get("user_id") or ""),
+        "threshold": payload.get("threshold", current_account["threshold"]),
+        "is_visible": (
+            _to_bool(payload.get("is_visible", payload.get("isVisible", payload.get("visible"))))
+            if ("is_visible" in payload or "isVisible" in payload or "visible" in payload)
+            else bool(current_account["is_visible"])
+        ),
+        "is_enabled": (
+            _to_bool(payload.get("is_enabled", payload.get("isEnabled", payload.get("enabled"))))
+            if ("is_enabled" in payload or "isEnabled" in payload or "enabled" in payload)
+            else bool(current_account["is_enabled"])
+        ),
+        "is_eliminated": (
+            _to_bool(payload.get("is_eliminated", payload.get("isEliminated", payload.get("eliminated"))))
+            if ("is_eliminated" in payload or "isEliminated" in payload or "eliminated" in payload)
+            else bool(current_account["is_eliminated"])
+        ),
+    }
+    if "monitor_groups" in payload or "monitorGroups" in payload:
+        patch["monitor_groups"] = payload.get("monitor_groups", payload.get("monitorGroups"))
+    elif "monitor_group_ids" in payload or "monitorGroupIds" in payload or "group_ids" in payload or "groupIds" in payload:
+        patch["monitor_group_ids"] = (
+            payload.get("monitor_group_ids")
+            or payload.get("monitorGroupIds")
+            or payload.get("group_ids")
+            or payload.get("groupIds")
+        )
+    return patch
 
 
 def import_bulk_accounts(platform: str, bulk_text: str) -> int:

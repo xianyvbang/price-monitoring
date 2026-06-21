@@ -774,17 +774,18 @@ class Database:
         current = self.get_account(account_id)
         if not current:
             raise ValueError("账号不存在")
+        merged = self._merge_account_patch(current, data)
         now = utc_now()
-        platform = data["platform"]
-        note = str(data.get("note") or "").strip()
-        recharge_url = str(data.get("recharge_url") or "").strip()
-        recharge_paid_amount, recharge_received_amount = _recharge_ratio_values(data)
-        key_id = data.get("key_id")
-        api_key = data.get("api_key")
-        email = data.get("email")
-        password = data.get("password")
-        access_token = data.get("access_token")
-        refresh_token = data.get("refresh_token")
+        platform = merged["platform"]
+        note = str(merged.get("note") or "").strip()
+        recharge_url = str(merged.get("recharge_url") or "").strip()
+        recharge_paid_amount, recharge_received_amount = _recharge_ratio_values(merged)
+        key_id = merged.get("key_id")
+        api_key = merged.get("api_key")
+        email = merged.get("email")
+        password = merged.get("password")
+        access_token = merged.get("access_token")
+        refresh_token = merged.get("refresh_token")
         if platform == "newApi" and not access_token and api_key:
             access_token = api_key
         key_id_enc = encrypt_value(key_id, self.secret_key)
@@ -793,11 +794,11 @@ class Database:
         password_enc = encrypt_value(password, self.secret_key)
         access_token_enc = encrypt_value(access_token, self.secret_key)
         refresh_token_enc = encrypt_value(refresh_token, self.secret_key)
-        user_id_enc = encrypt_value(data.get("user_id"), self.secret_key)
-        threshold = _optional_float(data.get("threshold"))
-        is_visible = 1 if data.get("is_visible", current["is_visible"]) else 0
-        is_enabled = 1 if data.get("is_enabled", current["is_enabled"]) and is_visible else 0
-        is_eliminated = _optional_bool(data.get("is_eliminated"))
+        user_id_enc = encrypt_value(merged.get("user_id"), self.secret_key)
+        threshold = _optional_float(merged.get("threshold"))
+        is_visible = 1 if merged.get("is_visible", current["is_visible"]) else 0
+        is_enabled = 1 if merged.get("is_enabled", current["is_enabled"]) and is_visible else 0
+        is_eliminated = _optional_bool(merged.get("is_eliminated"))
         with self.connect() as conn:
             conn.execute(
                 """
@@ -816,8 +817,8 @@ class Database:
                 """,
                 (
                     platform,
-                    data["name"],
-                    data["base_url"].rstrip("/"),
+                    merged["name"],
+                    merged["base_url"].rstrip("/"),
                     note,
                     recharge_url,
                     recharge_paid_amount,
@@ -837,9 +838,28 @@ class Database:
                     account_id,
                 ),
             )
-        if _should_replace_monitor_groups(data):
-            self.replace_account_monitor_groups(account_id, _groups_from_account_data(data))
+        if _should_replace_monitor_groups(merged):
+            self.replace_account_monitor_groups(account_id, _groups_from_account_data(merged))
         return account_id
+
+    def _merge_account_patch(self, current: sqlite3.Row, data: dict[str, Any]) -> dict[str, Any]:
+        merged = row_to_dict(current)
+        merged.update(data)
+        merged["platform"] = str(data.get("platform") or merged.get("platform") or "").strip()
+        merged["name"] = str(data.get("name") or merged.get("name") or "").strip()
+        merged["base_url"] = str(data.get("base_url") or merged.get("base_url") or "").strip()
+        merged["note"] = str(data.get("note") if "note" in data else merged.get("note") or "").strip()
+        merged["recharge_url"] = str(data.get("recharge_url") if "recharge_url" in data else merged.get("recharge_url") or "").strip()
+        merged["recharge_paid_amount"] = data.get("recharge_paid_amount", merged.get("recharge_paid_amount"))
+        merged["recharge_received_amount"] = data.get("recharge_received_amount", merged.get("recharge_received_amount"))
+        for key in ("key_id", "api_key", "email", "password", "access_token", "refresh_token", "user_id", "threshold", "is_enabled", "is_visible", "is_eliminated"):
+            if key in data:
+                merged[key] = data.get(key)
+        if "monitor_groups" in data:
+            merged["monitor_groups"] = data.get("monitor_groups")
+        if "monitor_group_ids" in data:
+            merged["monitor_group_ids"] = data.get("monitor_group_ids")
+        return merged
 
     def update_account_tokens(
         self,

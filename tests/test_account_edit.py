@@ -240,7 +240,7 @@ def test_api_create_sub2api_relogs_and_persists_tokens(tmp_path, monkeypatch):
     assert decrypt_value(account["refresh_token_enc"], config.app_secret_key) == "fresh-rt"
 
 
-def test_api_update_sub2api_relogs_with_saved_credentials_when_form_leaves_them_blank(tmp_path, monkeypatch):
+def test_api_update_sub2api_keeps_saved_tokens_when_form_leaves_them_blank(tmp_path, monkeypatch):
     test_db = Database(str(tmp_path / "app.db"), config.app_secret_key)
     test_db.init()
     test_db.ensure_admin("admin", "password123")
@@ -252,6 +252,8 @@ def test_api_update_sub2api_relogs_with_saved_credentials_when_form_leaves_them_
             "api_key": "sk-old",
             "email": "saved@example.com",
             "password": "saved-password",
+            "access_token": "saved-at",
+            "refresh_token": "saved-rt",
         }
     )
     monkeypatch.setattr("app.main.db", test_db)
@@ -261,13 +263,10 @@ def test_api_update_sub2api_relogs_with_saved_credentials_when_form_leaves_them_
     async def stop_scheduler():
         return None
 
-    async def fake_login(base_url, email, password, timeout, log=None, account=None):
-        assert base_url == "https://sub.example"
-        assert email == "saved@example.com"
-        assert password == "saved-password"
-        return {"is_valid": True, "access_token": "updated-at", "refresh_token": "updated-rt"}
+    async def fail_login(*args, **kwargs):
+        raise AssertionError("PUT /api/accounts/{id} should not trigger login validation")
 
-    monkeypatch.setattr("app.main.login_sub2api_tokens", fake_login)
+    monkeypatch.setattr("app.main.login_sub2api_tokens", fail_login)
     monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
 
     with TestClient(app) as client:
@@ -286,8 +285,8 @@ def test_api_update_sub2api_relogs_with_saved_credentials_when_form_leaves_them_
 
     assert response.status_code == 200
     account = test_db.get_account(account_id)
-    assert decrypt_value(account["access_token_enc"], config.app_secret_key) == "updated-at"
-    assert decrypt_value(account["refresh_token_enc"], config.app_secret_key) == "updated-rt"
+    assert decrypt_value(account["access_token_enc"], config.app_secret_key) == "saved-at"
+    assert decrypt_value(account["refresh_token_enc"], config.app_secret_key) == "saved-rt"
 
 
 def test_api_update_sub2api_visibility_only_does_not_relogin(tmp_path, monkeypatch):
@@ -344,6 +343,96 @@ def test_api_update_sub2api_visibility_only_does_not_relogin(tmp_path, monkeypat
     account = test_db.get_account(account_id)
     assert decrypt_value(account["access_token_enc"], config.app_secret_key) == "kept-at"
     assert decrypt_value(account["refresh_token_enc"], config.app_secret_key) == "kept-rt"
+
+
+def test_api_update_account_skips_required_validation_and_supports_partial_payload(tmp_path, monkeypatch):
+    test_db = Database(str(tmp_path / "app.db"), config.app_secret_key)
+    test_db.init()
+    test_db.ensure_admin("admin", "password123")
+    account_id = test_db.upsert_account(
+        {
+            "platform": "newApi",
+            "name": "partial-source",
+            "base_url": "https://origin.example",
+            "access_token": "token",
+            "user_id": "user-1",
+            "threshold": 5,
+            "note": "old note",
+            "recharge_url": "https://origin.example/topup",
+        }
+    )
+    monkeypatch.setattr("app.main.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
+
+    async def stop_scheduler():
+        return None
+
+    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+
+    with TestClient(app) as client:
+        client.post("/login", data={"username": "admin", "password": "password123"})
+        response = client.put(
+            f"/api/accounts/{account_id}",
+            json={
+                "note": "patched note",
+                "is_visible": False,
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()["account"]
+    assert payload["note"] == "patched note"
+    assert payload["is_visible"] is False
+    assert payload["name"] == "partial-source"
+    assert payload["base_url"] == "https://origin.example"
+    assert payload["recharge_url"] == "https://origin.example/topup"
+    assert payload["threshold"] == 5
+
+
+def test_api_update_sub2api_does_not_trigger_login_validation(tmp_path, monkeypatch):
+    test_db = Database(str(tmp_path / "app.db"), config.app_secret_key)
+    test_db.init()
+    test_db.ensure_admin("admin", "password123")
+    account_id = test_db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "skip-login-check",
+            "base_url": "https://sub.example",
+            "api_key": "sk-old",
+            "email": "saved@example.com",
+            "password": "saved-password",
+        }
+    )
+    monkeypatch.setattr("app.main.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
+
+    async def stop_scheduler():
+        return None
+
+    async def fail_login(*args, **kwargs):
+        raise AssertionError("PUT /api/accounts/{id} should not trigger login validation")
+
+    monkeypatch.setattr("app.main.login_sub2api_tokens", fail_login)
+    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+
+    with TestClient(app) as client:
+        client.post("/login", data={"username": "admin", "password": "password123"})
+        response = client.put(
+            f"/api/accounts/{account_id}",
+            json={
+                "base_url": "",
+                "name": "",
+                "email": "",
+                "password": "",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()["account"]
+    assert payload["base_url"] == ""
+    assert payload["name"] == ""
 
 
 def test_api_create_hidden_account_allows_blank_required_fields(tmp_path, monkeypatch):
