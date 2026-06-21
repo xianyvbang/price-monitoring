@@ -16,7 +16,8 @@ const settings = ref({ query_interval: 300, request_timeout: 10, default_thresho
 const summaries = ref([]);
 const filter = reactive({
   name: String(route.query.name || ""),
-  platform: String(route.query.platform || "")
+  platform: String(route.query.platform || ""),
+  low_balance: String(route.query.low_balance || route.query.lowBalance || "")
 });
 const queryAllLoading = ref(false);
 const refreshRemaining = ref(300);
@@ -166,6 +167,7 @@ async function applyFilter() {
 async function resetFilter() {
   filter.name = "";
   filter.platform = "";
+  filter.low_balance = "";
   await applyFilter();
 }
 
@@ -212,8 +214,17 @@ function lowBalanceText(row) {
   if (row.is_eliminated) {
     return "不提醒";
   }
-  const threshold = row.threshold ?? settings.value.default_threshold;
-  return row.last_remaining !== null && row.last_remaining !== undefined && Number(row.last_remaining) < Number(threshold) ? "是" : "否";
+  return boolValue(row.is_low_balance) ? "是" : "否";
+}
+
+function lowBalanceBadgeType(row) {
+  return lowBalanceText(row) === "是" ? "danger" : "info";
+}
+
+function syncFilterFromRoute() {
+  filter.name = String(route.query.name || "");
+  filter.platform = String(route.query.platform || "");
+  filter.low_balance = String(route.query.low_balance || route.query.lowBalance || "");
 }
 
 const accountMergedColumns = new Set([
@@ -611,6 +622,13 @@ onMounted(async () => {
 });
 
 watch(
+  () => [route.query.name, route.query.platform, route.query.low_balance, route.query.lowBalance],
+  () => {
+    syncFilterFromRoute();
+  }
+);
+
+watch(
   columnConfig,
   (value) => {
     if (typeof window === "undefined") {
@@ -655,6 +673,13 @@ onBeforeUnmount(() => {
         <el-select v-model="filter.platform" placeholder="全部平台" clearable style="width: 160px">
           <el-option label="newApi" value="newApi" />
           <el-option label="sub2Api" value="sub2Api" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="低于阈值">
+        <el-select v-model="filter.low_balance" placeholder="全部状态" clearable style="width: 160px">
+          <el-option label="全部" value="" />
+          <el-option label="仅低于阈值" value="low" />
+          <el-option label="仅未低于阈值" value="normal" />
         </el-select>
       </el-form-item>
       <el-form-item>
@@ -776,7 +801,7 @@ onBeforeUnmount(() => {
           </el-table-column>
           <el-table-column v-if="showColumn(platform, 'low_balance')" prop="low_balance" label="低于阈值" width="105">
             <template #default="{ row }">
-              <span :class="{ 'low-balance': lowBalanceText(row) === '是' }">{{ lowBalanceText(row) }}</span>
+              <el-tag :type="lowBalanceBadgeType(row)" :class="{ 'low-balance': lowBalanceText(row) === '是' }">{{ lowBalanceText(row) }}</el-tag>
             </template>
           </el-table-column>
           <el-table-column v-if="showColumn(platform, 'enabled')" prop="enabled" label="自动查询" width="105">

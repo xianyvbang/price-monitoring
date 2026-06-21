@@ -1,5 +1,5 @@
 <script setup>
-import { reactive, ref } from "vue";
+import { nextTick, reactive, ref } from "vue";
 import { ElMessage } from "element-plus";
 import { api } from "../api";
 import { clone, normalizeAccountForm, selectedGroupIds } from "../utils";
@@ -11,6 +11,7 @@ const saving = ref(false);
 const mode = ref("create");
 const formRef = ref(null);
 const form = reactive(normalizeAccountForm());
+const initialForm = ref(normalizeAccountForm());
 
 const rules = {
   platform: [{ required: true, message: "请选择平台", trigger: "change" }],
@@ -19,7 +20,9 @@ const rules = {
 };
 
 function open(account = null, nextMode = "create") {
-  Object.assign(form, normalizeAccountForm(account || {}));
+  const normalized = normalizeAccountForm(account || {});
+  Object.assign(form, normalized);
+  initialForm.value = clone(normalized);
   mode.value = nextMode;
   if (nextMode === "copy") {
     form.id = "";
@@ -32,6 +35,7 @@ function open(account = null, nextMode = "create") {
 function syncEnabled() {
   if (!form.is_visible) {
     form.is_enabled = false;
+    nextTick(() => formRef.value?.clearValidate());
   }
 }
 
@@ -49,17 +53,45 @@ function payload() {
   return data;
 }
 
+function shouldFetchGroupsAfterSave(account, savedPayload, isEdit) {
+  if (!account?.is_visible || !["newApi", "sub2Api"].includes(account.platform)) {
+    return false;
+  }
+  if (!isEdit) {
+    return true;
+  }
+  if (account.platform === "newApi") {
+    return (
+      String(savedPayload.base_url || "").trim() !== String(initialForm.value.base_url || "").trim() ||
+      Boolean(savedPayload.access_token) ||
+      String(savedPayload.user_id || "").trim() !== String(initialForm.value.user_id || "").trim()
+    );
+  }
+  return (
+    String(savedPayload.base_url || "").trim() !== String(initialForm.value.base_url || "").trim() ||
+    Boolean(savedPayload.email) ||
+    Boolean(savedPayload.password) ||
+    Boolean(savedPayload.access_token) ||
+    Boolean(savedPayload.refresh_token)
+  );
+}
+
 async function submit() {
-  await formRef.value?.validate();
+  if (form.is_visible) {
+    await formRef.value?.validate();
+  } else {
+    formRef.value?.clearValidate();
+  }
   saving.value = true;
   try {
     const isEdit = Boolean(form.id);
-    const result = isEdit ? await api.updateAccount(form.id, payload()) : await api.createAccount(payload());
+    const savedPayload = payload();
+    const result = isEdit ? await api.updateAccount(form.id, savedPayload) : await api.createAccount(savedPayload);
     const account = result.account;
     emit("saved", account);
     ElMessage.success("账号已保存");
     visible.value = false;
-    if (account?.is_visible && ["newApi", "sub2Api"].includes(account.platform)) {
+    if (shouldFetchGroupsAfterSave(account, savedPayload, isEdit)) {
       try {
         const groups = account.platform === "sub2Api" ? await api.sub2ApiGroups(account.id) : await api.newApiGroups(account.id);
         emit("pick-groups", {

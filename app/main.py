@@ -215,7 +215,35 @@ def account_filter_from_query(request: Request) -> dict[str, Any]:
     platform = str(request.query_params.get("platform") or "").strip()
     if platform not in {"newApi", "sub2Api"}:
         platform = ""
-    return {"name": name, "platform": platform, "active": bool(name or platform)}
+    low_balance_value = str(request.query_params.get("low_balance") or request.query_params.get("lowBalance") or "").strip().lower()
+    if low_balance_value in {"1", "true", "yes", "low", "below", "below_threshold"}:
+        low_balance = "low"
+    elif low_balance_value in {"0", "false", "no", "normal", "not_low", "above", "above_threshold"}:
+        low_balance = "normal"
+    else:
+        low_balance = ""
+    return {
+        "name": name,
+        "platform": platform,
+        "low_balance": low_balance,
+        "lowBalance": low_balance,
+        "active": bool(name or platform or low_balance),
+    }
+
+
+def _effective_threshold(account: dict[str, Any], default_threshold: float | None = None) -> float | None:
+    threshold = _optional_number(account.get("threshold"))
+    if threshold is not None:
+        return threshold
+    return default_threshold
+
+
+def is_low_balance_account(account: dict[str, Any], default_threshold: float | None = None) -> bool:
+    if account.get("is_eliminated"):
+        return False
+    remaining = _optional_number(account.get("last_remaining"))
+    threshold = _effective_threshold(account, default_threshold)
+    return remaining is not None and threshold is not None and remaining < threshold
 
 
 def public_log(row: Any) -> dict[str, Any]:
@@ -434,7 +462,11 @@ def monitor_group_rates(monitor_groups: list[dict[str, Any]]) -> list[dict[str, 
     return rates
 
 
-def public_dashboard_account(account: dict[str, Any], monitor_group: dict[str, Any] | None) -> dict[str, Any]:
+def public_dashboard_account(
+    account: dict[str, Any],
+    monitor_group: dict[str, Any] | None,
+    default_threshold: float | None = None,
+) -> dict[str, Any]:
     row = dict(account)
     row["monitor_group"] = monitor_group
     row["monitorGroup"] = monitor_group
@@ -463,6 +495,8 @@ def public_dashboard_account(account: dict[str, Any], monitor_group: dict[str, A
         row["currentMonitorGroupId"] = None
         row["last_group_rate_changed"] = bool(account.get("last_group_rate_changed"))
         row["group_rates"] = account.get("group_rates") or []
+    row["is_low_balance"] = is_low_balance_account(row, default_threshold)
+    row["isLowBalance"] = row["is_low_balance"]
     return row
 
 
@@ -652,24 +686,46 @@ def grouped_accounts(
     return grouped
 
 
-def dashboard_grouped_accounts(account_filter: dict[str, Any] | None = None) -> dict[str, list[dict[str, Any]]]:
+def _filtered_dashboard_accounts(
+    account_filter: dict[str, Any] | None = None,
+    *,
+    visible_only: bool,
+) -> tuple[dict[str, list[dict[str, Any]]], float | None]:
     account_filter = account_filter or {}
     platform_filter = account_filter.get("platform") if account_filter.get("platform") in {"newApi", "sub2Api"} else None
+    low_balance_filter = account_filter.get("low_balance") if account_filter.get("low_balance") in {"low", "normal"} else None
+    default_threshold = _optional_number(db.get_general_settings().get("default_threshold"))
     grouped = {platform_filter: []} if platform_filter else {"newApi": [], "sub2Api": []}
     for platform, accounts in grouped_accounts(
         eliminated_last=True,
-        visible_only=True,
+        visible_only=visible_only,
         platform=platform_filter,
         name_query=account_filter.get("name") or None,
     ).items():
+        for account in accounts:
+            account_is_low = is_low_balance_account(account, default_threshold)
+            if low_balance_filter in {"low", "normal"} and account.get("is_eliminated"):
+                continue
+            if low_balance_filter == "low" and not account_is_low:
+                continue
+            if low_balance_filter == "normal" and account_is_low:
+                continue
+            grouped[platform].append(account)
+    return grouped, default_threshold
+
+
+def dashboard_grouped_accounts(account_filter: dict[str, Any] | None = None) -> dict[str, list[dict[str, Any]]]:
+    grouped_accounts_map, default_threshold = _filtered_dashboard_accounts(account_filter, visible_only=True)
+    grouped = {platform: [] for platform in grouped_accounts_map}
+    for platform, accounts in grouped_accounts_map.items():
         for account in accounts:
             monitor_groups = account.get("monitor_groups") if isinstance(account.get("monitor_groups"), list) else []
             account_rows = []
             if monitor_groups:
                 for monitor_group in monitor_groups:
-                    account_rows.append(public_dashboard_account(account, monitor_group))
+                    account_rows.append(public_dashboard_account(account, monitor_group, default_threshold))
             else:
-                account_rows.append(public_dashboard_account(account, None))
+                account_rows.append(public_dashboard_account(account, None, default_threshold))
             row_count = len(account_rows)
             for index, row in enumerate(account_rows):
                 row["dashboard_rowspan"] = row_count
@@ -679,6 +735,11 @@ def dashboard_grouped_accounts(account_filter: dict[str, Any] | None = None) -> 
                 row["dashboard_is_last_row"] = index == row_count - 1
                 row["dashboardIsLastRow"] = row["dashboard_is_last_row"]
                 grouped[platform].append(row)
+    return grouped
+
+
+def consumption_grouped_accounts(account_filter: dict[str, Any] | None = None) -> dict[str, list[dict[str, Any]]]:
+    grouped, _ = _filtered_dashboard_accounts(account_filter, visible_only=False)
     return grouped
 
 
@@ -833,11 +894,11 @@ async def save_account_form(request: Request):
             current_account = db.get_account(account_id)
             if not current_account:
                 raise ValueError
-            account_data = await _prepare_sub2api_account_data_for_save(account_data, current_account)
+            account_data = await _prepare_account_data_for_save(account_data, current_account)
             db.update_account(account_id, account_data)
             db.add_log("info", "account", f"编辑账号: {account_data['platform']} / {account_data['name']}")
         else:
-            account_data = await _prepare_sub2api_account_data_for_save(account_data)
+            account_data = await _prepare_account_data_for_save(account_data)
             db.upsert_account(account_data)
             db.add_log("info", "account", f"保存账号: {account_data['platform']} / {account_data['name']}")
     except ValueError:
@@ -1114,8 +1175,9 @@ async def api_dashboard(request: Request):
     require_user(request)
     account_filter = account_filter_from_query(request)
     grouped = dashboard_grouped_accounts(account_filter)
+    consumption_grouped = consumption_grouped_accounts(account_filter)
     consumption_filter = consumption_date_range_from_query(request)
-    consumption_summaries = summarize_consumption_periods(grouped, consumption_filter)
+    consumption_summaries = summarize_consumption_periods(consumption_grouped, consumption_filter)
     return {
         "grouped": grouped,
         "settings": db.get_general_settings(),
@@ -1298,7 +1360,7 @@ async def api_create_account(request: Request):
     require_user(request)
     payload = await request.json()
     account_data = _account_from_payload(payload)
-    account_data = await _prepare_sub2api_account_data_for_save(account_data)
+    account_data = await _prepare_account_data_for_save(account_data)
     account_id = db.upsert_account(account_data)
     db.add_log("info", "account", f"API 保存账号: {payload.get('platform')} / {payload.get('name')}")
     return {"id": account_id, "ok": True, "account": public_edit_account(account_id)}
@@ -1313,12 +1375,51 @@ async def api_update_account(request: Request, account_id: int):
         raise HTTPException(status_code=404, detail="账号不存在")
     try:
         account_data = _account_from_payload(payload)
-        account_data = await _prepare_sub2api_account_data_for_save(account_data, current_account)
+        account_data = await _prepare_account_data_for_save(account_data, current_account)
         db.update_account(account_id, account_data)
     except ValueError:
         raise HTTPException(status_code=404, detail="账号不存在") from None
     db.add_log("info", "account", f"API 更新账号: {payload.get('platform')} / {payload.get('name')}")
     return {"id": account_id, "ok": True, "account": public_edit_account(account_id)}
+
+
+async def _prepare_account_data_for_save(account_data: dict[str, Any], current_account: Any | None = None) -> dict[str, Any]:
+    if _is_sub2api_visibility_only_save(account_data, current_account):
+        return account_data
+    return await _prepare_sub2api_account_data_for_save(account_data, current_account)
+
+
+def _is_sub2api_visibility_only_save(account_data: dict[str, Any], current_account: Any | None = None) -> bool:
+    if account_data["platform"] != "sub2Api" or not current_account or current_account["platform"] != "sub2Api":
+        return False
+    if str(account_data.get("platform") or "") != str(current_account["platform"] or ""):
+        return False
+    if str(account_data.get("name") or "").strip() != str(current_account["name"] or "").strip():
+        return False
+    if str(account_data.get("base_url") or "").rstrip("/") != str(current_account["base_url"] or "").rstrip("/"):
+        return False
+    if str(account_data.get("note") or "").strip() != str(current_account["note"] or "").strip():
+        return False
+    if str(account_data.get("recharge_url") or "").strip() != str(current_account["recharge_url"] or "").strip():
+        return False
+    if _optional_number(account_data.get("recharge_paid_amount")) != _optional_number(current_account["recharge_paid_amount"]):
+        return False
+    if _optional_number(account_data.get("recharge_received_amount")) != _optional_number(current_account["recharge_received_amount"]):
+        return False
+    if _optional_number(account_data.get("threshold")) != _optional_number(current_account["threshold"]):
+        return False
+    if str(account_data.get("key_id") or "").strip() != str(decrypt_value(current_account["key_id_enc"], config.app_secret_key) or "").strip():
+        return False
+    if _split_group_ids(account_data.get("monitor_group_ids")) != [group["group_id"] for group in db.list_monitor_groups(int(current_account["id"]))]:
+        return False
+    for key in ("api_key", "email", "password", "access_token", "refresh_token", "user_id"):
+        if str(account_data.get(key) or "").strip():
+            return False
+    current_visible = bool(current_account["is_visible"])
+    current_enabled = bool(current_account["is_enabled"])
+    next_visible = bool(account_data.get("is_visible", current_visible))
+    next_enabled = bool(account_data.get("is_enabled", current_enabled))
+    return (next_visible != current_visible) or (next_enabled != current_enabled)
 
 
 async def _prepare_sub2api_account_data_for_save(account_data: dict[str, Any], current_account: Any | None = None) -> dict[str, Any]:
@@ -1561,9 +1662,11 @@ def _account_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
     platform = payload.get("platform")
     if platform not in {"newApi", "sub2Api"}:
         raise HTTPException(status_code=400, detail="platform 必须是 newApi 或 sub2Api")
+    is_visible_value = payload.get("is_visible", payload.get("isVisible", payload.get("visible", True)))
+    is_visible = _to_bool(is_visible_value)
     name = str(payload.get("name", "")).strip()
     base_url = str(payload.get("base_url") or payload.get("baseUrl") or "").strip()
-    if not name or not base_url:
+    if is_visible and (not name or not base_url):
         raise HTTPException(status_code=400, detail="name 和 baseUrl 必填")
     is_eliminated = None
     if "is_eliminated" in payload:
@@ -1589,6 +1692,7 @@ def _account_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "user_id": payload.get("user_id") or payload.get("userId"),
         "threshold": payload.get("threshold"),
         "is_eliminated": is_eliminated,
+        "is_visible": is_visible,
     }
     if "monitor_groups" in payload or "monitorGroups" in payload:
         account_data["monitor_groups"] = payload.get("monitor_groups", payload.get("monitorGroups"))
@@ -1602,7 +1706,7 @@ def _account_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if "is_enabled" in payload or "isEnabled" in payload or "enabled" in payload:
         account_data["is_enabled"] = _to_bool(payload.get("is_enabled", payload.get("isEnabled", payload.get("enabled"))))
     if "is_visible" in payload or "isVisible" in payload or "visible" in payload:
-        account_data["is_visible"] = _to_bool(payload.get("is_visible", payload.get("isVisible", payload.get("visible"))))
+        account_data["is_visible"] = is_visible
     return account_data
 
 

@@ -290,6 +290,125 @@ def test_api_update_sub2api_relogs_with_saved_credentials_when_form_leaves_them_
     assert decrypt_value(account["refresh_token_enc"], config.app_secret_key) == "updated-rt"
 
 
+def test_api_update_sub2api_visibility_only_does_not_relogin(tmp_path, monkeypatch):
+    test_db = Database(str(tmp_path / "app.db"), config.app_secret_key)
+    test_db.init()
+    test_db.ensure_admin("admin", "password123")
+    account_id = test_db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "sub-visibility",
+            "base_url": "https://sub.example",
+            "api_key": "sk-old",
+            "email": "saved@example.com",
+            "password": "saved-password",
+            "access_token": "kept-at",
+            "refresh_token": "kept-rt",
+            "is_visible": True,
+            "is_enabled": True,
+        }
+    )
+    monkeypatch.setattr("app.main.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
+
+    async def stop_scheduler():
+        return None
+
+    async def fail_login(*args, **kwargs):
+        raise AssertionError("visibility-only save should not trigger sub2Api login")
+
+    monkeypatch.setattr("app.main.login_sub2api_tokens", fail_login)
+    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+
+    with TestClient(app) as client:
+        client.post("/login", data={"username": "admin", "password": "password123"})
+        response = client.put(
+            f"/api/accounts/{account_id}",
+            json={
+                "platform": "sub2Api",
+                "name": "sub-visibility",
+                "base_url": "https://sub.example",
+                "api_key": "",
+                "email": "",
+                "password": "",
+                "is_visible": False,
+                "is_enabled": False,
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["account"]["is_visible"] is False
+    assert payload["account"]["is_enabled"] is False
+    account = test_db.get_account(account_id)
+    assert decrypt_value(account["access_token_enc"], config.app_secret_key) == "kept-at"
+    assert decrypt_value(account["refresh_token_enc"], config.app_secret_key) == "kept-rt"
+
+
+def test_api_create_hidden_account_allows_blank_required_fields(tmp_path, monkeypatch):
+    test_db = Database(str(tmp_path / "app.db"), config.app_secret_key)
+    test_db.init()
+    test_db.ensure_admin("admin", "password123")
+    monkeypatch.setattr("app.main.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
+
+    async def stop_scheduler():
+        return None
+
+    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+
+    with TestClient(app) as client:
+        client.post("/login", data={"username": "admin", "password": "password123"})
+        response = client.post(
+            "/api/accounts",
+            json={
+                "platform": "newApi",
+                "name": "",
+                "base_url": "",
+                "is_visible": False,
+                "is_enabled": False,
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["account"]["is_visible"] is False
+    assert payload["account"]["is_enabled"] is False
+    assert payload["account"]["name"] == ""
+    assert payload["account"]["base_url"] == ""
+
+
+def test_api_create_visible_account_still_requires_name_and_base_url(tmp_path, monkeypatch):
+    test_db = Database(str(tmp_path / "app.db"), "test-key")
+    test_db.init()
+    test_db.ensure_admin("admin", "password123")
+    monkeypatch.setattr("app.main.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
+
+    async def stop_scheduler():
+        return None
+
+    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+
+    with TestClient(app) as client:
+        client.post("/login", data={"username": "admin", "password": "password123"})
+        response = client.post(
+            "/api/accounts",
+            json={
+                "platform": "newApi",
+                "name": "",
+                "base_url": "",
+                "is_visible": True,
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "name 和 baseUrl 必填"
+
+
 def test_copy_account_button_uses_unsaved_dialog_data(tmp_path, monkeypatch):
     test_db = Database(str(tmp_path / "app.db"), config.app_secret_key)
     test_db.init()

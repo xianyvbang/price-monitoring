@@ -438,6 +438,57 @@ def test_dashboard_api_shows_today_consumption_summary(tmp_path, monkeypatch):
     assert "last_month" in duplicate_row["consumption_stats"]
 
 
+def test_dashboard_consumption_summary_includes_hidden_accounts(tmp_path, monkeypatch):
+    test_db = Database(str(tmp_path / "app.db"), "test-key")
+    test_db.init()
+    test_db.ensure_admin("admin", "password123")
+    visible_id = test_db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "visible-consumption",
+            "base_url": "https://visible.example",
+            "api_key": "secret",
+        }
+    )
+    hidden_id = test_db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "hidden-consumption",
+            "base_url": "https://hidden.example",
+            "api_key": "secret",
+            "is_visible": False,
+        }
+    )
+    china_tz = timezone(timedelta(hours=8))
+    today_start = datetime.now(china_tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    first = (today_start + timedelta(hours=1)).astimezone(timezone.utc).isoformat(timespec="seconds")
+    second = (today_start + timedelta(hours=2)).astimezone(timezone.utc).isoformat(timespec="seconds")
+    test_db.update_account_result(visible_id, {"is_valid": True, "remaining": 20, "unit": "USD", "checked_at": first})
+    test_db.update_account_result(visible_id, {"is_valid": True, "remaining": 16, "unit": "USD", "checked_at": second})
+    test_db.update_account_result(hidden_id, {"is_valid": True, "remaining": 30, "unit": "USD", "checked_at": first})
+    test_db.update_account_result(hidden_id, {"is_valid": True, "remaining": 24, "unit": "USD", "checked_at": second})
+
+    monkeypatch.setattr("app.main.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
+
+    async def stop_scheduler():
+        return None
+
+    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+
+    with TestClient(app) as client:
+        login(client)
+        dashboard = client.get("/api/dashboard")
+
+    assert dashboard.status_code == 200
+    payload = dashboard.json()
+    assert [row["name"] for row in payload["grouped"]["sub2Api"]] == ["visible-consumption"]
+    summary_by_key = {summary["key"]: summary for summary in payload["consumption_summaries"]}
+    assert summary_by_key["today"]["totals"] == [{"amount": 10.0, "unit": "USD"}]
+    assert summary_by_key["today"]["account_count"] == 2
+
+
 def test_dashboard_api_shows_actual_consumption_from_recharge_ratio(tmp_path, monkeypatch):
     test_db = Database(str(tmp_path / "app.db"), "test-key")
     test_db.init()
@@ -576,6 +627,66 @@ def test_dashboard_and_accounts_api_filter_by_name_and_platform(tmp_path, monkey
     assert "newApi" not in accounts.json()
 
 
+def test_dashboard_api_filters_by_low_balance_state(tmp_path, monkeypatch):
+    test_db = Database(str(tmp_path / "app.db"), "test-key")
+    test_db.init()
+    test_db.ensure_admin("admin", "password123")
+    for account in test_db.list_accounts():
+        test_db.delete_account(account["id"])
+
+    low_id = test_db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "low-row",
+            "base_url": "https://low.example",
+            "api_key": "secret",
+            "threshold": 10,
+        }
+    )
+    normal_id = test_db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "normal-row",
+            "base_url": "https://normal.example",
+            "api_key": "secret",
+            "threshold": 10,
+        }
+    )
+    eliminated_id = test_db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "eliminated-row",
+            "base_url": "https://eliminated.example",
+            "api_key": "secret",
+            "threshold": 10,
+            "is_eliminated": True,
+        }
+    )
+    test_db.update_account_result(low_id, {"is_valid": True, "remaining": 4, "unit": "USD"})
+    test_db.update_account_result(normal_id, {"is_valid": True, "remaining": 12, "unit": "USD"})
+    test_db.update_account_result(eliminated_id, {"is_valid": True, "remaining": 1, "unit": "USD"})
+
+    monkeypatch.setattr("app.main.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
+
+    async def stop_scheduler():
+        return None
+
+    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+
+    with TestClient(app) as client:
+        login(client)
+        low_dashboard = client.get("/api/dashboard?low_balance=low")
+        normal_dashboard = client.get("/api/dashboard?low_balance=normal")
+
+    assert low_dashboard.status_code == 200
+    assert normal_dashboard.status_code == 200
+    assert [row["name"] for row in low_dashboard.json()["grouped"]["sub2Api"]] == ["low-row"]
+    assert [row["name"] for row in normal_dashboard.json()["grouped"]["sub2Api"]] == ["normal-row"]
+    assert all(row["name"] != "eliminated-row" for row in normal_dashboard.json()["grouped"]["sub2Api"])
+
+
 def test_account_visibility_and_enabled_controls_are_separate(tmp_path, monkeypatch):
     test_db = Database(str(tmp_path / "app.db"), "test-key")
     test_db.init()
@@ -659,6 +770,58 @@ def test_account_visibility_and_enabled_controls_are_separate(tmp_path, monkeypa
     assert "enabled-row" not in [row["name"] for row in dashboard_after_toggle.json()["grouped"]["sub2Api"]]
     assert "disabled-row" in [row["name"] for row in dashboard_after_toggle.json()["grouped"]["sub2Api"]]
     assert "hidden-row" in [row["name"] for row in dashboard_after_toggle.json()["grouped"]["sub2Api"]]
+
+
+def test_api_update_sub2api_visibility_only_does_not_require_login(tmp_path, monkeypatch):
+    test_db = Database(str(tmp_path / "app.db"), config.app_secret_key)
+    test_db.init()
+    test_db.ensure_admin("admin", "password123")
+    account_id = test_db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "hidden-toggle",
+            "base_url": "https://sub.example",
+            "api_key": "secret",
+            "email": "user@example.com",
+            "password": "password",
+            "is_visible": True,
+            "is_enabled": True,
+        }
+    )
+    monkeypatch.setattr("app.main.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
+
+    async def stop_scheduler():
+        return None
+
+    async def fail_login(*args, **kwargs):
+        raise AssertionError("visibility-only update should not call sub2Api login")
+
+    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+    monkeypatch.setattr("app.main.login_sub2api_tokens", fail_login)
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.put(
+            f"/api/accounts/{account_id}",
+            json={
+                "platform": "sub2Api",
+                "name": "hidden-toggle",
+                "base_url": "https://sub.example",
+                "api_key": "",
+                "email": "",
+                "password": "",
+                "is_visible": False,
+                "is_enabled": False,
+            },
+        )
+        dashboard = client.get("/api/dashboard")
+
+    assert response.status_code == 200
+    assert response.json()["account"]["is_visible"] is False
+    assert response.json()["account"]["is_enabled"] is False
+    assert "hidden-toggle" not in [row["name"] for row in dashboard.json()["grouped"].get("sub2Api", [])]
 
 
 def test_group_rate_change_status_reset_api(tmp_path, monkeypatch):
