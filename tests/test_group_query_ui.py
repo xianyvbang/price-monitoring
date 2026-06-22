@@ -214,6 +214,71 @@ def test_sub2api_group_picker_data_and_api_routes(tmp_path, monkeypatch):
     }
 
 
+def test_missing_group_options_are_not_returned_as_selected(tmp_path, monkeypatch):
+    test_db = Database(str(tmp_path / "app.db"), config.app_secret_key)
+    test_db.init()
+    test_db.ensure_admin("admin", "password123")
+    account_id = test_db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "sub-missing-group",
+            "base_url": "https://sub.example",
+            "api_key": "secret",
+            "email": "user@example.com",
+            "password": "password",
+        }
+    )
+    test_db.replace_account_monitor_groups(
+        account_id,
+        [
+            {"group_id": "basic", "plan_name": "Basic Plan", "effective_rate_multiplier": 0.8},
+            {"group_id": "legacy", "plan_name": "Legacy Plan", "effective_rate_multiplier": 1.2},
+        ],
+    )
+    monkeypatch.setattr("app.main.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
+
+    async def stop_scheduler():
+        return None
+
+    async def fake_sub2api_group_options(account, secret_key, timeout, log=None):
+        return {
+            "is_valid": True,
+            "selected_group_id": "legacy",
+            "groups": [
+                {"id": "basic", "plan_name": "Basic Plan", "effective_rate_multiplier": 0.8},
+                {"id": "pro", "plan_name": "Pro Plan", "effective_rate_multiplier": 1.5},
+            ],
+        }
+
+    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+    monkeypatch.setattr("app.main.query_sub2api_group_options", fake_sub2api_group_options)
+
+    with TestClient(app) as client:
+        login(client)
+        options = client.get(f"/api/accounts/{account_id}/sub2api-groups")
+        selection = client.post(
+            f"/api/accounts/{account_id}/selected-group",
+            json={
+                "group_ids": ["basic", "legacy"],
+                "groups": [
+                    {"id": "basic", "plan_name": "Basic Plan", "effective_rate_multiplier": 0.8},
+                    {"id": "pro", "plan_name": "Pro Plan", "effective_rate_multiplier": 1.5},
+                ],
+            },
+        )
+
+    assert options.status_code == 200
+    assert options.json()["selected_group_ids"] == ["basic"]
+    assert options.json()["selected_group_id"] == "basic"
+    assert options.json()["stored_selected_group_ids"] == ["basic", "legacy"]
+    assert selection.status_code == 200
+    assert selection.json()["removed_group_ids"] == ["legacy"]
+    assert selection.json()["account"]["selected_group_ids"] == ["basic"]
+    assert [group["group_id"] for group in selection.json()["account"]["monitor_groups"]] == ["basic"]
+
+
 def test_selected_newapi_group_shows_rate_on_dashboard_api(tmp_path, monkeypatch):
     test_db = Database(str(tmp_path / "app.db"), config.app_secret_key)
     test_db.init()

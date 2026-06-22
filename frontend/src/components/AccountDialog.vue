@@ -98,7 +98,8 @@ async function submit() {
           accountId: account.id,
           platform: account.platform,
           groups: groups.groups || [],
-          selected: groups.selected_group_ids ?? groups.selectedGroupIds ?? groups.selected_group_id ?? groups.selectedGroupId
+          selected: groups.selected_group_ids ?? groups.selectedGroupIds ?? groups.selected_group_id ?? groups.selectedGroupId,
+          originalSelected: groups.stored_selected_group_ids ?? groups.storedSelectedGroupIds
         });
       } catch (error) {
         ElMessage.warning(`账号已保存，获取分组失败：${error.message || "未知错误"}`);

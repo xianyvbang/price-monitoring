@@ -582,22 +582,41 @@ class Database:
             account = conn.execute("SELECT id FROM accounts WHERE id = ?", (account_id,)).fetchone()
             if not account:
                 raise ValueError("账号不存在")
-            keep_hashes = {_hash_group_id(item["group_id"]) for item in normalized}
-            if keep_hashes:
-                placeholders = ",".join("?" for _ in keep_hashes)
+            existing_rows = conn.execute(
+                """
+                SELECT *
+                FROM account_monitor_groups
+                WHERE account_id = ?
+                ORDER BY sort_order ASC, id ASC
+                """,
+                (account_id,),
+            ).fetchall()
+            existing_by_hash = {row["group_id_hash"]: row for row in existing_rows}
+            normalized_by_hash = {_hash_group_id(item["group_id"]): item for item in normalized}
+            keep_hashes = set(normalized_by_hash)
+            existing_hashes = set(existing_by_hash)
+            added_hashes = keep_hashes - existing_hashes
+            removed_hashes = existing_hashes - keep_hashes
+
+            if not added_hashes and not removed_hashes:
+                return
+
+            if removed_hashes:
+                placeholders = ",".join("?" for _ in removed_hashes)
                 conn.execute(
                     f"""
                     DELETE FROM account_monitor_groups
-                    WHERE account_id = ? AND group_id_hash NOT IN ({placeholders})
+                    WHERE account_id = ? AND group_id_hash IN ({placeholders})
                     """,
-                    (account_id, *keep_hashes),
+                    (account_id, *removed_hashes),
                 )
-            else:
-                conn.execute("DELETE FROM account_monitor_groups WHERE account_id = ?", (account_id,))
 
+            next_sort_order = max((int(row["sort_order"]) for row in existing_rows), default=-1) + 1
             for sort_order, item in enumerate(normalized):
                 group_id = item["group_id"]
                 group_id_hash = _hash_group_id(group_id)
+                if group_id_hash not in added_hashes:
+                    continue
                 summary = _monitor_group_summary(item)
                 conn.execute(
                     """
@@ -607,16 +626,6 @@ class Database:
                         raw_json, sort_order, created_at, updated_at
                     )
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(account_id, group_id_hash) DO UPDATE SET
-                        group_id_enc = excluded.group_id_enc,
-                        plan_name = COALESCE(excluded.plan_name, account_monitor_groups.plan_name),
-                        name = COALESCE(excluded.name, account_monitor_groups.name),
-                        default_rate_multiplier = COALESCE(excluded.default_rate_multiplier, account_monitor_groups.default_rate_multiplier),
-                        user_rate_multiplier = COALESCE(excluded.user_rate_multiplier, account_monitor_groups.user_rate_multiplier),
-                        effective_rate_multiplier = COALESCE(excluded.effective_rate_multiplier, account_monitor_groups.effective_rate_multiplier),
-                        raw_json = COALESCE(excluded.raw_json, account_monitor_groups.raw_json),
-                        sort_order = excluded.sort_order,
-                        updated_at = excluded.updated_at
                     """,
                     (
                         account_id,
@@ -628,12 +637,21 @@ class Database:
                         summary["user_rate_multiplier"],
                         summary["effective_rate_multiplier"],
                         summary["raw_json"],
-                        sort_order,
+                        next_sort_order,
                         now,
                         now,
                     ),
                 )
-            first_group = normalized[0]["group_id"] if normalized else None
+                next_sort_order += 1
+            kept_hashes_in_order = [
+                row["group_id_hash"]
+                for row in existing_rows
+                if row["group_id_hash"] in keep_hashes and row["group_id_hash"] not in removed_hashes
+            ]
+            if kept_hashes_in_order:
+                first_group = normalized_by_hash[kept_hashes_in_order[0]]["group_id"]
+            else:
+                first_group = normalized[0]["group_id"] if normalized else None
             conn.execute(
                 """
                 UPDATE accounts

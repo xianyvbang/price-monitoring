@@ -262,6 +262,10 @@ function dashboardCards(rows, platform) {
   return rows.filter((row) => row.dashboard_is_first_row);
 }
 
+function queryFailureMessage(result, fallback) {
+  return result?.invalid_message || result?.invalidMessage || result?.message || fallback;
+}
+
 async function runQueryAll(trigger = "manual") {
   if (queryAllLoading.value || (trigger === "auto" && monitorPaused.value)) {
     return;
@@ -282,7 +286,12 @@ async function runQueryAll(trigger = "manual") {
         row.last_checked_at = result.checked_at || result.checkedAt || row.last_checked_at;
       });
     });
-    ElMessage.success(trigger === "auto" ? "自动刷新完成" : "查询全部完成");
+    const failedResults = results.filter((result) => result.is_valid === false);
+    if (failedResults.length) {
+      ElMessage.error(`查询失败 ${failedResults.length}/${results.length || failedResults.length}：${queryFailureMessage(failedResults[0], "查询失败")}`);
+    } else {
+      ElMessage.success(trigger === "auto" ? "自动刷新完成" : "查询全部完成");
+    }
     refreshRemaining.value = Math.max(300, Number(settings.value.query_interval || 300));
   } catch (error) {
     ElMessage.error(error.message || "查询全部失败");
@@ -305,7 +314,11 @@ async function queryOne(row) {
       target.actual_today_consumption = result.actual_consumption_stats?.today ?? result.actual_today_consumption ?? target.actual_today_consumption;
       target.last_checked_at = result.checked_at || result.checkedAt || target.last_checked_at;
     });
-    ElMessage.success("查询完成");
+    if (result.is_valid === false) {
+      ElMessage.error(queryFailureMessage(result, "查询失败"));
+    } else {
+      ElMessage.success("查询完成");
+    }
   } catch (error) {
     ElMessage.error(error.message || "查询失败");
   } finally {
@@ -320,7 +333,11 @@ async function queryGroup(row) {
     if (result.extra) {
       await loadDashboard();
     }
-    ElMessage.success(result.is_valid === false ? "查组失败" : "查组完成");
+    if (result.is_valid === false) {
+      ElMessage.error(queryFailureMessage(result, "查组失败"));
+    } else {
+      ElMessage.success("查组完成");
+    }
   } catch (error) {
     ElMessage.error(error.message || "查组失败");
   } finally {
@@ -381,7 +398,8 @@ async function fetchGroups(row) {
       accountId: row.id,
       platform: row.platform,
       groups: payload.groups || [],
-      selected: payload.selected_group_ids ?? payload.selectedGroupIds ?? payload.selected_group_id ?? payload.selectedGroupId
+      selected: payload.selected_group_ids ?? payload.selectedGroupIds ?? payload.selected_group_id ?? payload.selectedGroupId,
+      originalSelected: payload.stored_selected_group_ids ?? payload.storedSelectedGroupIds
     });
   } catch (error) {
     ElMessage.error(error.message || "获取分组失败");

@@ -124,8 +124,12 @@ async function toggleEnabled(account) {
 async function queryGroup(account) {
   account._groupQuerying = true;
   try {
-    await api.queryGroup(account.id);
-    ElMessage.success("查组完成");
+    const result = await api.queryGroup(account.id);
+    if (result.is_valid === false) {
+      ElMessage.error(result.invalid_message || result.invalidMessage || "查组失败");
+    } else {
+      ElMessage.success("查组完成");
+    }
   } catch (error) {
     ElMessage.error(error.message || "查组失败");
   } finally {
@@ -141,7 +145,8 @@ async function fetchGroups(account) {
       accountId: account.id,
       platform: account.platform,
       groups: payload.groups || [],
-      selected: payload.selected_group_ids ?? payload.selectedGroupIds ?? payload.selected_group_id ?? payload.selectedGroupId
+      selected: payload.selected_group_ids ?? payload.selectedGroupIds ?? payload.selected_group_id ?? payload.selectedGroupId,
+      originalSelected: payload.stored_selected_group_ids ?? payload.storedSelectedGroupIds
     });
   } catch (error) {
     ElMessage.error(error.message || "获取分组失败");

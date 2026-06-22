@@ -634,6 +634,55 @@ def _group_ids_from_payload(payload: dict[str, Any]) -> list[str]:
     return result
 
 
+def _payload_has_group_selection(payload: dict[str, Any]) -> bool:
+    return any(
+        key in payload
+        for key in (
+            "group_ids",
+            "groupIds",
+            "monitor_group_ids",
+            "monitorGroupIds",
+            "group_id",
+            "groupId",
+        )
+    )
+
+
+def _monitor_group_ids(account_id: int) -> list[str]:
+    return [
+        group["group_id"]
+        for group in (public_monitor_group(row) for row in db.list_monitor_groups(account_id))
+        if group.get("group_id")
+    ]
+
+
+def _group_id_diff(current_group_ids: list[str], next_group_ids: list[str]) -> tuple[list[str], list[str]]:
+    current_set = set(current_group_ids)
+    next_set = set(next_group_ids)
+    added = [group_id for group_id in next_group_ids if group_id not in current_set]
+    removed = [group_id for group_id in current_group_ids if group_id not in next_set]
+    return added, removed
+
+
+def _group_id_from_group(group: Any) -> str:
+    if not isinstance(group, dict):
+        return ""
+    return str(group.get("id") or group.get("group_id") or group.get("groupId") or group.get("name") or "").strip()
+
+
+def _group_ids_from_groups(groups: Any) -> list[str]:
+    if not isinstance(groups, list):
+        return []
+    result = []
+    seen = set()
+    for group in groups:
+        group_id = _group_id_from_group(group)
+        if group_id and group_id not in seen:
+            seen.add(group_id)
+            result.append(group_id)
+    return result
+
+
 def _groups_by_id_from_payload(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
     raw_groups = payload.get("groups")
     if raw_groups is None and isinstance(payload.get("group"), dict):
@@ -644,25 +693,34 @@ def _groups_by_id_from_payload(payload: dict[str, Any]) -> dict[str, dict[str, A
     for group in raw_groups:
         if not isinstance(group, dict):
             continue
-        group_id = str(group.get("id") or group.get("group_id") or group.get("groupId") or group.get("name") or "").strip()
+        group_id = _group_id_from_group(group)
         if group_id:
             groups[group_id] = group
     return groups
 
 
 def with_monitor_group_selection(account_id: int, result: dict[str, Any]) -> dict[str, Any]:
-    selected_group_ids = [
-        group["group_id"]
-        for group in (public_monitor_group(row) for row in db.list_monitor_groups(account_id))
-        if group.get("group_id")
-    ]
-    selected_group_id = selected_group_ids[0] if selected_group_ids else result.get("selected_group_id")
+    stored_selected_group_ids = _monitor_group_ids(account_id)
+    available_group_ids = _group_ids_from_groups(result.get("groups"))
+    if "groups" in result:
+        available_set = set(available_group_ids)
+        selected_group_ids = [group_id for group_id in stored_selected_group_ids if group_id in available_set]
+    else:
+        selected_group_ids = stored_selected_group_ids
+    result_selected_group_id = str(result.get("selected_group_id") or result.get("selectedGroupId") or "").strip()
+    if not selected_group_ids and result_selected_group_id and (
+        "groups" not in result or result_selected_group_id in set(available_group_ids)
+    ):
+        selected_group_ids = [result_selected_group_id]
+    selected_group_id = selected_group_ids[0] if selected_group_ids else None
     return {
         **result,
         "selected_group_id": selected_group_id,
         "selectedGroupId": selected_group_id,
         "selected_group_ids": selected_group_ids,
         "selectedGroupIds": selected_group_ids,
+        "stored_selected_group_ids": stored_selected_group_ids,
+        "storedSelectedGroupIds": stored_selected_group_ids,
     }
 
 
@@ -1521,9 +1579,25 @@ async def api_select_account_group(request: Request, account_id: int):
         raise HTTPException(status_code=400, detail="仅支持 newApi 或 sub2Api")
     payload = await request.json()
     group_ids = _group_ids_from_payload(payload)
-    if not group_ids:
+    if not group_ids and not _payload_has_group_selection(payload):
         raise HTTPException(status_code=400, detail="请选择分组")
     groups = _groups_by_id_from_payload(payload)
+    if "groups" in payload:
+        available_group_ids = set(groups)
+        group_ids = [group_id for group_id in group_ids if group_id in available_group_ids]
+    current_group_ids = _monitor_group_ids(account_id)
+    added_group_ids, removed_group_ids = _group_id_diff(current_group_ids, group_ids)
+    if not added_group_ids and not removed_group_ids:
+        updated = db.get_account(account_id)
+        return {
+            "ok": True,
+            "changed": False,
+            "account": public_account(updated),
+            "added_group_ids": [],
+            "removed_group_ids": [],
+            "group_result": None,
+            "group_results": [],
+        }
     monitor_groups = []
     selected_results = []
     for group_id in group_ids:
@@ -1537,8 +1611,16 @@ async def api_select_account_group(request: Request, account_id: int):
     else:
         db.update_account_group_result(account_id, {"extra": None})
     updated = db.get_account(account_id)
-    db.add_log("info", "account", f"{account['platform']} / {account['name']} 选择分组: {', '.join(group_ids)}")
-    return {"ok": True, "account": public_account(updated), "group_result": selected_results[0] if selected_results else None, "group_results": selected_results}
+    db.add_log("info", "account", f"{account['platform']} / {account['name']} 选择分组: {', '.join(group_ids) or '未选择'}")
+    return {
+        "ok": True,
+        "changed": True,
+        "account": public_account(updated),
+        "added_group_ids": added_group_ids,
+        "removed_group_ids": removed_group_ids,
+        "group_result": selected_results[0] if selected_results else None,
+        "group_results": selected_results,
+    }
 
 
 @app.post("/api/query-all")

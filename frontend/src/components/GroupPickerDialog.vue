@@ -11,6 +11,7 @@ const accountId = ref(null);
 const platform = ref("");
 const groups = ref([]);
 const selected = ref([]);
+const originalSelected = ref([]);
 
 const title = computed(() => (platform.value === "sub2Api" ? "选择 sub2Api 监控分组" : "选择 newApi 监控分组"));
 
@@ -18,25 +19,51 @@ function open(options) {
   accountId.value = options.accountId;
   platform.value = options.platform || "";
   groups.value = options.groups || [];
-  selected.value = normalizeSelected(options.selected);
+  const availableGroupIds = groupIdsFromGroups(groups.value);
+  const availableGroupIdSet = new Set(availableGroupIds);
+  const storedSelected = normalizeSelected(
+    options.originalSelected ??
+      options.original_selected ??
+      options.storedSelected ??
+      options.stored_selected ??
+      options.storedSelectedGroupIds ??
+      options.stored_selected_group_ids ??
+      options.selected
+  );
+  selected.value = normalizeSelected(options.selected).filter((groupIdValue) => availableGroupIdSet.has(groupIdValue));
+  originalSelected.value = storedSelected;
   visible.value = true;
 }
 
 function normalizeSelected(value) {
+  const values = [];
   if (Array.isArray(value)) {
-    return value.map(String);
+    values.push(...value.map(String));
+  } else if (value !== null && value !== undefined && value !== "") {
+    values.push(
+      ...String(value)
+        .split(/[|;\n]/)
+        .map((item) => item.trim())
+    );
   }
-  if (value === null || value === undefined || value === "") {
-    return [];
-  }
-  return String(value)
-    .split(/[|;\n]/)
-    .map((item) => item.trim())
-    .filter(Boolean);
+  const seen = new Set();
+  return values
+    .map((item) => String(item).trim())
+    .filter((item) => {
+      if (!item || seen.has(item)) {
+        return false;
+      }
+      seen.add(item);
+      return true;
+    });
 }
 
 function groupId(group) {
   return String(group.id ?? group.group_id ?? group.groupId ?? group.name ?? "");
+}
+
+function groupIdsFromGroups(value) {
+  return normalizeSelected(value.map((group) => groupId(group)));
 }
 
 function groupLabel(group) {
@@ -49,18 +76,30 @@ function rateLabel(group) {
 }
 
 async function save() {
-  if (!selected.value.length) {
-    ElMessage.warning("请选择分组");
+  const availableGroupIdSet = new Set(groupIdsFromGroups(groups.value));
+  const nextSelected = normalizeSelected(selected.value).filter((groupIdValue) => availableGroupIdSet.has(groupIdValue));
+  const original = normalizeSelected(originalSelected.value);
+  const originalSet = new Set(original);
+  const nextSet = new Set(nextSelected);
+  const added = nextSelected.filter((groupIdValue) => !originalSet.has(groupIdValue));
+  const removed = original.filter((groupIdValue) => !nextSet.has(groupIdValue));
+  if (!added.length && !removed.length) {
+    ElMessage.info("分组未变化");
+    visible.value = false;
     return;
   }
-  const selectedGroups = groups.value.filter((group) => selected.value.includes(groupId(group)));
+  selected.value = nextSelected;
+  const selectedGroups = groups.value.filter((group) => nextSet.has(groupId(group)));
   loading.value = true;
   try {
     const payload = await api.selectGroup(accountId.value, {
-      group_ids: selected.value,
-      groups: selectedGroups
+      group_ids: nextSelected,
+      groups: selectedGroups,
+      original_group_ids: original,
+      added_group_ids: added,
+      removed_group_ids: removed
     });
-    ElMessage.success("分组已保存");
+    ElMessage.success(nextSelected.length ? "分组已保存" : "分组已清空");
     visible.value = false;
     emit("saved", payload.account);
   } catch (error) {

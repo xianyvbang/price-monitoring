@@ -282,6 +282,60 @@ def test_selected_group_can_be_replaced(tmp_path):
     assert account["last_group_rate_changed"] == 0
 
 
+def test_monitor_groups_replace_uses_group_id_diff(tmp_path):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+    account_id = db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "sub-diff",
+            "base_url": "https://example.com",
+            "api_key": "sk-test",
+        }
+    )
+    db.replace_account_monitor_groups(
+        account_id,
+        [
+            {"group_id": "basic", "plan_name": "Basic Plan", "effective_rate_multiplier": 0.8},
+            {"group_id": "pro", "plan_name": "Pro Plan", "effective_rate_multiplier": 1.5},
+        ],
+    )
+    db.update_account_group_rate_change_status(account_id, True, group_id="pro")
+
+    before = {decrypt_value(row["group_id_enc"], "test-key"): dict(row) for row in db.list_monitor_groups(account_id)}
+    db.replace_account_monitor_groups(
+        account_id,
+        [
+            {"group_id": "basic", "plan_name": "Renamed Basic", "effective_rate_multiplier": 9.9},
+            {"group_id": "pro", "plan_name": "Renamed Pro", "effective_rate_multiplier": 8.8},
+        ],
+    )
+    unchanged = {decrypt_value(row["group_id_enc"], "test-key"): dict(row) for row in db.list_monitor_groups(account_id)}
+
+    assert unchanged["basic"]["id"] == before["basic"]["id"]
+    assert unchanged["basic"]["plan_name"] == "Basic Plan"
+    assert unchanged["pro"]["id"] == before["pro"]["id"]
+    assert unchanged["pro"]["plan_name"] == "Pro Plan"
+    assert unchanged["pro"]["last_group_rate_changed"] == 1
+
+    db.replace_account_monitor_groups(
+        account_id,
+        [
+            {"group_id": "pro", "plan_name": "Ignored Pro Rename", "effective_rate_multiplier": 7.7},
+            {"group_id": "team", "plan_name": "Team Plan", "effective_rate_multiplier": 1.1},
+        ],
+    )
+    after = {decrypt_value(row["group_id_enc"], "test-key"): dict(row) for row in db.list_monitor_groups(account_id)}
+
+    assert list(after) == ["pro", "team"]
+    assert after["pro"]["id"] == before["pro"]["id"]
+    assert after["pro"]["plan_name"] == "Pro Plan"
+    assert after["pro"]["last_group_rate_changed"] == 1
+    assert after["team"]["id"] not in {before["basic"]["id"], before["pro"]["id"]}
+    assert after["team"]["plan_name"] == "Team Plan"
+    assert decrypt_value(db.get_account(account_id)["key_id_enc"], "test-key") == "pro"
+
+
 def test_group_result_only_updates_extra(tmp_path):
     db = Database(str(tmp_path / "app.db"), "test-key")
     db.init()
