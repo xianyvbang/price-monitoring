@@ -1441,6 +1441,8 @@ async def api_update_account(request: Request, account_id: int):
 
 
 async def _prepare_account_data_for_save(account_data: dict[str, Any], current_account: Any | None = None) -> dict[str, Any]:
+    if account_data["platform"] == "sub2Api" and not bool(account_data.get("is_visible", True)):
+        return account_data
     if _is_sub2api_visibility_only_save(account_data, current_account):
         return account_data
     return await _prepare_sub2api_account_data_for_save(account_data, current_account)
