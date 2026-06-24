@@ -889,6 +889,49 @@ def test_api_update_sub2api_visibility_only_does_not_require_login(tmp_path, mon
     assert "hidden-toggle" not in [row["name"] for row in dashboard.json()["grouped"].get("sub2Api", [])]
 
 
+def test_sub2api_groups_api_persists_refreshed_tokens(tmp_path, monkeypatch):
+    test_db = Database(str(tmp_path / "app.db"), config.app_secret_key)
+    test_db.init()
+    test_db.ensure_admin("admin", "password123")
+    account_id = test_db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "sub",
+            "base_url": "https://sub.example",
+            "api_key": "secret",
+            "access_token": "stale-at",
+            "refresh_token": "old-rt",
+        }
+    )
+    monkeypatch.setattr("app.main.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
+
+    async def stop_scheduler():
+        return None
+
+    async def fake_group_options(account, secret_key, timeout, log=None):
+        return {
+            "is_valid": True,
+            "groups": [{"id": "basic", "plan_name": "Basic"}],
+            "refreshed_access_token": "fresh-at",
+            "refreshed_refresh_token": "fresh-rt",
+        }
+
+    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+    monkeypatch.setattr("app.main.query_sub2api_group_options", fake_group_options)
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.get(f"/api/accounts/{account_id}/sub2api-groups")
+
+    account = test_db.get_account(account_id)
+    assert response.status_code == 200
+    assert response.json()["groups"][0]["id"] == "basic"
+    assert decrypt_value(account["access_token_enc"], config.app_secret_key) == "fresh-at"
+    assert decrypt_value(account["refresh_token_enc"], config.app_secret_key) == "fresh-rt"
+
+
 def test_group_rate_change_status_reset_api(tmp_path, monkeypatch):
     test_db = Database(str(tmp_path / "app.db"), "test-key")
     test_db.init()

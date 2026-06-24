@@ -352,9 +352,9 @@ async def test_sub2api_group_query_refreshes_when_configured_access_token_fails(
 
 
 @pytest.mark.asyncio
-async def test_sub2api_group_query_uses_refresh_token_before_access_token_expires(monkeypatch):
+async def test_sub2api_group_query_uses_access_token_before_refresh_token(monkeypatch):
     monkeypatch.setattr("app.services.balance.httpx.AsyncClient", DummyClient)
-    DummyClient.post_payload = {"data": {"access_token": "fresh-at", "refresh_token": "fresh-rt", "expires_in": 3600}}
+    DummyClient.post_payload = {}
     DummyClient.get_payloads = [
         {"planName": "team"},
         {"data": [{"id": "basic", "plan_name": "Basic Plan", "rate_multiplier": 1.2}]},
@@ -366,16 +366,22 @@ async def test_sub2api_group_query_uses_refresh_token_before_access_token_expire
         "name": "sub",
         "base_url": "https://2chat.cc",
         "api_key_enc": encrypt_value("secret", "test-key"),
+        "access_token_enc": encrypt_value("configured-at", "test-key"),
         "refresh_token_enc": encrypt_value("old-rt", "test-key"),
     }
 
     result = await query_sub2api_group(account, "test-key", 3)
 
     assert result["is_valid"] is True
-    assert result["refreshed_access_token"] == "fresh-at"
-    assert result["refreshed_refresh_token"] == "fresh-rt"
+    assert result.get("refreshed_access_token") is None
+    assert result.get("refreshed_refresh_token") is None
     assert DummyClient.requests[0]["url"] == "https://2chat.cc/v1/usage"
-    assert DummyClient.requests[1]["url"] == "https://2chat.cc/api/v1/auth/refresh"
+    assert [request["url"] for request in DummyClient.requests] == [
+        "https://2chat.cc/v1/usage",
+        "https://2chat.cc/api/v1/groups/available",
+        "https://2chat.cc/api/v1/groups/rates",
+    ]
+    assert DummyClient.requests[1]["headers"]["Authorization"] == "Bearer configured-at"
 
 
 @pytest.mark.asyncio

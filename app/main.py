@@ -1433,6 +1433,7 @@ async def api_update_account(request: Request, account_id: int):
         raise HTTPException(status_code=404, detail="账号不存在")
     try:
         account_data = _account_patch_from_payload(payload, current_account)
+        account_data = await _prepare_account_data_for_save(account_data, current_account)
         db.update_account(account_id, account_data)
     except ValueError:
         raise HTTPException(status_code=404, detail="账号不存在") from None
@@ -1484,23 +1485,39 @@ def _is_sub2api_visibility_only_save(account_data: dict[str, Any], current_accou
 async def _prepare_sub2api_account_data_for_save(account_data: dict[str, Any], current_account: Any | None = None) -> dict[str, Any]:
     if account_data["platform"] != "sub2Api":
         return account_data
-    email = str(account_data.get("email") or "").strip() or (
-        decrypt_value(current_account["email_enc"], config.app_secret_key) if current_account else ""
-    )
-    password = str(account_data.get("password") or "").strip() or (
-        decrypt_value(current_account["password_enc"], config.app_secret_key) if current_account else ""
-    )
+    access_token = str(account_data.get("access_token") or "").strip()
+    refresh_token = str(account_data.get("refresh_token") or "").strip()
+    if access_token or refresh_token:
+        return account_data
+    email = str(account_data.get("email") or "").strip()
+    password = str(account_data.get("password") or "").strip()
+    if not email or not password:
+        return account_data
     settings = db.get_general_settings()
-    token_result = await login_sub2api_tokens(
-        account_data["base_url"],
-        email,
-        password,
-        settings["request_timeout"],
-        db.add_log,
-        current_account or account_data,
-    )
+    try:
+        token_result = await login_sub2api_tokens(
+            account_data["base_url"],
+            email,
+            password,
+            settings["request_timeout"],
+            db.add_log,
+            current_account or account_data,
+        )
+    except Exception as exc:
+        db.add_log(
+            "warning",
+            "account",
+            f"sub2Api 登录换取 token 异常，仍保存账号: {account_data.get('platform')} / {account_data.get('name')} - {exc}",
+        )
+        return account_data
     if not token_result.get("is_valid"):
-        raise HTTPException(status_code=400, detail=token_result.get("invalid_message") or "sub2Api 重新登录失败")
+        db.add_log(
+            "warning",
+            "account",
+            f"sub2Api 登录换取 token 失败，仍保存账号: {account_data.get('platform')} / {account_data.get('name')} - "
+            f"{token_result.get('invalid_message') or 'sub2Api 重新登录失败'}",
+        )
+        return account_data
     account_data["access_token"] = token_result.get("access_token")
     account_data["refresh_token"] = token_result.get("refresh_token")
     return account_data
@@ -1568,6 +1585,10 @@ async def api_sub2api_groups(request: Request, account_id: int):
     result = await query_sub2api_group_options(account, db.secret_key, settings["request_timeout"], db.add_log)
     if not result.get("is_valid"):
         return JSONResponse(result, status_code=400)
+    refreshed_access_token = result.get("refreshed_access_token")
+    refreshed_refresh_token = result.get("refreshed_refresh_token")
+    if refreshed_access_token or refreshed_refresh_token:
+        db.update_account_tokens(account_id, access_token=refreshed_access_token, refresh_token=refreshed_refresh_token)
     return with_monitor_group_selection(account_id, result)
 
 

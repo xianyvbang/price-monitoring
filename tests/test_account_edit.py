@@ -240,6 +240,87 @@ def test_api_create_sub2api_relogs_and_persists_tokens(tmp_path, monkeypatch):
     assert decrypt_value(account["refresh_token_enc"], config.app_secret_key) == "fresh-rt"
 
 
+def test_api_create_sub2api_saves_when_login_fails(tmp_path, monkeypatch):
+    test_db = Database(str(tmp_path / "app.db"), config.app_secret_key)
+    test_db.init()
+    test_db.ensure_admin("admin", "password123")
+    monkeypatch.setattr("app.main.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
+
+    async def stop_scheduler():
+        return None
+
+    async def fail_login(base_url, email, password, timeout, log=None, account=None):
+        assert base_url == "https://sub.example"
+        assert email == "user@example.com"
+        assert password == "bad-password"
+        return {"is_valid": False, "invalid_message": "login failed"}
+
+    monkeypatch.setattr("app.main.login_sub2api_tokens", fail_login)
+    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+
+    with TestClient(app) as client:
+        client.post("/login", data={"username": "admin", "password": "password123"})
+        response = client.post(
+            "/api/accounts",
+            json={
+                "platform": "sub2Api",
+                "name": "sub-login-fail",
+                "base_url": "https://sub.example",
+                "api_key": "sk-test",
+                "email": "user@example.com",
+                "password": "bad-password",
+            },
+        )
+
+    assert response.status_code == 200
+    account = test_db.get_account(response.json()["id"])
+    assert decrypt_value(account["email_enc"], config.app_secret_key) == "user@example.com"
+    assert decrypt_value(account["password_enc"], config.app_secret_key) == "bad-password"
+    assert decrypt_value(account["access_token_enc"], config.app_secret_key) is None
+    assert decrypt_value(account["refresh_token_enc"], config.app_secret_key) is None
+
+
+def test_api_create_sub2api_uses_provided_tokens_before_login(tmp_path, monkeypatch):
+    test_db = Database(str(tmp_path / "app.db"), config.app_secret_key)
+    test_db.init()
+    test_db.ensure_admin("admin", "password123")
+    monkeypatch.setattr("app.main.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
+
+    async def stop_scheduler():
+        return None
+
+    async def fail_login(*args, **kwargs):
+        raise AssertionError("provided access/refresh tokens should be tried before login")
+
+    monkeypatch.setattr("app.main.login_sub2api_tokens", fail_login)
+    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+
+    with TestClient(app) as client:
+        client.post("/login", data={"username": "admin", "password": "password123"})
+        response = client.post(
+            "/api/accounts",
+            json={
+                "platform": "sub2Api",
+                "name": "sub-token-create",
+                "base_url": "https://sub.example",
+                "api_key": "sk-test",
+                "email": "user@example.com",
+                "password": "login-password",
+                "access_token": "provided-at",
+                "refresh_token": "provided-rt",
+            },
+        )
+
+    assert response.status_code == 200
+    account = test_db.get_account(response.json()["id"])
+    assert decrypt_value(account["access_token_enc"], config.app_secret_key) == "provided-at"
+    assert decrypt_value(account["refresh_token_enc"], config.app_secret_key) == "provided-rt"
+
+
 def test_api_create_hidden_sub2api_skips_login_and_allows_empty_email_password(tmp_path, monkeypatch):
     test_db = Database(str(tmp_path / "app.db"), config.app_secret_key)
     test_db.init()
@@ -277,6 +358,48 @@ def test_api_create_hidden_sub2api_skips_login_and_allows_empty_email_password(t
     assert payload["account"]["is_visible"] is False
     assert payload["account"]["is_enabled"] is False
     account = test_db.get_account(payload["id"])
+    assert decrypt_value(account["email_enc"], config.app_secret_key) is None
+    assert decrypt_value(account["password_enc"], config.app_secret_key) is None
+    assert decrypt_value(account["access_token_enc"], config.app_secret_key) is None
+    assert decrypt_value(account["refresh_token_enc"], config.app_secret_key) is None
+
+
+def test_api_create_sub2api_saves_when_tokens_and_login_are_blank(tmp_path, monkeypatch):
+    test_db = Database(str(tmp_path / "app.db"), config.app_secret_key)
+    test_db.init()
+    test_db.ensure_admin("admin", "password123")
+    monkeypatch.setattr("app.main.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
+
+    async def stop_scheduler():
+        return None
+
+    async def fail_login(*args, **kwargs):
+        raise AssertionError("blank tokens and blank login should save without login")
+
+    monkeypatch.setattr("app.main.login_sub2api_tokens", fail_login)
+    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+
+    with TestClient(app) as client:
+        client.post("/login", data={"username": "admin", "password": "password123"})
+        response = client.post(
+            "/api/accounts",
+            json={
+                "platform": "sub2Api",
+                "name": "blank-auth-sub",
+                "base_url": "https://sub.example",
+                "api_key": "sk-test",
+                "email": "",
+                "password": "",
+                "access_token": "",
+                "refresh_token": "",
+                "is_visible": True,
+            },
+        )
+
+    assert response.status_code == 200
+    account = test_db.get_account(response.json()["id"])
     assert decrypt_value(account["email_enc"], config.app_secret_key) is None
     assert decrypt_value(account["password_enc"], config.app_secret_key) is None
     assert decrypt_value(account["access_token_enc"], config.app_secret_key) is None

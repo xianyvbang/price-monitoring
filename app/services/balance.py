@@ -477,14 +477,7 @@ async def _resolve_sub2api_access_token(
     log: LogCallback | None,
     account: Any,
 ) -> dict[str, Any]:
-    configured_expires_at = _extract_jwt_expiry(configured_access_token) if configured_access_token else None
-    configured_token_needs_refresh = bool(
-        configured_access_token
-        and configured_refresh_token
-        and configured_expires_at is not None
-        and _now_timestamp() >= max(_now_timestamp(), configured_expires_at - SUB2API_TOKEN_REFRESH_SKEW_SECONDS)
-    )
-    if configured_access_token and not configured_token_needs_refresh:
+    if configured_access_token:
         return {
             "access_token": configured_access_token,
             "refresh_token": configured_refresh_token,
@@ -496,13 +489,6 @@ async def _resolve_sub2api_access_token(
         if refreshed.get("is_valid") is False:
             return await _login_sub2api_token_state(client, base_url, email, password, cache_key, log, account)
         return refreshed
-    if configured_access_token:
-        return {
-            "access_token": configured_access_token,
-            "refresh_token": configured_refresh_token,
-            "used_cached_token": False,
-            "used_configured_token": True,
-        }
     cached = _get_cached_sub2api_token_state(cache_key)
     if cached:
         if cached.get("refresh_token") and _token_needs_refresh(cached):
