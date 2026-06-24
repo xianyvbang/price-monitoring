@@ -545,6 +545,40 @@ a {
   justify-content: flex-end;
 }
 
+.token-helper {
+  align-items: flex-start;
+  background: var(--panel-soft);
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  color: var(--muted);
+  display: flex;
+  flex-direction: column;
+  font-size: 12px;
+  gap: 8px;
+  line-height: 1.4;
+  margin-top: 8px;
+  padding: 10px 12px;
+  width: 100%;
+}
+
+.token-helper-command.el-button {
+  height: auto;
+  justify-content: flex-start;
+  margin-left: 0;
+  min-height: 32px;
+  padding: 7px 10px;
+  white-space: normal;
+  width: 100%;
+}
+
+.token-helper-command code {
+  color: var(--primary);
+  font-family: Consolas, "SFMono-Regular", "Courier New", monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 .login-page {
   align-items: center;
   display: grid;

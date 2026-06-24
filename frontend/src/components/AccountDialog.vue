@@ -1,6 +1,7 @@
 <script setup>
 import { nextTick, reactive, ref } from "vue";
 import { ElMessage } from "element-plus";
+import { CopyDocument } from "@element-plus/icons-vue";
 import { api } from "../api";
 import { clone, normalizeAccountForm, selectedGroupIds } from "../utils";
 
@@ -12,6 +13,8 @@ const mode = ref("create");
 const formRef = ref(null);
 const form = reactive(normalizeAccountForm());
 const initialForm = ref(normalizeAccountForm());
+const accessTokenSnippet = "localStorage.getItem('auth_token')";
+const refreshTokenSnippet = "localStorage.getItem('refresh_token')";
 
 const rules = {
   platform: [{ required: true, message: "请选择平台", trigger: "change" }],
@@ -74,6 +77,31 @@ function shouldFetchGroupsAfterSave(account, savedPayload, isEdit) {
     Boolean(savedPayload.access_token) ||
     Boolean(savedPayload.refresh_token)
   );
+}
+
+async function copyText(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  document.body.removeChild(textarea);
+}
+
+async function copyTokenSnippet(snippet) {
+  try {
+    await copyText(snippet);
+    ElMessage.success("已复制 JS 命令");
+  } catch {
+    ElMessage.error("复制失败，请手动复制命令");
+  }
 }
 
 async function submit() {
@@ -176,9 +204,21 @@ defineExpose({ open });
       </el-row>
       <el-form-item label="accessToken">
         <el-input v-model="form.access_token" type="password" show-password autocomplete="off" :placeholder="form.platform === 'newApi' ? 'newApi 必填，编辑时留空不修改' : 'sub2Api 可选，编辑时留空不修改'" />
+        <div v-if="form.platform === 'sub2Api'" class="token-helper">
+          <span>2chat 登录后，在浏览器控制台执行获取 AT：</span>
+          <el-button class="token-helper-command" :icon="CopyDocument" @click="copyTokenSnippet(accessTokenSnippet)">
+            <code>{{ accessTokenSnippet }}</code>
+          </el-button>
+        </div>
       </el-form-item>
       <el-form-item v-if="form.platform === 'sub2Api'" label="refreshToken">
         <el-input v-model="form.refresh_token" type="password" show-password autocomplete="off" placeholder="可选，编辑时留空不修改" />
+        <div class="token-helper">
+          <span>2chat 登录后，在浏览器控制台执行获取 RT：</span>
+          <el-button class="token-helper-command" :icon="CopyDocument" @click="copyTokenSnippet(refreshTokenSnippet)">
+            <code>{{ refreshTokenSnippet }}</code>
+          </el-button>
+        </div>
       </el-form-item>
       <el-form-item v-if="form.platform === 'newApi'" label="newApi userId">
         <el-input v-model="form.user_id" />
