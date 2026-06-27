@@ -70,6 +70,38 @@ def test_sub2api_saves_refresh_token(tmp_path):
     assert decrypt_value(account["refresh_token_enc"], "test-key") == "rt-test"
 
 
+def test_sub2api_saves_and_clears_login_extra_params(tmp_path):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+
+    account_id = db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "sub-extra",
+            "base_url": "https://example.com",
+            "email": "user@example.com",
+            "password": "login-password",
+            "api_key": "sk-test",
+            "login_extra_params": "not_in_cn_confirmed:true",
+        }
+    )
+
+    account = db.get_account(account_id)
+    assert decrypt_value(account["login_extra_params_enc"], "test-key") == "not_in_cn_confirmed:true"
+
+    db.update_account(
+        account_id,
+        {
+            "platform": "sub2Api",
+            "name": "sub-extra",
+            "base_url": "https://example.com",
+            "login_extra_params": "",
+        },
+    )
+
+    assert db.get_account(account_id)["login_extra_params_enc"] is None
+
+
 def test_account_note_is_saved_and_updated(tmp_path):
     db = Database(str(tmp_path / "app.db"), "test-key")
     db.init()

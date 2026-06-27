@@ -119,9 +119,10 @@ async def login_sub2api_tokens(
     if not password:
         return normalize_result({"is_valid": False, "invalid_message": "缺少 password，无法重新登录"})
     account_context = account or {"platform": "sub2Api", "name": email, "base_url": base_url}
+    login_extra_params = _sub2api_login_extra_params_from_account(account_context)
     cache_key = _sub2api_token_cache_key(base_url, email)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        token_result = await _login_sub2api(client, base_url, email, password, cache_key, log, account_context)
+        token_result = await _login_sub2api(client, base_url, email, password, login_extra_params, cache_key, log, account_context)
     if isinstance(token_result, dict) and token_result.get("is_valid") is False:
         return token_result
     return {
@@ -136,6 +137,7 @@ async def _query_sub2api_group(account: Any, secret_key: str, timeout: float, lo
     api_key = decrypt_value(_account_value(account, "api_key_enc"), secret_key)
     email = decrypt_value(_account_value(account, "email_enc"), secret_key)
     password = decrypt_value(_account_value(account, "password_enc"), secret_key)
+    login_extra_params = decrypt_value(_account_value(account, "login_extra_params_enc"), secret_key)
     configured_access_token = decrypt_value(_account_value(account, "access_token_enc"), secret_key)
     configured_refresh_token = decrypt_value(_account_value(account, "refresh_token_enc"), secret_key)
     if not api_key:
@@ -160,6 +162,7 @@ async def _query_sub2api_group(account: Any, secret_key: str, timeout: float, lo
             configured_refresh_token,
             email,
             password,
+            login_extra_params,
             token_cache_key,
             log,
             account,
@@ -171,7 +174,7 @@ async def _query_sub2api_group(account: Any, secret_key: str, timeout: float, lo
         used_cached_token = bool(token_state.get("used_cached_token"))
         used_configured_token = bool(token_state.get("used_configured_token"))
         if not token:
-            token_result = await _login_sub2api_token_state(client, base_url, email, password, token_cache_key, log, account)
+            token_result = await _login_sub2api_token_state(client, base_url, email, password, login_extra_params, token_cache_key, log, account)
             if token_result.get("is_valid") is False:
                 return token_result
             token = token_result["access_token"]
@@ -202,6 +205,7 @@ async def _query_sub2api_group(account: Any, secret_key: str, timeout: float, lo
                 configured_refresh_token if used_configured_token else token_state.get("refresh_token"),
                 email,
                 password,
+                login_extra_params,
                 token_cache_key,
                 log,
                 account,
@@ -239,6 +243,7 @@ async def _query_sub2api_group_options(account: Any, secret_key: str, timeout: f
     selected_group_id = decrypt_value(_account_value(account, "key_id_enc"), secret_key)
     email = decrypt_value(_account_value(account, "email_enc"), secret_key)
     password = decrypt_value(_account_value(account, "password_enc"), secret_key)
+    login_extra_params = decrypt_value(_account_value(account, "login_extra_params_enc"), secret_key)
     configured_access_token = decrypt_value(_account_value(account, "access_token_enc"), secret_key)
     configured_refresh_token = decrypt_value(_account_value(account, "refresh_token_enc"), secret_key)
     if not configured_access_token and not configured_refresh_token:
@@ -257,6 +262,7 @@ async def _query_sub2api_group_options(account: Any, secret_key: str, timeout: f
             configured_refresh_token,
             email,
             password,
+            login_extra_params,
             token_cache_key,
             log,
             account,
@@ -278,6 +284,7 @@ async def _query_sub2api_group_options(account: Any, secret_key: str, timeout: f
                     configured_refresh_token if used_configured_token else token_state.get("refresh_token"),
                     email,
                     password,
+                    login_extra_params,
                     token_cache_key,
                     log,
                     account,
@@ -405,6 +412,48 @@ def _account_value(account: Any, key: str) -> Any:
         return None
 
 
+def _sub2api_login_extra_params_from_account(account: Any) -> str | None:
+    value = _account_value(account, "login_extra_params")
+    return str(value) if value is not None else None
+
+
+def _sub2api_login_payload(email: str, password: str, login_extra_params: str | None) -> dict[str, Any]:
+    extra_result = _parse_sub2api_login_extra_params(login_extra_params)
+    if isinstance(extra_result, dict) and extra_result.get("is_valid") is False and "invalid_message" in extra_result:
+        return extra_result
+    return {"email": email, "password": password, **extra_result}
+
+
+def _parse_sub2api_login_extra_params(value: str | None) -> dict[str, Any]:
+    text = str(value or "").strip()
+    if not text:
+        return {}
+    if ":" not in text:
+        return normalize_result({"is_valid": False, "invalid_message": "登录额外参数格式错误，请使用 key:value"})
+    key, raw_value = text.split(":", 1)
+    key = key.strip()
+    if not key:
+        return normalize_result({"is_valid": False, "invalid_message": "登录额外参数格式错误，key 不能为空"})
+    normalized_key = key.replace("-", "_").lower()
+    if normalized_key in {"email", "password"}:
+        return normalize_result({"is_valid": False, "invalid_message": "登录额外参数不能覆盖 email 或 password"})
+    return {key: _parse_sub2api_login_extra_value(raw_value.strip())}
+
+
+def _parse_sub2api_login_extra_value(value: str) -> Any:
+    normalized = value.lower()
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    if normalized == "null":
+        return None
+    number = _optional_number(value)
+    if number is not None:
+        return int(number) if number.is_integer() and "." not in value and "e" not in normalized else number
+    return value
+
+
 def _newapi_auth_headers(account: Any, secret_key: str) -> dict[str, Any]:
     access_token = decrypt_value(_account_value(account, "access_token_enc"), secret_key)
     user_id = decrypt_value(_account_value(account, "user_id_enc"), secret_key)
@@ -473,6 +522,7 @@ async def _resolve_sub2api_access_token(
     configured_refresh_token: str | None,
     email: str | None,
     password: str | None,
+    login_extra_params: str | None,
     cache_key: str,
     log: LogCallback | None,
     account: Any,
@@ -487,7 +537,7 @@ async def _resolve_sub2api_access_token(
     if configured_refresh_token:
         refreshed = await _refresh_sub2api_token_state(client, base_url, configured_refresh_token, cache_key, log, account)
         if refreshed.get("is_valid") is False:
-            return await _login_sub2api_token_state(client, base_url, email, password, cache_key, log, account)
+            return await _login_sub2api_token_state(client, base_url, email, password, login_extra_params, cache_key, log, account)
         return refreshed
     cached = _get_cached_sub2api_token_state(cache_key)
     if cached:
@@ -501,7 +551,7 @@ async def _resolve_sub2api_access_token(
             "used_cached_token": True,
             "used_configured_token": False,
         }
-    return await _login_sub2api_token_state(client, base_url, email, password, cache_key, log, account)
+    return await _login_sub2api_token_state(client, base_url, email, password, login_extra_params, cache_key, log, account)
 
 
 async def _refresh_sub2api_token_state(
@@ -530,6 +580,7 @@ async def _login_sub2api_token_state(
     base_url: str,
     email: str | None,
     password: str | None,
+    login_extra_params: str | None,
     cache_key: str,
     log: LogCallback | None,
     account: Any,
@@ -538,7 +589,7 @@ async def _login_sub2api_token_state(
         return normalize_result({"is_valid": False, "invalid_message": "缺少 email，无法重新登录"})
     if not password:
         return normalize_result({"is_valid": False, "invalid_message": "缺少 password，无法重新登录"})
-    token_result = await _login_sub2api(client, base_url, email, password, cache_key, log, account)
+    token_result = await _login_sub2api(client, base_url, email, password, login_extra_params, cache_key, log, account)
     if isinstance(token_result, dict) and token_result.get("is_valid") is False:
         return token_result
     return {
@@ -557,6 +608,7 @@ async def _recover_sub2api_token_after_access_failure(
     refresh_token: str | None,
     email: str | None,
     password: str | None,
+    login_extra_params: str | None,
     cache_key: str,
     log: LogCallback | None,
     account: Any,
@@ -567,7 +619,7 @@ async def _recover_sub2api_token_after_access_failure(
         refreshed = await _refresh_sub2api_token_state(client, base_url, refresh_token, cache_key, log, account)
         if refreshed.get("is_valid") is not False:
             return refreshed
-    return await _login_sub2api_token_state(client, base_url, email, password, cache_key, log, account)
+    return await _login_sub2api_token_state(client, base_url, email, password, login_extra_params, cache_key, log, account)
 
 
 async def _login_sub2api(
@@ -575,14 +627,18 @@ async def _login_sub2api(
     base_url: str,
     email: str,
     password: str,
+    login_extra_params: str | None,
     cache_key: str,
     log: LogCallback | None,
     account: Any,
 ) -> str | dict[str, Any]:
+    login_payload_result = _sub2api_login_payload(email, password, login_extra_params)
+    if isinstance(login_payload_result, dict) and login_payload_result.get("is_valid") is False:
+        return login_payload_result
     login_response = await _logged_post_json(
         client,
         f"{base_url}/api/v1/auth/login",
-        {"email": email, "password": password},
+        login_payload_result,
         {},
         log,
         account,

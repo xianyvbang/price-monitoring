@@ -364,6 +364,28 @@ a {
   gap: 4px;
 }
 
+.usage-bar {
+  align-items: center;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: minmax(84px, 1fr) auto;
+  min-width: 0;
+}
+
+.usage-bar span {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.reset-list {
+  color: var(--muted);
+  display: grid;
+  font-size: 12px;
+  gap: 4px;
+  line-height: 1.35;
+}
+
 .mobile-stack {
   display: grid;
   gap: 12px;

@@ -8,6 +8,7 @@ from app.models import utc_now
 from app.services.alerts import handle_alert_state
 from app.services.balance import query_account, query_newapi_group, query_sub2api_group
 from app.services.emailer import build_group_rate_change_email, build_reminder_email, send_email
+from app.services.opencode_go import refresh_opencode_go_account
 
 
 class BalanceScheduler:
@@ -16,6 +17,7 @@ class BalanceScheduler:
         self._task: asyncio.Task[None] | None = None
         self._group_rate_task: asyncio.Task[None] | None = None
         self._reminder_task: asyncio.Task[None] | None = None
+        self._opencode_go_task: asyncio.Task[None] | None = None
         self._stopped = asyncio.Event()
         self._settings_changed = asyncio.Event()
 
@@ -29,6 +31,9 @@ class BalanceScheduler:
         if self._reminder_task is None or self._reminder_task.done():
             self._stopped.clear()
             self._reminder_task = asyncio.create_task(self._run_reminder_loop())
+        if self._opencode_go_task is None or self._opencode_go_task.done():
+            self._stopped.clear()
+            self._opencode_go_task = asyncio.create_task(self._run_opencode_go_loop())
 
     async def stop(self) -> None:
         self._stopped.set()
@@ -44,6 +49,10 @@ class BalanceScheduler:
             self._reminder_task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._reminder_task
+        if self._opencode_go_task:
+            self._opencode_go_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._opencode_go_task
 
     async def _run(self) -> None:
         while not self._stopped.is_set():
@@ -67,6 +76,15 @@ class BalanceScheduler:
         while not self._stopped.is_set():
             await send_due_reminders(self.db)
             await self._wait(30)
+
+    async def _run_opencode_go_loop(self) -> None:
+        while not self._stopped.is_set():
+            settings = self.db.get_general_settings()
+            if settings["monitor_paused"]:
+                await self._wait_for_resume()
+                continue
+            await query_all_opencode_go_accounts(self.db)
+            await self._wait(settings["query_interval"])
 
     def notify_settings_changed(self) -> None:
         self._settings_changed.set()
@@ -268,6 +286,31 @@ async def query_all_accounts(db: Database) -> list[dict]:
     results = []
     for account in db.list_accounts(enabled_only=True, visible_only=True):
         results.append(await query_one_account(db, account["id"]))
+    return results
+
+
+async def query_opencode_go_for_account(db: Database, account_id: int) -> dict:
+    account = db.get_opencode_go_account(account_id)
+    if not account:
+        db.add_log("error", "opencode-go", f"OpenCode Go 查询失败，账号不存在: {account_id}")
+        return {"is_valid": False, "invalid_message": "OpenCode Go 账号不存在"}
+    settings = db.get_general_settings()
+    result = await refresh_opencode_go_account(account, db.secret_key, settings["request_timeout"], db.add_log)
+    result["account_id"] = account_id
+    result["accountId"] = account_id
+    result["checked_at"] = result.get("checked_at") or utc_now()
+    db.update_opencode_go_result(account_id, result)
+    if result.get("is_valid"):
+        db.add_log("info", "opencode-go", f"{account['name']} OpenCode Go 刷新成功")
+    else:
+        db.add_log("error", "opencode-go", f"{account['name']} OpenCode Go 刷新失败: {result.get('invalid_message') or '未知错误'}")
+    return result
+
+
+async def query_all_opencode_go_accounts(db: Database) -> list[dict]:
+    results = []
+    for account in db.list_opencode_go_accounts(enabled_only=True):
+        results.append(await query_opencode_go_for_account(db, account["id"]))
     return results
 
 

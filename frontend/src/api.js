@@ -61,6 +61,16 @@ export const api = {
   updateReminder: (id, payload) => request(`/api/settings/reminders/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
   deleteReminder: (id) => request(`/api/settings/reminders/${id}`, { method: "DELETE" }),
   changePassword: (payload) => request("/api/settings/password", { method: "POST", body: JSON.stringify(payload) }),
+  opencodeGoAccounts: () => request("/api/opencode-go/accounts"),
+  createOpencodeGoAccount: (payload) => request("/api/opencode-go/accounts", { method: "POST", body: JSON.stringify(payload) }),
+  updateOpencodeGoAccount: (id, payload) => request(`/api/opencode-go/accounts/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
+  deleteOpencodeGoAccount: (id) => request(`/api/opencode-go/accounts/${id}`, { method: "DELETE" }),
+  setOpencodeGoEnabled: (id, value) => request(`/api/opencode-go/accounts/${id}/enabled`, { method: "POST", body: JSON.stringify({ is_enabled: value }) }),
+  loginOpencodeGo: (id) => request(`/api/opencode-go/accounts/${id}/login`, { method: "POST" }),
+  refreshOpencodeGo: (id) => request(`/api/opencode-go/accounts/${id}/refresh`, { method: "POST" }),
+  refreshAllOpencodeGo: () => request("/api/opencode-go/query-all", { method: "POST" }),
+  opencodeGoHistory: (id, params = {}) => request(`/api/opencode-go/accounts/${id}/history${queryString(params)}`),
+  opencodeGoApiKey: (id) => request(`/api/opencode-go/accounts/${id}/api-key`),
   logs: (params = {}) => request(`/api/logs${queryString(params)}`),
   clearLogs: () => request("/api/logs", { method: "DELETE" })
 };

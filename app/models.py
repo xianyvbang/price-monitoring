@@ -106,6 +106,7 @@ class Database:
                     api_key_enc TEXT,
                     email_enc TEXT,
                     password_enc TEXT,
+                    login_extra_params_enc TEXT,
                     access_token_enc TEXT,
                     refresh_token_enc TEXT,
                     user_id_enc TEXT,
@@ -194,6 +195,40 @@ class Database:
                     updated_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS opencode_go_accounts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    email_enc TEXT NOT NULL,
+                    password_enc TEXT,
+                    storage_state_enc TEXT,
+                    workspace_id TEXT,
+                    api_key_enc TEXT,
+                    api_key_masked TEXT,
+                    last_status TEXT NOT NULL DEFAULT 'never',
+                    last_error TEXT,
+                    last_rolling_usage TEXT,
+                    last_weekly_usage TEXT,
+                    last_monthly_usage TEXT,
+                    last_raw_json TEXT,
+                    last_checked_at TEXT,
+                    is_enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS opencode_go_usage_records (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id INTEGER NOT NULL REFERENCES opencode_go_accounts(id) ON DELETE CASCADE,
+                    is_valid INTEGER NOT NULL,
+                    rolling_usage TEXT,
+                    weekly_usage TEXT,
+                    monthly_usage TEXT,
+                    api_key_masked TEXT,
+                    raw_json TEXT,
+                    error TEXT,
+                    checked_at TEXT NOT NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_app_logs_created_at ON app_logs(created_at);
                 CREATE INDEX IF NOT EXISTS idx_reminders_due
                 ON reminders(is_sent, remind_at);
@@ -203,12 +238,15 @@ class Database:
                 ON account_monitor_groups(account_id, sort_order, id);
                 CREATE INDEX IF NOT EXISTS idx_query_records_account_checked_at
                 ON query_records(account_id, checked_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_opencode_go_usage_account_checked_at
+                ON opencode_go_usage_records(account_id, checked_at DESC);
                 """
             )
             self._migrate_smtp_nullable(conn)
             self._migrate_users_session_version(conn)
             self._migrate_accounts_key_id(conn)
             self._migrate_accounts_sub2api_login(conn)
+            self._migrate_accounts_login_extra_params(conn)
             self._migrate_accounts_refresh_token(conn)
             self._migrate_accounts_note(conn)
             self._migrate_accounts_recharge_url(conn)
@@ -345,6 +383,13 @@ class Database:
             conn.execute("ALTER TABLE accounts ADD COLUMN email_enc TEXT")
         if "password_enc" not in column_names:
             conn.execute("ALTER TABLE accounts ADD COLUMN password_enc TEXT")
+
+    @staticmethod
+    def _migrate_accounts_login_extra_params(conn: sqlite3.Connection) -> None:
+        columns = conn.execute("PRAGMA table_info(accounts)").fetchall()
+        column_names = {row["name"] for row in columns}
+        if "login_extra_params_enc" not in column_names:
+            conn.execute("ALTER TABLE accounts ADD COLUMN login_extra_params_enc TEXT")
 
     @staticmethod
     def _migrate_accounts_refresh_token(conn: sqlite3.Connection) -> None:
@@ -722,6 +767,8 @@ class Database:
         api_key = data.get("api_key")
         email = data.get("email")
         password = data.get("password")
+        login_extra_params_present = "login_extra_params" in data
+        login_extra_params = data.get("login_extra_params")
         access_token = data.get("access_token")
         refresh_token = data.get("refresh_token")
         if platform == "newApi" and not access_token and api_key:
@@ -730,6 +777,7 @@ class Database:
         api_key_enc = encrypt_value(api_key, self.secret_key)
         email_enc = encrypt_value(email, self.secret_key)
         password_enc = encrypt_value(password, self.secret_key)
+        login_extra_params_enc = encrypt_value(login_extra_params, self.secret_key)
         access_token_enc = encrypt_value(access_token, self.secret_key)
         refresh_token_enc = encrypt_value(refresh_token, self.secret_key)
         user_id_enc = encrypt_value(data.get("user_id"), self.secret_key)
@@ -747,11 +795,11 @@ class Database:
                 """
                 INSERT INTO accounts (
                     platform, name, base_url, note, recharge_url, recharge_paid_amount, recharge_received_amount,
-                    key_id_enc, api_key_enc, email_enc, password_enc,
+                    key_id_enc, api_key_enc, email_enc, password_enc, login_extra_params_enc,
                     access_token_enc, refresh_token_enc, user_id_enc,
                     threshold, is_enabled, is_visible, is_eliminated, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(platform, name) DO UPDATE SET
                     base_url = excluded.base_url,
                     note = excluded.note,
@@ -762,6 +810,10 @@ class Database:
                     api_key_enc = COALESCE(excluded.api_key_enc, accounts.api_key_enc),
                     email_enc = COALESCE(excluded.email_enc, accounts.email_enc),
                     password_enc = COALESCE(excluded.password_enc, accounts.password_enc),
+                    login_extra_params_enc = CASE
+                        WHEN ? THEN excluded.login_extra_params_enc
+                        ELSE accounts.login_extra_params_enc
+                    END,
                     access_token_enc = COALESCE(excluded.access_token_enc, accounts.access_token_enc),
                     refresh_token_enc = COALESCE(excluded.refresh_token_enc, accounts.refresh_token_enc),
                     user_id_enc = COALESCE(excluded.user_id_enc, accounts.user_id_enc),
@@ -783,6 +835,7 @@ class Database:
                     api_key_enc,
                     email_enc,
                     password_enc,
+                    login_extra_params_enc,
                     access_token_enc,
                     refresh_token_enc,
                     user_id_enc,
@@ -792,6 +845,7 @@ class Database:
                     effective_is_eliminated,
                     now,
                     now,
+                    1 if login_extra_params_present else 0,
                 ),
             )
             row = conn.execute(
@@ -817,6 +871,8 @@ class Database:
         api_key = merged.get("api_key")
         email = merged.get("email")
         password = merged.get("password")
+        login_extra_params_present = "login_extra_params" in data
+        login_extra_params = merged.get("login_extra_params")
         access_token = merged.get("access_token")
         refresh_token = merged.get("refresh_token")
         if platform == "newApi" and not access_token and api_key:
@@ -825,6 +881,7 @@ class Database:
         api_key_enc = encrypt_value(api_key, self.secret_key)
         email_enc = encrypt_value(email, self.secret_key)
         password_enc = encrypt_value(password, self.secret_key)
+        login_extra_params_enc = encrypt_value(login_extra_params, self.secret_key)
         access_token_enc = encrypt_value(access_token, self.secret_key)
         refresh_token_enc = encrypt_value(refresh_token, self.secret_key)
         user_id_enc = encrypt_value(merged.get("user_id"), self.secret_key)
@@ -842,6 +899,7 @@ class Database:
                     api_key_enc = COALESCE(?, api_key_enc),
                     email_enc = COALESCE(?, email_enc),
                     password_enc = COALESCE(?, password_enc),
+                    login_extra_params_enc = CASE WHEN ? THEN ? ELSE login_extra_params_enc END,
                     access_token_enc = COALESCE(?, access_token_enc),
                     refresh_token_enc = COALESCE(?, refresh_token_enc),
                     user_id_enc = COALESCE(?, user_id_enc),
@@ -860,6 +918,8 @@ class Database:
                     api_key_enc,
                     email_enc,
                     password_enc,
+                    1 if login_extra_params_present else 0,
+                    login_extra_params_enc,
                     access_token_enc,
                     refresh_token_enc,
                     user_id_enc,
@@ -885,7 +945,7 @@ class Database:
         merged["recharge_url"] = str(data.get("recharge_url") if "recharge_url" in data else merged.get("recharge_url") or "").strip()
         merged["recharge_paid_amount"] = data.get("recharge_paid_amount", merged.get("recharge_paid_amount"))
         merged["recharge_received_amount"] = data.get("recharge_received_amount", merged.get("recharge_received_amount"))
-        for key in ("key_id", "api_key", "email", "password", "access_token", "refresh_token", "user_id", "threshold", "is_enabled", "is_visible", "is_eliminated"):
+        for key in ("key_id", "api_key", "email", "password", "login_extra_params", "access_token", "refresh_token", "user_id", "threshold", "is_enabled", "is_visible", "is_eliminated"):
             if key in data:
                 merged[key] = data.get(key)
         if "monitor_groups" in data:
@@ -917,6 +977,224 @@ class Database:
     def delete_account(self, account_id: int) -> None:
         with self.connect() as conn:
             conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
+
+    def list_opencode_go_accounts(self, enabled_only: bool = False) -> list[sqlite3.Row]:
+        query = "SELECT * FROM opencode_go_accounts"
+        params: tuple[Any, ...] = ()
+        if enabled_only:
+            query += " WHERE is_enabled = 1"
+        query += " ORDER BY name ASC, id ASC"
+        with self.connect() as conn:
+            return conn.execute(query, params).fetchall()
+
+    def get_opencode_go_account(self, account_id: int) -> Optional[sqlite3.Row]:
+        with self.connect() as conn:
+            return conn.execute("SELECT * FROM opencode_go_accounts WHERE id = ?", (account_id,)).fetchone()
+
+    def upsert_opencode_go_account(self, data: dict[str, Any]) -> int:
+        now = utc_now()
+        name = str(data.get("name") or "").strip()
+        email = str(data.get("email") or "").strip()
+        if not name:
+            raise ValueError("名称不能为空")
+        if not email:
+            raise ValueError("Google 邮箱不能为空")
+        password_enc = encrypt_value(data.get("password"), self.secret_key)
+        storage_state_enc = encrypt_value(_json_dumps(data.get("storage_state")), self.secret_key) if data.get("storage_state") else None
+        api_key = str(data.get("api_key") or "").strip()
+        api_key_enc = encrypt_value(api_key, self.secret_key)
+        api_key_masked = _mask_opencode_api_key(api_key) if api_key else data.get("api_key_masked")
+        is_enabled = 1 if data.get("is_enabled", True) else 0
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO opencode_go_accounts (
+                    name, email_enc, password_enc, storage_state_enc, workspace_id,
+                    api_key_enc, api_key_masked, is_enabled, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    email_enc = excluded.email_enc,
+                    password_enc = COALESCE(excluded.password_enc, opencode_go_accounts.password_enc),
+                    storage_state_enc = COALESCE(excluded.storage_state_enc, opencode_go_accounts.storage_state_enc),
+                    workspace_id = COALESCE(excluded.workspace_id, opencode_go_accounts.workspace_id),
+                    api_key_enc = COALESCE(excluded.api_key_enc, opencode_go_accounts.api_key_enc),
+                    api_key_masked = COALESCE(excluded.api_key_masked, opencode_go_accounts.api_key_masked),
+                    is_enabled = excluded.is_enabled,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    name,
+                    encrypt_value(email, self.secret_key),
+                    password_enc,
+                    storage_state_enc,
+                    data.get("workspace_id") or data.get("workspaceId"),
+                    api_key_enc,
+                    api_key_masked,
+                    is_enabled,
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute("SELECT id FROM opencode_go_accounts WHERE name = ?", (name,)).fetchone()
+            return int(row["id"])
+
+    def update_opencode_go_account(self, account_id: int, data: dict[str, Any]) -> int:
+        current = self.get_opencode_go_account(account_id)
+        if not current:
+            raise ValueError("OpenCode Go 账号不存在")
+        name = str(data.get("name", current["name"]) or "").strip()
+        email = str(data.get("email") or decrypt_value(current["email_enc"], self.secret_key) or "").strip()
+        if not name:
+            raise ValueError("名称不能为空")
+        if not email:
+            raise ValueError("Google 邮箱不能为空")
+        password_enc = encrypt_value(data.get("password"), self.secret_key)
+        storage_state_enc = None
+        if "storage_state" in data:
+            storage_state_enc = encrypt_value(_json_dumps(data.get("storage_state")), self.secret_key) if data.get("storage_state") else None
+        api_key = str(data.get("api_key") or "").strip()
+        api_key_enc = encrypt_value(api_key, self.secret_key)
+        api_key_masked = _mask_opencode_api_key(api_key) if api_key else data.get("api_key_masked")
+        is_enabled = 1 if data.get("is_enabled", current["is_enabled"]) else 0
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE opencode_go_accounts
+                SET name = ?, email_enc = ?,
+                    password_enc = COALESCE(?, password_enc),
+                    storage_state_enc = CASE WHEN ? THEN ? ELSE storage_state_enc END,
+                    workspace_id = COALESCE(?, workspace_id),
+                    api_key_enc = COALESCE(?, api_key_enc),
+                    api_key_masked = COALESCE(?, api_key_masked),
+                    is_enabled = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    name,
+                    encrypt_value(email, self.secret_key),
+                    password_enc,
+                    1 if "storage_state" in data else 0,
+                    storage_state_enc,
+                    data.get("workspace_id") or data.get("workspaceId"),
+                    api_key_enc,
+                    api_key_masked,
+                    is_enabled,
+                    utc_now(),
+                    account_id,
+                ),
+            )
+        return account_id
+
+    def delete_opencode_go_account(self, account_id: int) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM opencode_go_accounts WHERE id = ?", (account_id,))
+
+    def update_opencode_go_session(
+        self,
+        account_id: int,
+        storage_state: Any,
+        workspace_id: str | None = None,
+        status: str = "logged_in",
+        error: str | None = None,
+    ) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE opencode_go_accounts
+                SET storage_state_enc = ?,
+                    workspace_id = COALESCE(?, workspace_id),
+                    last_status = ?,
+                    last_error = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    encrypt_value(_json_dumps(storage_state), self.secret_key),
+                    workspace_id,
+                    status,
+                    error,
+                    utc_now(),
+                    account_id,
+                ),
+            )
+
+    def update_opencode_go_enabled(self, account_id: int, is_enabled: bool) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE opencode_go_accounts SET is_enabled = ?, updated_at = ? WHERE id = ?",
+                (1 if is_enabled else 0, utc_now(), account_id),
+            )
+
+    def update_opencode_go_result(self, account_id: int, result: dict[str, Any]) -> None:
+        checked_at = result.get("checked_at") or utc_now()
+        is_valid = bool(result.get("is_valid"))
+        rolling_usage = _json_dumps(result.get("rolling_usage") or result.get("rollingUsage") or {})
+        weekly_usage = _json_dumps(result.get("weekly_usage") or result.get("weeklyUsage") or {})
+        monthly_usage = _json_dumps(result.get("monthly_usage") or result.get("monthlyUsage") or {})
+        raw_json = _json_dumps(_safe_opencode_raw(result.get("raw") or result.get("raw_json") or result))
+        api_key = str(result.get("api_key") or result.get("apiKey") or "").strip()
+        api_key_masked = result.get("api_key_masked") or result.get("apiKeyMasked") or (_mask_opencode_api_key(api_key) if api_key else None)
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE opencode_go_accounts
+                SET last_status = ?, last_error = ?, workspace_id = COALESCE(?, workspace_id),
+                    api_key_enc = COALESCE(?, api_key_enc),
+                    api_key_masked = COALESCE(?, api_key_masked),
+                    last_rolling_usage = ?, last_weekly_usage = ?, last_monthly_usage = ?,
+                    last_raw_json = ?, last_checked_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    "valid" if is_valid else "invalid",
+                    result.get("invalid_message") or result.get("error"),
+                    result.get("workspace_id") or result.get("workspaceId"),
+                    encrypt_value(api_key, self.secret_key),
+                    api_key_masked,
+                    rolling_usage,
+                    weekly_usage,
+                    monthly_usage,
+                    raw_json,
+                    checked_at,
+                    utc_now(),
+                    account_id,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO opencode_go_usage_records (
+                    account_id, is_valid, rolling_usage, weekly_usage, monthly_usage,
+                    api_key_masked, raw_json, error, checked_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    account_id,
+                    1 if is_valid else 0,
+                    rolling_usage,
+                    weekly_usage,
+                    monthly_usage,
+                    api_key_masked,
+                    raw_json,
+                    result.get("invalid_message") or result.get("error"),
+                    checked_at,
+                ),
+            )
+
+    def list_opencode_go_history(self, account_id: int, limit: int = 100) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            return conn.execute(
+                """
+                SELECT *
+                FROM opencode_go_usage_records
+                WHERE account_id = ?
+                ORDER BY checked_at DESC, id DESC
+                LIMIT ?
+                """,
+                (account_id, max(1, int(limit))),
+            ).fetchall()
 
     def update_account_result(self, account_id: int, result: dict[str, Any]) -> None:
         status = "valid" if result.get("is_valid") else "invalid"
@@ -1612,6 +1890,32 @@ def _json_dumps(value: Any) -> str:
     import json
 
     return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _mask_opencode_api_key(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if len(text) <= 12:
+        return text[:3] + "*" * max(0, len(text) - 6) + text[-3:]
+    return text[:8] + "*" * (len(text) - 12) + text[-4:]
+
+
+def _safe_opencode_raw(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: ("***" if _is_opencode_sensitive_key(str(key)) else _safe_opencode_raw(item))
+            for key, item in value.items()
+            if str(key) not in {"storage_state", "storageState"}
+        }
+    if isinstance(value, list):
+        return [_safe_opencode_raw(item) for item in value]
+    return value
+
+
+def _is_opencode_sensitive_key(key: str) -> bool:
+    normalized = key.replace("-", "_").lower()
+    return normalized in {"api_key", "apikey", "key", "token", "secret"} or "password" in normalized or "token" in normalized or "secret" in normalized
 
 
 def _parse_iso_datetime(value: Any) -> datetime:

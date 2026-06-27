@@ -2,7 +2,7 @@
 import { computed, onMounted, provide, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
-import { HomeFilled, List, Setting, SwitchButton, Tickets } from "@element-plus/icons-vue";
+import { Connection, HomeFilled, List, Setting, SwitchButton, Tickets } from "@element-plus/icons-vue";
 import { api } from "./api";
 
 const router = useRouter();
@@ -73,6 +73,10 @@ onMounted(refreshSession);
         <el-menu-item index="/accounts">
           <el-icon><List /></el-icon>
           <span>平台配置</span>
+        </el-menu-item>
+        <el-menu-item index="/opencode-go">
+          <el-icon><Connection /></el-icon>
+          <span>OpenCode Go</span>
         </el-menu-item>
         <el-menu-item index="/settings">
           <el-icon><Setting /></el-icon>

@@ -74,6 +74,7 @@ function shouldFetchGroupsAfterSave(account, savedPayload, isEdit) {
     String(savedPayload.base_url || "").trim() !== String(initialForm.value.base_url || "").trim() ||
     Boolean(savedPayload.email) ||
     Boolean(savedPayload.password) ||
+    String(savedPayload.login_extra_params || "").trim() !== String(initialForm.value.login_extra_params || "").trim() ||
     Boolean(savedPayload.access_token) ||
     Boolean(savedPayload.refresh_token)
   );
@@ -202,6 +203,9 @@ defineExpose({ open });
           </el-form-item>
         </el-col>
       </el-row>
+      <el-form-item v-if="form.platform === 'sub2Api'" label="登录额外参数">
+        <el-input v-model="form.login_extra_params" placeholder="not_in_cn_confirmed:true" />
+      </el-form-item>
       <el-form-item label="accessToken">
         <el-input v-model="form.access_token" type="password" show-password autocomplete="off" :placeholder="form.platform === 'newApi' ? 'newApi 必填，编辑时留空不修改' : 'sub2Api 可选，编辑时留空不修改'" />
         <div v-if="form.platform === 'sub2Api'" class="token-helper">

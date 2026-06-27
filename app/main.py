@@ -32,7 +32,16 @@ from app.security import decrypt_value
 from app.security import verify_password
 from app.services.balance import login_sub2api_tokens, query_newapi_group_options, query_sub2api_group_options
 from app.services.emailer import send_email
-from app.services.scheduler import BalanceScheduler, query_all_accounts, query_group_rate_for_account, query_one_account, query_sub2api_group_for_account
+from app.services.opencode_go import login_opencode_go_account, mask_api_key, public_usage_window
+from app.services.scheduler import (
+    BalanceScheduler,
+    query_all_accounts,
+    query_all_opencode_go_accounts,
+    query_group_rate_for_account,
+    query_one_account,
+    query_opencode_go_for_account,
+    query_sub2api_group_for_account,
+)
 
 config = get_config()
 db = Database(config.database_path, config.app_secret_key)
@@ -417,6 +426,7 @@ def public_account(row: Any) -> dict[str, Any]:
     data["has_api_key"] = bool(data.pop("api_key_enc", None))
     data["has_email"] = bool(data.pop("email_enc", None))
     data["has_password"] = bool(data.pop("password_enc", None))
+    data["has_login_extra_params"] = bool(data.pop("login_extra_params_enc", None))
     data["has_access_token"] = bool(data.pop("access_token_enc", None))
     data["has_refresh_token"] = bool(data.pop("refresh_token_enc", None))
     data["has_user_id"] = bool(data.pop("user_id_enc", None))
@@ -439,6 +449,55 @@ def public_account(row: Any) -> dict[str, Any]:
     )
     if data["platform"] in {"newApi", "sub2Api"} and selected_group_id and not data["group_rates"]:
         data["group_rates"] = [{"plan_name": f"当前分组 {selected_group_id}", "rate_multiplier": None}]
+    return data
+
+
+def public_opencode_go_account(row: Any, include_api_key: bool = False) -> dict[str, Any]:
+    data = row_to_dict(row)
+    email_enc = data.pop("email_enc", None)
+    password_enc = data.pop("password_enc", None)
+    storage_state_enc = data.pop("storage_state_enc", None)
+    api_key_enc = data.pop("api_key_enc", None)
+    email = decrypt_value(email_enc, db.secret_key) if email_enc else ""
+    api_key = decrypt_value(api_key_enc, db.secret_key) if include_api_key and api_key_enc else None
+    data["email"] = email
+    data["has_password"] = bool(password_enc)
+    data["hasPassword"] = data["has_password"]
+    data["has_session"] = bool(storage_state_enc)
+    data["hasSession"] = data["has_session"]
+    data["has_api_key"] = bool(api_key_enc)
+    data["hasApiKey"] = data["has_api_key"]
+    data["api_key_masked"] = data.get("api_key_masked") or (mask_api_key(api_key) if api_key else "")
+    data["apiKeyMasked"] = data["api_key_masked"]
+    if include_api_key:
+        data["api_key"] = api_key or ""
+        data["apiKey"] = data["api_key"]
+    data["rolling_usage"] = public_usage_window(data.pop("last_rolling_usage", None))
+    data["rollingUsage"] = data["rolling_usage"]
+    data["weekly_usage"] = public_usage_window(data.pop("last_weekly_usage", None))
+    data["weeklyUsage"] = data["weekly_usage"]
+    data["monthly_usage"] = public_usage_window(data.pop("last_monthly_usage", None))
+    data["monthlyUsage"] = data["monthly_usage"]
+    data.pop("last_raw_json", None)
+    data["last_checked_at_formatted"] = format_china_time(data.get("last_checked_at"))
+    data["lastCheckedAtFormatted"] = data["last_checked_at_formatted"]
+    data["is_enabled"] = bool(data.get("is_enabled"))
+    data["isEnabled"] = data["is_enabled"]
+    return data
+
+
+def public_opencode_go_history(row: Any) -> dict[str, Any]:
+    data = row_to_dict(row)
+    data["is_valid"] = bool(data.get("is_valid"))
+    data["isValid"] = data["is_valid"]
+    data["rolling_usage"] = public_usage_window(data.pop("rolling_usage", None))
+    data["rollingUsage"] = data["rolling_usage"]
+    data["weekly_usage"] = public_usage_window(data.pop("weekly_usage", None))
+    data["weeklyUsage"] = data["weekly_usage"]
+    data["monthly_usage"] = public_usage_window(data.pop("monthly_usage", None))
+    data["monthlyUsage"] = data["monthly_usage"]
+    data["checked_at_formatted"] = format_china_time(data.get("checked_at"))
+    data["checkedAtFormatted"] = data["checked_at_formatted"]
     return data
 
 
@@ -877,6 +936,7 @@ def public_edit_account(account_id: int | None) -> dict[str, Any] | None:
         if data.get("selected_group_id"):
             data["key_id"] = data["selected_group_id"]
         data["email"] = decrypt_value(row["email_enc"], config.app_secret_key) or ""
+        data["login_extra_params"] = decrypt_value(row["login_extra_params_enc"], config.app_secret_key) or ""
     if row["platform"] == "newApi":
         data["key_id"] = decrypt_value(row["key_id_enc"], config.app_secret_key) or ""
         if data.get("selected_group_id"):
@@ -1269,6 +1329,148 @@ async def api_delete_account(request: Request, account_id: int):
     return {"ok": True}
 
 
+@app.get("/api/opencode-go/accounts")
+async def api_opencode_go_accounts(request: Request):
+    require_user(request)
+    accounts = [public_opencode_go_account(row) for row in db.list_opencode_go_accounts()]
+    last_success = next((account.get("last_checked_at") for account in accounts if account.get("last_status") == "valid"), None)
+    return {
+        "accounts": accounts,
+        "summary": {
+            "account_count": len(accounts),
+            "accountCount": len(accounts),
+            "last_success_at": last_success,
+            "lastSuccessAt": last_success,
+        },
+    }
+
+
+@app.post("/api/opencode-go/accounts")
+async def api_create_opencode_go_account(request: Request):
+    require_user(request)
+    payload = await request.json()
+    try:
+        account_id = db.upsert_opencode_go_account(_opencode_go_account_payload(payload, require_password=True))
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+    account = db.get_opencode_go_account(account_id)
+    db.add_log("info", "opencode-go", f"API 保存 OpenCode Go 账号: {account['name']}")
+    return {"ok": True, "id": account_id, "account": public_opencode_go_account(account)}
+
+
+@app.put("/api/opencode-go/accounts/{account_id}")
+async def api_update_opencode_go_account(request: Request, account_id: int):
+    require_user(request)
+    if not db.get_opencode_go_account(account_id):
+        raise HTTPException(status_code=404, detail="OpenCode Go 账号不存在")
+    payload = await request.json()
+    try:
+        db.update_opencode_go_account(account_id, _opencode_go_account_payload(payload, require_password=False))
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+    account = db.get_opencode_go_account(account_id)
+    db.add_log("info", "opencode-go", f"API 更新 OpenCode Go 账号: {account['name']}")
+    return {"ok": True, "id": account_id, "account": public_opencode_go_account(account)}
+
+
+@app.delete("/api/opencode-go/accounts/{account_id}")
+async def api_delete_opencode_go_account(request: Request, account_id: int):
+    require_user(request)
+    account = db.get_opencode_go_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="OpenCode Go 账号不存在")
+    db.delete_opencode_go_account(account_id)
+    db.add_log("warning", "opencode-go", f"API 删除 OpenCode Go 账号: {account['name']}")
+    return {"ok": True}
+
+
+@app.post("/api/opencode-go/accounts/{account_id}/enabled")
+async def api_opencode_go_enabled(request: Request, account_id: int):
+    require_user(request)
+    account = db.get_opencode_go_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="OpenCode Go 账号不存在")
+    payload = await request.json()
+    is_enabled = _to_bool(payload.get("is_enabled", payload.get("isEnabled", payload.get("enabled")))) if isinstance(payload, dict) else False
+    db.update_opencode_go_enabled(account_id, is_enabled)
+    scheduler.notify_settings_changed()
+    updated = db.get_opencode_go_account(account_id)
+    db.add_log("info", "opencode-go", f"{account['name']} OpenCode Go 自动刷新: {'启用' if is_enabled else '停用'}")
+    return {"ok": True, "account": public_opencode_go_account(updated)}
+
+
+@app.post("/api/opencode-go/accounts/{account_id}/login")
+async def api_login_opencode_go_account(request: Request, account_id: int):
+    require_user(request)
+    account = db.get_opencode_go_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="OpenCode Go 账号不存在")
+    settings = db.get_general_settings()
+    result = await login_opencode_go_account(account, db.secret_key, settings["request_timeout"], db.add_log)
+    if result.get("is_valid"):
+        db.update_opencode_go_session(
+            account_id,
+            result.get("storage_state"),
+            workspace_id=result.get("workspace_id") or result.get("workspaceId"),
+            status="logged_in",
+        )
+        db.add_log("info", "opencode-go", f"{account['name']} OpenCode Go 登录成功")
+    else:
+        db.update_opencode_go_result(account_id, result)
+        db.add_log("error", "opencode-go", f"{account['name']} OpenCode Go 登录失败: {result.get('invalid_message')}")
+        return JSONResponse({"ok": False, "message": result.get("invalid_message"), "result": _public_opencode_go_result(result)}, status_code=400)
+    updated = db.get_opencode_go_account(account_id)
+    return {"ok": True, "account": public_opencode_go_account(updated)}
+
+
+@app.post("/api/opencode-go/accounts/{account_id}/refresh")
+async def api_refresh_opencode_go_account(request: Request, account_id: int):
+    require_user(request)
+    if not db.get_opencode_go_account(account_id):
+        raise HTTPException(status_code=404, detail="OpenCode Go 账号不存在")
+    result = await query_opencode_go_for_account(db, account_id)
+    updated = db.get_opencode_go_account(account_id)
+    if not result.get("is_valid"):
+        return JSONResponse(
+            {"ok": False, "message": result.get("invalid_message") or "刷新失败", "result": _public_opencode_go_result(result), "account": public_opencode_go_account(updated)},
+            status_code=400,
+        )
+    return {"ok": True, "result": _public_opencode_go_result(result), "account": public_opencode_go_account(updated)}
+
+
+@app.post("/api/opencode-go/query-all")
+async def api_query_all_opencode_go(request: Request):
+    require_user(request)
+    db.add_log("info", "opencode-go", "API 手动刷新全部 OpenCode Go 账号")
+    return {"results": [_public_opencode_go_result(result) for result in await query_all_opencode_go_accounts(db)]}
+
+
+@app.get("/api/opencode-go/accounts/{account_id}/history")
+async def api_opencode_go_history(request: Request, account_id: int):
+    require_user(request)
+    account = db.get_opencode_go_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="OpenCode Go 账号不存在")
+    limit = _positive_query_int(request.query_params.get("limit"), 100)
+    return {
+        "account": public_opencode_go_account(account),
+        "records": [public_opencode_go_history(row) for row in db.list_opencode_go_history(account_id, limit=limit)],
+    }
+
+
+@app.get("/api/opencode-go/accounts/{account_id}/api-key")
+async def api_opencode_go_api_key(request: Request, account_id: int):
+    require_user(request)
+    account = db.get_opencode_go_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="OpenCode Go 账号不存在")
+    data = public_opencode_go_account(account, include_api_key=True)
+    if not data.get("api_key"):
+        raise HTTPException(status_code=404, detail="尚未获取 API key")
+    db.add_log("info", "opencode-go", f"API 读取 OpenCode Go API key: {account['name']}")
+    return {"api_key": data["api_key"], "apiKey": data["api_key"], "api_key_masked": data["api_key_masked"], "apiKeyMasked": data["api_key_masked"]}
+
+
 @app.get("/api/logs")
 async def api_logs(request: Request):
     require_user(request)
@@ -1473,6 +1675,9 @@ def _is_sub2api_visibility_only_save(account_data: dict[str, Any], current_accou
         return False
     if _split_group_ids(account_data.get("monitor_group_ids")) != [group["group_id"] for group in db.list_monitor_groups(int(current_account["id"]))]:
         return False
+    current_login_extra_params = decrypt_value(current_account["login_extra_params_enc"], config.app_secret_key) or ""
+    if str(account_data.get("login_extra_params") or "").strip() != current_login_extra_params.strip():
+        return False
     for key in ("api_key", "email", "password", "access_token", "refresh_token", "user_id"):
         if str(account_data.get(key) or "").strip():
             return False
@@ -1502,7 +1707,7 @@ async def _prepare_sub2api_account_data_for_save(account_data: dict[str, Any], c
             password,
             settings["request_timeout"],
             db.add_log,
-            current_account or account_data,
+            account_data,
         )
     except Exception as exc:
         db.add_log(
@@ -1801,6 +2006,7 @@ def _account_from_form(form: Any) -> dict[str, Any]:
             "api_key": form.get("api_key"),
             "email": form.get("email"),
             "password": form.get("password"),
+            "login_extra_params": form.get("login_extra_params"),
             "access_token": form.get("access_token"),
             "refresh_token": form.get("refresh_token"),
             "user_id": form.get("user_id"),
@@ -1840,6 +2046,7 @@ def _account_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "api_key": payload.get("api_key") or payload.get("apiKey"),
         "email": payload.get("email"),
         "password": payload.get("password"),
+        "login_extra_params": payload.get("login_extra_params", payload.get("loginExtraParams")),
         "access_token": payload.get("access_token") or payload.get("accessToken"),
         "refresh_token": payload.get("refresh_token") or payload.get("refreshToken"),
         "user_id": payload.get("user_id") or payload.get("userId"),
@@ -1861,6 +2068,59 @@ def _account_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if "is_visible" in payload or "isVisible" in payload or "visible" in payload:
         account_data["is_visible"] = is_visible
     return account_data
+
+
+def _opencode_go_account_payload(payload: dict[str, Any], require_password: bool = False) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("请求内容格式不正确")
+    name = str(payload.get("name") or "").strip()
+    email = str(payload.get("email") or "").strip()
+    password = str(payload.get("password") or "").strip()
+    if not name:
+        raise ValueError("名称不能为空")
+    if not email:
+        raise ValueError("Google 邮箱不能为空")
+    if require_password and not password:
+        raise ValueError("Google 密码不能为空")
+    data = {
+        "name": name,
+        "email": email,
+        "is_enabled": _to_bool(payload.get("is_enabled", payload.get("isEnabled", payload.get("enabled", True)))),
+    }
+    if password:
+        data["password"] = password
+    workspace_id = str(payload.get("workspace_id") or payload.get("workspaceId") or "").strip()
+    if workspace_id:
+        data["workspace_id"] = workspace_id
+    return data
+
+
+def _public_opencode_go_result(result: dict[str, Any]) -> dict[str, Any]:
+    public = {
+        key: value
+        for key, value in result.items()
+        if key
+        not in {
+            "api_key",
+            "apiKey",
+            "storage_state",
+            "storageState",
+            "raw",
+            "raw_json",
+            "rawJson",
+        }
+    }
+    public["rolling_usage"] = public_usage_window(result.get("rolling_usage") or result.get("rollingUsage"))
+    public["rollingUsage"] = public["rolling_usage"]
+    public["weekly_usage"] = public_usage_window(result.get("weekly_usage") or result.get("weeklyUsage"))
+    public["weeklyUsage"] = public["weekly_usage"]
+    public["monthly_usage"] = public_usage_window(result.get("monthly_usage") or result.get("monthlyUsage"))
+    public["monthlyUsage"] = public["monthly_usage"]
+    if result.get("api_key") or result.get("apiKey"):
+        masked = result.get("api_key_masked") or result.get("apiKeyMasked") or mask_api_key(result.get("api_key") or result.get("apiKey"))
+        public["api_key_masked"] = masked
+        public["apiKeyMasked"] = masked
+    return public
 
 
 def _account_patch_from_payload(payload: dict[str, Any], current_account: Any) -> dict[str, Any]:
@@ -1897,6 +2157,11 @@ def _account_patch_from_payload(payload: dict[str, Any], current_account: Any) -
         "api_key": payload.get("api_key", payload.get("apiKey")) if ("api_key" in payload or "apiKey" in payload) else None,
         "email": payload.get("email") if "email" in payload else (current_public.get("email") or ""),
         "password": payload.get("password") if "password" in payload else None,
+        "login_extra_params": (
+            payload.get("login_extra_params", payload.get("loginExtraParams"))
+            if ("login_extra_params" in payload or "loginExtraParams" in payload)
+            else (current_public.get("login_extra_params") or "")
+        ),
         "access_token": payload.get("access_token", payload.get("accessToken")) if ("access_token" in payload or "accessToken" in payload) else None,
         "refresh_token": payload.get("refresh_token", payload.get("refreshToken")) if ("refresh_token" in payload or "refreshToken" in payload) else None,
         "user_id": payload.get("user_id", payload.get("userId")) if ("user_id" in payload or "userId" in payload) else (current_public.get("user_id") or ""),

@@ -240,6 +240,46 @@ def test_api_create_sub2api_relogs_and_persists_tokens(tmp_path, monkeypatch):
     assert decrypt_value(account["refresh_token_enc"], config.app_secret_key) == "fresh-rt"
 
 
+def test_api_create_sub2api_saves_and_returns_login_extra_params(tmp_path, monkeypatch):
+    test_db = Database(str(tmp_path / "app.db"), config.app_secret_key)
+    test_db.init()
+    test_db.ensure_admin("admin", "password123")
+    monkeypatch.setattr("app.main.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
+
+    async def stop_scheduler():
+        return None
+
+    async def fake_login(base_url, email, password, timeout, log=None, account=None):
+        assert account["login_extra_params"] == "not_in_cn_confirmed:true"
+        return {"is_valid": True, "access_token": "fresh-at", "refresh_token": "fresh-rt"}
+
+    monkeypatch.setattr("app.main.login_sub2api_tokens", fake_login)
+    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+
+    with TestClient(app) as client:
+        client.post("/login", data={"username": "admin", "password": "password123"})
+        response = client.post(
+            "/api/accounts",
+            json={
+                "platform": "sub2Api",
+                "name": "sub-extra-create",
+                "base_url": "https://sub.example",
+                "email": "user@example.com",
+                "password": "login-password",
+                "login_extra_params": "not_in_cn_confirmed:true",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    account = test_db.get_account(payload["id"])
+    assert payload["account"]["login_extra_params"] == "not_in_cn_confirmed:true"
+    assert payload["account"]["has_login_extra_params"] is True
+    assert decrypt_value(account["login_extra_params_enc"], config.app_secret_key) == "not_in_cn_confirmed:true"
+
+
 def test_api_create_sub2api_saves_when_login_fails(tmp_path, monkeypatch):
     test_db = Database(str(tmp_path / "app.db"), config.app_secret_key)
     test_db.init()
@@ -453,6 +493,51 @@ def test_api_update_sub2api_keeps_saved_tokens_when_form_leaves_them_blank(tmp_p
     account = test_db.get_account(account_id)
     assert decrypt_value(account["access_token_enc"], config.app_secret_key) == "saved-at"
     assert decrypt_value(account["refresh_token_enc"], config.app_secret_key) == "saved-rt"
+
+
+def test_api_update_sub2api_clears_login_extra_params(tmp_path, monkeypatch):
+    test_db = Database(str(tmp_path / "app.db"), config.app_secret_key)
+    test_db.init()
+    test_db.ensure_admin("admin", "password123")
+    account_id = test_db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "sub-extra-update",
+            "base_url": "https://sub.example",
+            "email": "saved@example.com",
+            "password": "saved-password",
+            "login_extra_params": "not_in_cn_confirmed:true",
+        }
+    )
+    monkeypatch.setattr("app.main.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
+
+    async def stop_scheduler():
+        return None
+
+    async def fail_login(*args, **kwargs):
+        raise AssertionError("clearing login extra params without password should not relogin")
+
+    monkeypatch.setattr("app.main.login_sub2api_tokens", fail_login)
+    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+
+    with TestClient(app) as client:
+        client.post("/login", data={"username": "admin", "password": "password123"})
+        response = client.put(
+            f"/api/accounts/{account_id}",
+            json={
+                "platform": "sub2Api",
+                "name": "sub-extra-update",
+                "base_url": "https://sub.example",
+                "login_extra_params": "",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["account"]["login_extra_params"] == ""
+    assert response.json()["account"]["has_login_extra_params"] is False
+    assert test_db.get_account(account_id)["login_extra_params_enc"] is None
 
 
 def test_api_update_sub2api_visibility_only_does_not_relogin(tmp_path, monkeypatch):

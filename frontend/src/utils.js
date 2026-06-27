@@ -65,6 +65,7 @@ export function normalizeAccountForm(account = {}) {
     api_key: "",
     email: account.email || "",
     password: "",
+    login_extra_params: account.login_extra_params || account.loginExtraParams || "",
     access_token: "",
     refresh_token: "",
     user_id: account.user_id || account.userId || "",

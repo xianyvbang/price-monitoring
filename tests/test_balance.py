@@ -3,6 +3,7 @@ import httpx
 
 from app.services.balance import _SUB2API_TOKEN_CACHE
 from app.services.balance import (
+    _parse_sub2api_login_extra_params,
     normalize_result,
     query_newapi,
     query_newapi_group,
@@ -139,6 +140,50 @@ async def test_sub2api_group_query_uses_key_id(monkeypatch):
     assert DummyClient.requests[2]["url"] == "https://sub.example/api/v1/groups/available"
     assert DummyClient.requests[3]["url"] == "https://sub.example/api/v1/groups/rates"
     assert DummyClient.requests[2]["headers"]["Authorization"] == "Bearer jwt"
+
+
+@pytest.mark.asyncio
+async def test_sub2api_login_includes_extra_params(monkeypatch):
+    monkeypatch.setattr("app.services.balance.httpx.AsyncClient", DummyClient)
+    DummyClient.post_payload = {"data": {"access_token": "jwt"}}
+    DummyClient.get_payloads = [
+        {"data": [{"id": "basic", "plan_name": "Basic Plan", "rate_multiplier": 1.2}]},
+        {"data": {"basic": 0.8}},
+    ]
+    account = {
+        "platform": "sub2Api",
+        "name": "sub",
+        "base_url": "https://sub.example",
+        "key_id_enc": encrypt_value("basic", "test-key"),
+        "email_enc": encrypt_value("user@example.com", "test-key"),
+        "password_enc": encrypt_value("password", "test-key"),
+        "login_extra_params_enc": encrypt_value("not_in_cn_confirmed:true", "test-key"),
+    }
+
+    result = await query_sub2api_group_options(account, "test-key", 3)
+
+    assert result["is_valid"] is True
+    assert DummyClient.requests[0]["json"] == {
+        "email": "user@example.com",
+        "password": "password",
+        "not_in_cn_confirmed": True,
+    }
+
+
+def test_sub2api_login_extra_param_parser_values():
+    assert _parse_sub2api_login_extra_params("flag:true") == {"flag": True}
+    assert _parse_sub2api_login_extra_params("flag:false") == {"flag": False}
+    assert _parse_sub2api_login_extra_params("count:3") == {"count": 3}
+    assert _parse_sub2api_login_extra_params("ratio:1.5") == {"ratio": 1.5}
+    assert _parse_sub2api_login_extra_params("empty:null") == {"empty": None}
+    assert _parse_sub2api_login_extra_params("region:global") == {"region": "global"}
+    assert _parse_sub2api_login_extra_params("is_valid:false") == {"is_valid": False}
+
+
+def test_sub2api_login_extra_param_parser_rejects_invalid_values():
+    assert _parse_sub2api_login_extra_params("broken")["is_valid"] is False
+    assert _parse_sub2api_login_extra_params(":true")["is_valid"] is False
+    assert _parse_sub2api_login_extra_params("password:true")["is_valid"] is False
 
 
 @pytest.mark.asyncio
