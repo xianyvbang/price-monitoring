@@ -105,6 +105,25 @@ JSON 示例：
 
 如果 Google 触发验证码、2FA 或风控，登录会失败并在页面显示错误，需要先人工处理账号验证。OpenCode Go 的自动刷新沿用通用查询间隔和暂停开关。
 
+遇到验证码或 2FA 时，可在 OpenCode Go 页面点击“导入登录态”。先在本地运行下面的临时脚本，按弹出的浏览器完成人工登录，然后把生成的 `opencode-state.json` 内容粘贴到页面弹窗：
+
+```bash
+python - <<'PY'
+import json
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+
+with sync_playwright() as p:
+    browser = p.chromium.launch(headless=False)
+    context = browser.new_context()
+    page = context.new_page()
+    page.goto("https://auth.opencode.ai/google/authorize")
+    input("完成 Google 验证并进入 OpenCode 后按回车...")
+    Path("opencode-state.json").write_text(json.dumps(context.storage_state(), ensure_ascii=False), encoding="utf-8")
+    browser.close()
+PY
+```
+
 ## 接口
 
 - `GET /api/accounts`

@@ -15,7 +15,9 @@ LogCallback = Callable[[str, str, str], None]
 OPENCODE_BASE_URL = "https://opencode.ai"
 OPENCODE_AUTH_URL = f"{OPENCODE_BASE_URL}/auth"
 OPENCODE_GO_PATH = "/go"
+OPENAUTH_BASE_URL = "https://auth.opencode.ai"
 OPENAUTH_GOOGLE_AUTHORIZE_PATH = "/google/authorize"
+OPENAUTH_GOOGLE_AUTHORIZE_URL = f"{OPENAUTH_BASE_URL}{OPENAUTH_GOOGLE_AUTHORIZE_PATH}"
 SESSION_GET_REFERENCE_ID = "9bc4808361cdaee17059a8d3822b36ee8c9a0d93f1adc289fa1926998e3c9768"
 LITE_SUBSCRIPTION_GET_REFERENCE_ID = "c7389bd0e731f80f49593e5ee53835475f4e28594dd6bd83eb229bab753498cd"
 KEY_LIST_REFERENCE_IDS = (
@@ -155,7 +157,7 @@ async def _run_browser_login(email: str, password: str, timeout: float, log: Log
         page = await context.new_page()
         try:
             page.set_default_timeout(min(LOGIN_TIMEOUT_MS, max(10_000, int(timeout * 1000))))
-            await page.goto(f"{OPENCODE_BASE_URL}{OPENAUTH_GOOGLE_AUTHORIZE_PATH}", wait_until="domcontentloaded")
+            await page.goto(OPENAUTH_GOOGLE_AUTHORIZE_URL, wait_until="domcontentloaded")
             await _fill_google_login(page, email, password)
             await _wait_for_opencode_login(page)
             storage_state = await context.storage_state()
@@ -212,12 +214,38 @@ async def _run_browser_refresh(
 
 async def _fill_google_login(page: Any, email: str, password: str) -> None:
     await page.wait_for_load_state("domcontentloaded")
-    if "accounts.google.com" not in page.url:
-        await page.wait_for_url("**accounts.google.com/**", timeout=30_000)
+    await _wait_for_google_login_form(page)
     await _fill_first_available(page, ['input[type="email"]', 'input[name="identifier"]'], email)
     await _click_first_available(page, ['button:has-text("Next")', '#identifierNext button', 'button[jsname]'])
     await _fill_first_available(page, ['input[type="password"]', 'input[name="Passwd"]'], password)
     await _click_first_available(page, ['button:has-text("Next")', '#passwordNext button', 'button[jsname]'])
+
+
+async def _wait_for_google_login_form(page: Any) -> None:
+    started = time.monotonic()
+    while time.monotonic() - started < LOGIN_TIMEOUT_MS / 1000:
+        if await _has_any_selector(page, ['input[type="email"]', 'input[name="identifier"]'], timeout=500):
+            return
+        if "accounts.google.com" in page.url:
+            await page.wait_for_timeout(500)
+            continue
+        if "auth.opencode.ai" in page.url and "/google/authorize" in page.url:
+            await page.wait_for_load_state("domcontentloaded")
+            await page.wait_for_timeout(1000)
+            continue
+        if await _click_first_available_optional(
+            page,
+            [
+                'a[href*="google"]',
+                'button:has-text("Google")',
+                'a:has-text("Google")',
+                '[aria-label*="Google"]',
+            ],
+        ):
+            await page.wait_for_load_state("domcontentloaded")
+            continue
+        await page.wait_for_timeout(1000)
+    raise RuntimeError(f"等待 Google 登录页面超时，当前页面: {page.url}")
 
 
 async def _wait_for_opencode_login(page: Any) -> None:
@@ -290,6 +318,17 @@ async def _fill_first_available(page: Any, selectors: list[str], value: str) -> 
     raise RuntimeError("未找到 Google 登录输入框")
 
 
+async def _has_any_selector(page: Any, selectors: list[str], timeout: int = 1000) -> bool:
+    for selector in selectors:
+        locator = page.locator(selector).first
+        try:
+            await locator.wait_for(state="visible", timeout=timeout)
+            return True
+        except Exception:
+            continue
+    return False
+
+
 async def _click_first_available(page: Any, selectors: list[str]) -> None:
     for selector in selectors:
         locator = page.locator(selector).first
@@ -300,6 +339,18 @@ async def _click_first_available(page: Any, selectors: list[str]) -> None:
         except Exception:
             continue
     raise RuntimeError("未找到 Google 登录下一步按钮")
+
+
+async def _click_first_available_optional(page: Any, selectors: list[str]) -> bool:
+    for selector in selectors:
+        locator = page.locator(selector).first
+        try:
+            await locator.wait_for(state="visible", timeout=1000)
+            await locator.click()
+            return True
+        except Exception:
+            continue
+    return False
 
 
 def _workspace_id_from_hrefs(hrefs: Any) -> Optional[str]:

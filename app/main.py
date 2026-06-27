@@ -1441,6 +1441,23 @@ async def api_login_opencode_go_account(request: Request, account_id: int):
     return {"ok": True, "account": public_opencode_go_account(updated)}
 
 
+@app.post("/api/opencode-go/accounts/{account_id}/session")
+async def api_import_opencode_go_session(request: Request, account_id: int):
+    require_user(request)
+    account = db.get_opencode_go_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="OpenCode Go 账号不存在")
+    payload = await request.json()
+    try:
+        storage_state, workspace_id = _opencode_go_session_payload(payload)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+    db.update_opencode_go_session(account_id, storage_state, workspace_id=workspace_id, status="logged_in")
+    updated = db.get_opencode_go_account(account_id)
+    db.add_log("info", "opencode-go", f"API 导入 OpenCode Go 登录态: {account['name']}")
+    return {"ok": True, "account": public_opencode_go_account(updated)}
+
+
 @app.post("/api/opencode-go/accounts/{account_id}/refresh")
 async def api_refresh_opencode_go_account(request: Request, account_id: int):
     require_user(request)
@@ -2151,6 +2168,38 @@ def import_bulk_opencode_go_accounts(bulk_text: str) -> dict[str, Any]:
         if account:
             imported.append(public_opencode_go_account(account))
     return {"count": len(imported), "accounts": imported}
+
+
+def _opencode_go_session_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    if not isinstance(payload, dict):
+        raise ValueError("请求内容格式不正确")
+    raw_state = (
+        payload.get("storage_state")
+        or payload.get("storageState")
+        or payload.get("storage_state_json")
+        or payload.get("storageStateJson")
+        or payload.get("json")
+    )
+    if isinstance(raw_state, str):
+        raw_state = raw_state.strip()
+        if not raw_state:
+            raise ValueError("请输入 Playwright storage_state JSON")
+        try:
+            storage_state = json.loads(raw_state)
+        except json.JSONDecodeError as exc:
+            raise ValueError("登录态 JSON 格式不正确") from exc
+    elif isinstance(raw_state, dict):
+        storage_state = raw_state
+    else:
+        raise ValueError("请输入 Playwright storage_state JSON")
+    cookies = storage_state.get("cookies")
+    origins = storage_state.get("origins", [])
+    if not isinstance(cookies, list) or not isinstance(origins, list):
+        raise ValueError("登录态必须包含 cookies 和 origins 数组")
+    if not cookies:
+        raise ValueError("登录态 cookies 为空")
+    workspace_id = str(payload.get("workspace_id") or payload.get("workspaceId") or "").strip() or None
+    return storage_state, workspace_id
 
 
 def _public_opencode_go_result(result: dict[str, Any]) -> dict[str, Any]:

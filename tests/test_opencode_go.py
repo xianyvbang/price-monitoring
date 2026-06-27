@@ -230,3 +230,49 @@ def test_opencode_go_bulk_import_rejects_bad_lines(tmp_path, monkeypatch):
 
     assert response.status_code == 400
     assert "邮箱|邮箱密码" in response.json()["message"]
+
+
+def test_opencode_go_import_session_encrypts_and_masks_state(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+
+    with TestClient(app) as client:
+        login(client)
+        created = client.post(
+            "/api/opencode-go/accounts",
+            json={"name": "go-main", "email": "user@example.com", "password": "secret-password"},
+        )
+        account_id = created.json()["id"]
+        response = client.post(
+            f"/api/opencode-go/accounts/{account_id}/session",
+            json={
+                "workspace_id": "ws_manual",
+                "storage_state": {
+                    "cookies": [{"name": "session", "value": "manual-cookie", "domain": ".opencode.ai"}],
+                    "origins": [],
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["account"]["has_session"] is True
+    assert "manual-cookie" not in response.text
+    account = db.get_opencode_go_account(account_id)
+    assert account["workspace_id"] == "ws_manual"
+    assert "manual-cookie" in decrypt_value(account["storage_state_enc"], "test-key")
+
+
+def test_opencode_go_import_session_rejects_bad_json(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    account_id = db.upsert_opencode_go_account(
+        {"name": "go-main", "email": "user@example.com", "password": "secret-password"}
+    )
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.post(
+            f"/api/opencode-go/accounts/{account_id}/session",
+            json={"storage_state": "not-json"},
+        )
+
+    assert response.status_code == 400
+    assert "JSON" in response.json()["message"]

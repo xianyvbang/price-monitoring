@@ -16,6 +16,10 @@ const saving = ref(false);
 const bulkDialogVisible = ref(false);
 const bulkText = ref("");
 const importingBulk = ref(false);
+const sessionDialogVisible = ref(false);
+const importingSession = ref(false);
+const sessionAccount = ref(null);
+const sessionForm = reactive({ workspace_id: "", storage_state: "" });
 const historyVisible = ref(false);
 const historyLoading = ref(false);
 const historyAccount = ref(null);
@@ -129,6 +133,33 @@ async function submitBulkImport() {
     ElMessage.error(error.message || "批量导入失败");
   } finally {
     importingBulk.value = false;
+  }
+}
+
+function openSessionImport(account) {
+  sessionAccount.value = account;
+  sessionForm.workspace_id = account.workspace_id || account.workspaceId || "";
+  sessionForm.storage_state = "";
+  sessionDialogVisible.value = true;
+}
+
+async function submitSessionImport() {
+  if (!sessionAccount.value) {
+    return;
+  }
+  importingSession.value = true;
+  try {
+    const response = await api.importOpencodeGoSession(sessionAccount.value.id, {
+      workspace_id: sessionForm.workspace_id,
+      storage_state: sessionForm.storage_state
+    });
+    upsertLocal(response.account);
+    sessionDialogVisible.value = false;
+    ElMessage.success("登录态已导入");
+  } catch (error) {
+    ElMessage.error(error.message || "导入登录态失败");
+  } finally {
+    importingSession.value = false;
   }
 }
 
@@ -358,11 +389,12 @@ onMounted(loadAccounts);
           <el-table-column label="自动刷新" width="105">
             <template #default="{ row }"><el-switch :model-value="boolValue(row.is_enabled)" @change="toggleEnabled(row)" /></template>
           </el-table-column>
-          <el-table-column label="操作" min-width="360" fixed="right">
+          <el-table-column label="操作" min-width="430" fixed="right">
             <template #default="{ row }">
               <div class="table-actions">
                 <el-button size="small" :icon="Edit" @click="openEdit(row)">编辑</el-button>
                 <el-button size="small" :icon="Key" :loading="row._loggingIn" @click="loginAccount(row)">登录</el-button>
+                <el-button size="small" :icon="Upload" @click="openSessionImport(row)">导入登录态</el-button>
                 <el-button size="small" :icon="Refresh" :loading="row._refreshing" @click="refreshAccount(row)">刷新</el-button>
                 <el-button size="small" :icon="CopyDocument" :disabled="!row.has_api_key && !row.hasApiKey" @click="copyApiKey(row)">复制 Key</el-button>
                 <el-button size="small" :icon="Timer" @click="openHistory(row)">历史</el-button>
@@ -411,6 +443,7 @@ onMounted(loadAccounts);
           <div class="mobile-actions">
             <el-button size="small" :icon="Edit" @click="openEdit(row)">编辑</el-button>
             <el-button size="small" :icon="Key" :loading="row._loggingIn" @click="loginAccount(row)">登录</el-button>
+            <el-button size="small" :icon="Upload" @click="openSessionImport(row)">导入登录态</el-button>
             <el-button size="small" :icon="Refresh" :loading="row._refreshing" @click="refreshAccount(row)">刷新</el-button>
             <el-button size="small" :icon="CopyDocument" :disabled="!row.has_api_key && !row.hasApiKey" @click="copyApiKey(row)">复制 Key</el-button>
             <el-button size="small" :icon="Timer" @click="openHistory(row)">历史</el-button>
@@ -468,6 +501,37 @@ onMounted(loadAccounts);
         <div class="dialog-footer">
           <el-button @click="bulkDialogVisible = false">取消</el-button>
           <el-button type="primary" :loading="importingBulk" @click="submitBulkImport">导入</el-button>
+        </div>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="sessionDialogVisible" title="导入 OpenCode Go 登录态" width="760px">
+      <el-form label-position="top" @submit.prevent="submitSessionImport">
+        <el-form-item label="账号">
+          <el-input :model-value="`${sessionAccount?.name || ''} · ${sessionAccount?.email || ''}`" disabled />
+        </el-form-item>
+        <el-form-item label="Workspace ID">
+          <el-input v-model="sessionForm.workspace_id" placeholder="可留空，刷新时自动识别" />
+        </el-form-item>
+        <el-form-item label="Playwright storage_state JSON">
+          <el-input
+            v-model="sessionForm.storage_state"
+            type="textarea"
+            :rows="12"
+            resize="vertical"
+            placeholder="{ &quot;cookies&quot;: [...], &quot;origins&quot;: [...] }"
+            autocomplete="off"
+          />
+        </el-form-item>
+        <div class="import-helper">
+          <span>遇到 Google 验证码或 2FA 时，可人工登录后导入 Playwright storage_state。</span>
+          <span>导入后系统会加密保存登录态，后续刷新优先复用该会话。</span>
+        </div>
+      </el-form>
+      <template #footer>
+        <div class="dialog-footer">
+          <el-button @click="sessionDialogVisible = false">取消</el-button>
+          <el-button type="primary" :loading="importingSession" @click="submitSessionImport">导入</el-button>
         </div>
       </template>
     </el-dialog>
