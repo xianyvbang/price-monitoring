@@ -164,7 +164,12 @@ async function submitSessionImport() {
 }
 
 function openLocalOpencodeLogin() {
-  window.open("https://auth.opencode.ai/google/authorize", "_blank", "noopener,noreferrer");
+  const url = new URL("https://auth.opencode.ai/google/authorize");
+  const email = String(sessionAccount.value?.email || "").trim();
+  if (email) {
+    url.searchParams.set("login_hint", email);
+  }
+  window.open(url.toString(), "_blank", "noopener,noreferrer");
 }
 
 function upsertLocal(account) {
@@ -501,7 +506,7 @@ onMounted(loadAccounts);
         </el-form-item>
         <div class="manual-session-panel">
           <el-button type="primary" :icon="Link" @click="openLocalOpencodeLogin">打开本地浏览器登录页</el-button>
-          <span>会在你当前设备的默认浏览器打开 OpenCode 登录页。登录后从浏览器开发者工具或 Cookie 导出工具复制登录态，再粘贴到下方。</span>
+          <span>会在你当前设备的默认浏览器打开 OpenCode 登录页，并把当前邮箱作为登录提示带过去。密码不会写入链接；登录后复制登录态再粘贴到下方。</span>
         </div>
         <el-form-item label="Workspace ID">
           <el-input v-model="sessionForm.workspace_id" placeholder="可留空，刷新时自动识别" />
