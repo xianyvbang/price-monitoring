@@ -1000,6 +1000,11 @@ async def accounts_page(request: Request):
     return spa_response()
 
 
+@app.get("/opencode-go", response_class=HTMLResponse)
+async def opencode_go_page(request: Request):
+    return spa_response()
+
+
 @app.post("/accounts", response_class=HTMLResponse)
 async def save_account_form(request: Request):
     redirect = redirect_if_needed(request)
@@ -1356,6 +1361,19 @@ async def api_create_opencode_go_account(request: Request):
     account = db.get_opencode_go_account(account_id)
     db.add_log("info", "opencode-go", f"API 保存 OpenCode Go 账号: {account['name']}")
     return {"ok": True, "id": account_id, "account": public_opencode_go_account(account)}
+
+
+@app.post("/api/opencode-go/accounts/bulk")
+async def api_bulk_opencode_go_accounts(request: Request):
+    require_user(request)
+    payload = await request.json()
+    bulk_text = str(payload.get("bulk_text") or payload.get("bulkText") or payload.get("text") or "").strip()
+    try:
+        result = import_bulk_opencode_go_accounts(bulk_text)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+    db.add_log("info", "opencode-go", f"API 批量导入 OpenCode Go 账号 {result['count']} 个")
+    return {"ok": True, **result}
 
 
 @app.put("/api/opencode-go/accounts/{account_id}")
@@ -2093,6 +2111,46 @@ def _opencode_go_account_payload(payload: dict[str, Any], require_password: bool
     if workspace_id:
         data["workspace_id"] = workspace_id
     return data
+
+
+def import_bulk_opencode_go_accounts(bulk_text: str) -> dict[str, Any]:
+    text = str(bulk_text or "").strip()
+    if not text:
+        raise ValueError("请输入要导入的账号")
+    accounts = []
+    errors = []
+    seen_emails: set[str] = set()
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        raw_line = line.strip()
+        if not raw_line:
+            continue
+        if "|" not in raw_line:
+            errors.append(f"第 {line_number} 行格式错误，请使用 邮箱|邮箱密码")
+            continue
+        email, password = [part.strip() for part in raw_line.split("|", 1)]
+        if not email:
+            errors.append(f"第 {line_number} 行缺少邮箱")
+            continue
+        if not password:
+            errors.append(f"第 {line_number} 行缺少邮箱密码")
+            continue
+        normalized_email = email.lower()
+        if normalized_email in seen_emails:
+            errors.append(f"第 {line_number} 行邮箱重复: {email}")
+            continue
+        seen_emails.add(normalized_email)
+        accounts.append({"name": email, "email": email, "password": password, "is_enabled": True})
+    if errors:
+        raise ValueError("；".join(errors[:5]) + ("；..." if len(errors) > 5 else ""))
+    if not accounts:
+        raise ValueError("没有可导入的账号")
+    imported = []
+    for item in accounts:
+        account_id = db.upsert_opencode_go_account(item)
+        account = db.get_opencode_go_account(account_id)
+        if account:
+            imported.append(public_opencode_go_account(account))
+    return {"count": len(imported), "accounts": imported}
 
 
 def _public_opencode_go_result(result: dict[str, Any]) -> dict[str, Any]:

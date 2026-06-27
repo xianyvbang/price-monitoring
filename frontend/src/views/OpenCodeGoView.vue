@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { CopyDocument, Delete, Edit, Key, Plus, Refresh, Timer } from "@element-plus/icons-vue";
+import { CopyDocument, Delete, Edit, Key, Plus, Refresh, Timer, Upload } from "@element-plus/icons-vue";
 import { api } from "../api";
 import { useViewport } from "../composables/useViewport";
 import { boolValue, formatTime } from "../utils";
@@ -13,6 +13,9 @@ const summary = ref({ account_count: 0, last_success_at: null });
 const dialogVisible = ref(false);
 const dialogMode = ref("create");
 const saving = ref(false);
+const bulkDialogVisible = ref(false);
+const bulkText = ref("");
+const importingBulk = ref(false);
 const historyVisible = ref(false);
 const historyLoading = ref(false);
 const historyAccount = ref(null);
@@ -23,6 +26,7 @@ const { isMobile } = useViewport();
 
 const accountCount = computed(() => summary.value.account_count ?? summary.value.accountCount ?? accounts.value.length);
 const lastSuccessAt = computed(() => summary.value.last_success_at ?? summary.value.lastSuccessAt);
+const bulkPreviewCount = computed(() => bulkText.value.split(/\r?\n/).filter((line) => line.trim()).length);
 
 const rules = {
   name: [{ required: true, message: "请输入名称", trigger: "blur" }],
@@ -75,6 +79,11 @@ function openCreate() {
   dialogVisible.value = true;
 }
 
+function openBulkImport() {
+  bulkText.value = "";
+  bulkDialogVisible.value = true;
+}
+
 function openEdit(account) {
   dialogMode.value = "edit";
   Object.assign(form, {
@@ -106,6 +115,20 @@ async function submitAccount() {
     ElMessage.error(error.message || "保存失败");
   } finally {
     saving.value = false;
+  }
+}
+
+async function submitBulkImport() {
+  importingBulk.value = true;
+  try {
+    const response = await api.bulkOpencodeGoAccounts({ bulk_text: bulkText.value });
+    bulkDialogVisible.value = false;
+    await loadAccounts();
+    ElMessage.success(`已导入或更新 ${response.count || 0} 个 OpenCode Go 账号`);
+  } catch (error) {
+    ElMessage.error(error.message || "批量导入失败");
+  } finally {
+    importingBulk.value = false;
   }
 }
 
@@ -285,6 +308,7 @@ onMounted(loadAccounts);
       </div>
       <div class="page-actions">
         <el-button type="primary" :icon="Plus" @click="openCreate">添加账号</el-button>
+        <el-button :icon="Upload" @click="openBulkImport">批量导入</el-button>
         <el-button :icon="Refresh" :loading="refreshingAll" @click="refreshAll">刷新全部</el-button>
       </div>
     </div>
@@ -418,6 +442,32 @@ onMounted(loadAccounts);
         <div class="dialog-footer">
           <el-button @click="dialogVisible = false">取消</el-button>
           <el-button type="primary" :loading="saving" @click="submitAccount">保存</el-button>
+        </div>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="bulkDialogVisible" title="批量导入 OpenCode Go 账号" width="680px">
+      <el-form label-position="top" @submit.prevent="submitBulkImport">
+        <el-form-item label="账号列表">
+          <el-input
+            v-model="bulkText"
+            type="textarea"
+            :rows="12"
+            resize="vertical"
+            placeholder="user1@example.com|password1&#10;user2@example.com|password2"
+            autocomplete="off"
+          />
+        </el-form-item>
+        <div class="import-helper">
+          <span>格式：邮箱|邮箱密码，一行一条</span>
+          <span>名称会自动使用邮箱，空行会跳过，重复名称会更新原账号</span>
+          <span>待导入 {{ bulkPreviewCount }} 行</span>
+        </div>
+      </el-form>
+      <template #footer>
+        <div class="dialog-footer">
+          <el-button @click="bulkDialogVisible = false">取消</el-button>
+          <el-button type="primary" :loading="importingBulk" @click="submitBulkImport">导入</el-button>
         </div>
       </template>
     </el-dialog>

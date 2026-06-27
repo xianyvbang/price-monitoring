@@ -200,3 +200,33 @@ def test_opencode_go_api_crud_and_masks_secrets(tmp_path, monkeypatch):
     assert updated.json()["account"]["email"] == "next@example.com"
     assert updated.json()["account"]["is_enabled"] is False
     assert decrypt_value(db.get_opencode_go_account(account_id)["password_enc"], "test-key") == "secret-password"
+
+
+def test_opencode_go_bulk_import_uses_email_as_name_and_masks_password(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.post(
+            "/api/opencode-go/accounts/bulk",
+            json={"bulk_text": "first@example.com|first-pass\nsecond@example.com|second-pass"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["count"] == 2
+    assert response.json()["accounts"][0]["name"] == "first@example.com"
+    assert response.json()["accounts"][0]["email"] == "first@example.com"
+    assert "first-pass" not in response.text
+    first = db.get_opencode_go_account(response.json()["accounts"][0]["id"])
+    assert decrypt_value(first["password_enc"], "test-key") == "first-pass"
+
+
+def test_opencode_go_bulk_import_rejects_bad_lines(tmp_path, monkeypatch):
+    setup_test_db(tmp_path, monkeypatch)
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.post("/api/opencode-go/accounts/bulk", json={"bulk_text": "broken-line"})
+
+    assert response.status_code == 400
+    assert "邮箱|邮箱密码" in response.json()["message"]

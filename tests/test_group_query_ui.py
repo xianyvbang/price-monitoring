@@ -50,6 +50,7 @@ def test_spa_pages_and_dashboard_api_expose_monitor_data(tmp_path, monkeypatch):
         login(client)
         dashboard_page = client.get("/")
         accounts_page = client.get("/accounts")
+        opencode_go_page = client.get("/opencode-go")
         settings_page = client.get("/settings")
         dashboard = client.get("/api/dashboard")
         accounts = client.get("/api/accounts")
@@ -57,6 +58,7 @@ def test_spa_pages_and_dashboard_api_expose_monitor_data(tmp_path, monkeypatch):
 
     assert_spa_page(dashboard_page)
     assert_spa_page(accounts_page)
+    assert_spa_page(opencode_go_page)
     assert_spa_page(settings_page)
     assert dashboard.status_code == 200
     assert accounts.status_code == 200

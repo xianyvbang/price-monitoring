@@ -601,6 +601,18 @@ a {
   white-space: normal;
 }
 
+.import-helper {
+  background: var(--panel-soft);
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  color: var(--muted);
+  display: grid;
+  font-size: 12px;
+  gap: 6px;
+  line-height: 1.45;
+  padding: 10px 12px;
+}
+
 .login-page {
   align-items: center;
   display: grid;
