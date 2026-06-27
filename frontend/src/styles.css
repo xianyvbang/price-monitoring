@@ -637,6 +637,53 @@ a {
   flex: 1 1 260px;
 }
 
+.session-credential-list {
+  display: grid;
+  gap: 8px;
+}
+
+.session-copy-row {
+  align-items: center;
+  background: var(--panel-soft);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  padding: 10px 12px;
+  text-align: left;
+  transition: border-color 0.2s ease, background 0.2s ease;
+  width: 100%;
+}
+
+.session-copy-row:hover {
+  background: #eef6ff;
+  border-color: #bfdbfe;
+}
+
+.session-copy-row:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.session-copy-row span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.session-copy-row small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.session-copy-row strong {
+  font-family: Consolas, "SFMono-Regular", "Courier New", monospace;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
 .login-page {
   align-items: center;
   display: grid;

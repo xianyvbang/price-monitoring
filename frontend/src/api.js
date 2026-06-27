@@ -72,6 +72,7 @@ export const api = {
   refreshAllOpencodeGo: () => request("/api/opencode-go/query-all", { method: "POST" }),
   opencodeGoHistory: (id, params = {}) => request(`/api/opencode-go/accounts/${id}/history${queryString(params)}`),
   opencodeGoApiKey: (id) => request(`/api/opencode-go/accounts/${id}/api-key`),
+  opencodeGoPassword: (id) => request(`/api/opencode-go/accounts/${id}/password`),
   logs: (params = {}) => request(`/api/logs${queryString(params)}`),
   clearLogs: () => request("/api/logs", { method: "DELETE" })
 };

@@ -1495,6 +1495,19 @@ async def api_opencode_go_api_key(request: Request, account_id: int):
     return {"api_key": data["api_key"], "apiKey": data["api_key"], "api_key_masked": data["api_key_masked"], "apiKeyMasked": data["api_key_masked"]}
 
 
+@app.get("/api/opencode-go/accounts/{account_id}/password")
+async def api_opencode_go_password(request: Request, account_id: int):
+    require_user(request)
+    account = db.get_opencode_go_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="OpenCode Go 账号不存在")
+    password = decrypt_value(account["password_enc"], db.secret_key) if account["password_enc"] else ""
+    if not password:
+        raise HTTPException(status_code=404, detail="尚未保存 Google 密码")
+    db.add_log("info", "opencode-go", f"API 读取 OpenCode Go 密码用于复制: {account['name']}")
+    return {"password": password}
+
+
 @app.get("/api/logs")
 async def api_logs(request: Request):
     require_user(request)

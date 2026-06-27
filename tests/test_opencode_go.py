@@ -148,12 +148,17 @@ def test_normalize_usage_result_allows_missing_key():
 
 
 def test_opencode_go_api_requires_login(tmp_path, monkeypatch):
-    setup_test_db(tmp_path, monkeypatch)
+    db = setup_test_db(tmp_path, monkeypatch)
+    account_id = db.upsert_opencode_go_account(
+        {"name": "go-main", "email": "user@example.com", "password": "secret-password"}
+    )
 
     with TestClient(app) as client:
         response = client.get("/api/opencode-go/accounts")
+        password_response = client.get(f"/api/opencode-go/accounts/{account_id}/password")
 
     assert response.status_code == 401
+    assert password_response.status_code == 401
 
 
 def test_opencode_go_api_crud_and_masks_secrets(tmp_path, monkeypatch):
@@ -181,6 +186,7 @@ def test_opencode_go_api_crud_and_masks_secrets(tmp_path, monkeypatch):
         refreshed = client.post(f"/api/opencode-go/accounts/{account_id}/refresh")
         listed = client.get("/api/opencode-go/accounts")
         key_response = client.get(f"/api/opencode-go/accounts/{account_id}/api-key")
+        password_response = client.get(f"/api/opencode-go/accounts/{account_id}/password")
         history = client.get(f"/api/opencode-go/accounts/{account_id}/history")
         updated = client.put(
             f"/api/opencode-go/accounts/{account_id}",
@@ -195,7 +201,9 @@ def test_opencode_go_api_crud_and_masks_secrets(tmp_path, monkeypatch):
     assert refreshed.json()["account"]["api_key_masked"] == "sk-openc******cret"
     assert listed.json()["accounts"][0]["has_api_key"] is True
     assert "sk-opencode-secret" not in listed.text
+    assert "secret-password" not in listed.text
     assert key_response.json()["api_key"] == "sk-opencode-secret"
+    assert password_response.json()["password"] == "secret-password"
     assert history.json()["records"][0]["rolling_usage"]["usage_percent"] == 11
     assert updated.json()["account"]["email"] == "next@example.com"
     assert updated.json()["account"]["is_enabled"] is False

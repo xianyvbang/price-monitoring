@@ -19,6 +19,8 @@ const importingBulk = ref(false);
 const sessionDialogVisible = ref(false);
 const importingSession = ref(false);
 const sessionAccount = ref(null);
+const sessionPassword = ref("");
+const sessionPasswordLoading = ref(false);
 const sessionForm = reactive({ workspace_id: "", storage_state: "" });
 const historyVisible = ref(false);
 const historyLoading = ref(false);
@@ -138,9 +140,34 @@ async function submitBulkImport() {
 
 function openSessionImport(account) {
   sessionAccount.value = account;
+  sessionPassword.value = "";
+  sessionPasswordLoading.value = false;
   sessionForm.workspace_id = account.workspace_id || account.workspaceId || "";
   sessionForm.storage_state = "";
   sessionDialogVisible.value = true;
+  loadSessionPassword(account);
+}
+
+async function loadSessionPassword(account) {
+  const hasPassword = account?.has_password || account?.hasPassword;
+  if (!hasPassword) {
+    return;
+  }
+  sessionPasswordLoading.value = true;
+  try {
+    const payload = await api.opencodeGoPassword(account.id);
+    if (String(sessionAccount.value?.id) === String(account.id)) {
+      sessionPassword.value = payload.password || "";
+    }
+  } catch (error) {
+    if (String(sessionAccount.value?.id) === String(account.id)) {
+      ElMessage.error(error.message || "读取密码失败");
+    }
+  } finally {
+    if (String(sessionAccount.value?.id) === String(account.id)) {
+      sessionPasswordLoading.value = false;
+    }
+  }
 }
 
 async function submitSessionImport() {
@@ -237,10 +264,72 @@ async function copyApiKey(account) {
   try {
     const payload = await api.opencodeGoApiKey(account.id);
     const keyValue = payload.api_key || payload.apiKey;
-    await navigator.clipboard.writeText(keyValue);
-    ElMessage.success("API key 已复制");
+    await copyText(keyValue, "API key 已复制");
   } catch (error) {
     ElMessage.error(error.message || "复制失败");
+  }
+}
+
+function legacyCopyText(text) {
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.left = "-9999px";
+  textarea.style.opacity = "0";
+  textarea.style.position = "fixed";
+  textarea.style.top = "-9999px";
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  textarea.setSelectionRange(0, textarea.value.length);
+  const copied = document.execCommand("copy");
+  document.body.removeChild(textarea);
+  if (!copied) {
+    throw new Error("浏览器拒绝复制，请手动选中文字复制");
+  }
+}
+
+async function copyText(value, successMessage) {
+  const text = value === null || value === undefined ? "" : String(value);
+  if (!text) {
+    throw new Error("没有可复制的数据");
+  }
+  if (navigator.clipboard?.writeText && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(text);
+      ElMessage.success(successMessage);
+      return;
+    } catch (_error) {
+      legacyCopyText(text);
+      ElMessage.success(successMessage);
+      return;
+    }
+  }
+  legacyCopyText(text);
+  ElMessage.success(successMessage);
+}
+
+async function copySessionEmail() {
+  const email = String(sessionAccount.value?.email || "").trim();
+  if (!email) {
+    ElMessage.error("当前账号没有邮箱");
+    return;
+  }
+  try {
+    await copyText(email, "邮箱已复制");
+  } catch (error) {
+    ElMessage.error(error.message || "复制邮箱失败");
+  }
+}
+
+async function copySessionPassword() {
+  if (!sessionAccount.value) {
+    return;
+  }
+  try {
+    await copyText(sessionPassword.value, "密码已复制");
+  } catch (error) {
+    ElMessage.error(error.message || "复制密码失败");
   }
 }
 
@@ -502,7 +591,22 @@ onMounted(loadAccounts);
     <el-dialog v-model="sessionDialogVisible" title="导入 OpenCode Go 登录态" width="760px">
       <el-form label-position="top" @submit.prevent="submitSessionImport">
         <el-form-item label="账号">
-          <el-input :model-value="`${sessionAccount?.name || ''} · ${sessionAccount?.email || ''}`" disabled />
+          <div class="session-credential-list">
+            <button class="session-copy-row" type="button" @click="copySessionEmail">
+              <span>
+                <small>邮箱</small>
+                <strong>{{ sessionAccount?.email || "-" }}</strong>
+              </span>
+              <el-icon><CopyDocument /></el-icon>
+            </button>
+            <button class="session-copy-row" type="button" :disabled="sessionPasswordLoading || !sessionPassword" @click="copySessionPassword">
+              <span>
+                <small>密码</small>
+                <strong>{{ sessionPasswordLoading ? "读取中..." : sessionPassword || "未保存密码" }}</strong>
+              </span>
+              <el-icon><CopyDocument /></el-icon>
+            </button>
+          </div>
         </el-form-item>
         <div class="manual-session-panel">
           <el-button type="primary" :icon="Link" @click="openLocalOpencodeLogin">打开本地浏览器登录页</el-button>
