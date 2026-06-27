@@ -16,6 +16,8 @@ docker compose up -d --force-recreate
 
 访问 `http://localhost:8000`，默认账号来自 `.env`。
 
+Docker 容器启动时会默认检查 Playwright；会先执行 `pip install -r /app/requirements.txt`，如果仍缺少 Python 包会显式补装 `playwright==1.60.0`，再执行 `python -m playwright install --with-deps chromium` 自动补齐 Chromium 浏览器和运行依赖。如需关闭启动时检查，可设置环境变量 `PLAYWRIGHT_INSTALL_ON_START=0`。
+
 `APP_SECRET_KEY` 不能继续使用默认值，否则 session 和加密数据的安全性都会下降。
 
 首次创建 SQLite 数据库时，系统会写入一组默认账号骨架；这些默认账号只包含平台、名称和 Base URL，不包含 API Key、accessToken、SMTP 授权码或其他密钥。
