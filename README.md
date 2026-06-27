@@ -16,8 +16,6 @@ docker compose up -d --force-recreate
 
 访问 `http://localhost:8000`，默认账号来自 `.env`。
 
-Docker 容器启动时会默认检查 Playwright；会先执行 `pip install -r /app/requirements.txt`，如果仍缺少 Python 包会显式补装 `playwright==1.60.0`，再执行 `python -m playwright install --with-deps chromium` 自动补齐 Chromium 浏览器和运行依赖。如需关闭启动时检查，可设置环境变量 `PLAYWRIGHT_INSTALL_ON_START=0`。
-
 `APP_SECRET_KEY` 不能继续使用默认值，否则 session 和加密数据的安全性都会下降。
 
 首次创建 SQLite 数据库时，系统会写入一组默认账号骨架；这些默认账号只包含平台、名称和 Base URL，不包含 API Key、accessToken、SMTP 授权码或其他密钥。
@@ -28,7 +26,6 @@ Docker 容器启动时会默认检查 Playwright；会先执行 `pip install -r 
 python -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
-python -m playwright install chromium
 uvicorn app.main:app --reload
 ```
 
@@ -101,27 +98,22 @@ JSON 示例：
 
 ## OpenCode Go
 
-页面顶部的 `OpenCode Go` 用于监控 OpenCode Go 订阅的 5h、7d、30d 用量和 API key。新增账号时填写 Google 邮箱和密码；服务端会用 Playwright 走 OpenCode 的 Google OAuth 登录，保存加密后的网页登录态，并在自动刷新时复用该登录态。
+页面顶部的 `OpenCode Go` 用于监控 OpenCode Go 订阅的 5h、7d、30d 用量和 API key。新增账号时填写 Google 邮箱和密码用于账号归档；服务端不会启动内置浏览器，也不会自动操作 Google 登录。
 
-如果 Google 触发验证码、2FA 或风控，登录会失败并在页面显示错误，需要先人工处理账号验证。OpenCode Go 的自动刷新沿用通用查询间隔和暂停开关。
+OpenCode Go 的自动刷新沿用通用查询间隔和暂停开关。刷新时服务端使用已导入并加密保存的 OpenCode 登录态调用 OpenCode 前端 `_server` 接口。
 
-遇到验证码或 2FA 时，可在 OpenCode Go 页面点击“导入登录态”。先在本地运行下面的临时脚本，按弹出的浏览器完成人工登录，然后把生成的 `opencode-state.json` 内容粘贴到页面弹窗：
+导入登录态时，在 OpenCode Go 页面点击“导入登录态”，再点击“打开本地浏览器登录页”。系统会在你当前设备的默认浏览器打开 OpenCode 登录页；登录完成后，从浏览器开发者工具或 Cookie 导出工具复制 OpenCode 的登录态，粘贴到弹窗中保存。
 
-```bash
-python - <<'PY'
-import json
-from pathlib import Path
-from playwright.sync_api import sync_playwright
+弹窗支持两种内容：
 
-with sync_playwright() as p:
-    browser = p.chromium.launch(headless=False)
-    context = browser.new_context()
-    page = context.new_page()
-    page.goto("https://auth.opencode.ai/google/authorize")
-    input("完成 Google 验证并进入 OpenCode 后按回车...")
-    Path("opencode-state.json").write_text(json.dumps(context.storage_state(), ensure_ascii=False), encoding="utf-8")
-    browser.close()
-PY
+```json
+{ "cookies": [{ "name": "session", "value": "...", "domain": ".opencode.ai", "path": "/" }], "origins": [] }
+```
+
+也可以直接粘贴浏览器请求里的 Cookie 头：
+
+```text
+Cookie: name=value; name2=value2
 ```
 
 ## 接口

@@ -32,7 +32,7 @@ from app.security import decrypt_value
 from app.security import verify_password
 from app.services.balance import login_sub2api_tokens, query_newapi_group_options, query_sub2api_group_options
 from app.services.emailer import send_email
-from app.services.opencode_go import login_opencode_go_account, mask_api_key, public_usage_window
+from app.services.opencode_go import mask_api_key, public_usage_window
 from app.services.scheduler import (
     BalanceScheduler,
     query_all_accounts,
@@ -1423,22 +1423,11 @@ async def api_login_opencode_go_account(request: Request, account_id: int):
     account = db.get_opencode_go_account(account_id)
     if not account:
         raise HTTPException(status_code=404, detail="OpenCode Go 账号不存在")
-    settings = db.get_general_settings()
-    result = await login_opencode_go_account(account, db.secret_key, settings["request_timeout"], db.add_log)
-    if result.get("is_valid"):
-        db.update_opencode_go_session(
-            account_id,
-            result.get("storage_state"),
-            workspace_id=result.get("workspace_id") or result.get("workspaceId"),
-            status="logged_in",
-        )
-        db.add_log("info", "opencode-go", f"{account['name']} OpenCode Go 登录成功")
-    else:
-        db.update_opencode_go_result(account_id, result)
-        db.add_log("error", "opencode-go", f"{account['name']} OpenCode Go 登录失败: {result.get('invalid_message')}")
-        return JSONResponse({"ok": False, "message": result.get("invalid_message"), "result": _public_opencode_go_result(result)}, status_code=400)
-    updated = db.get_opencode_go_account(account_id)
-    return {"ok": True, "account": public_opencode_go_account(updated)}
+    message = "已取消内置浏览器登录，请在“导入登录态”弹窗中打开本地浏览器登录页，并导入登录态 JSON 或 Cookie"
+    result = {"is_valid": False, "invalid_message": message}
+    db.update_opencode_go_result(account_id, result)
+    db.add_log("warning", "opencode-go", f"{account['name']} OpenCode Go 内置浏览器登录已停用")
+    return JSONResponse({"ok": False, "message": message, "result": _public_opencode_go_result(result)}, status_code=400)
 
 
 @app.post("/api/opencode-go/accounts/{account_id}/session")
@@ -2180,18 +2169,28 @@ def _opencode_go_session_payload(payload: dict[str, Any]) -> tuple[dict[str, Any
         or payload.get("storageStateJson")
         or payload.get("json")
     )
+    raw_cookies = payload.get("cookies")
+    raw_cookie_header = payload.get("cookie") or payload.get("cookie_header") or payload.get("cookieHeader")
     if isinstance(raw_state, str):
         raw_state = raw_state.strip()
         if not raw_state:
-            raise ValueError("请输入 Playwright storage_state JSON")
+            raise ValueError("请输入登录态 JSON 或 Cookie")
         try:
             storage_state = json.loads(raw_state)
         except json.JSONDecodeError as exc:
-            raise ValueError("登录态 JSON 格式不正确") from exc
+            if "=" not in raw_state:
+                raise ValueError("登录态 JSON 格式不正确") from exc
+            storage_state = {"cookies": _cookies_from_header(raw_state), "origins": []}
     elif isinstance(raw_state, dict):
         storage_state = raw_state
+    elif isinstance(raw_state, list):
+        storage_state = {"cookies": raw_state, "origins": []}
+    elif isinstance(raw_cookies, list):
+        storage_state = {"cookies": raw_cookies, "origins": []}
+    elif isinstance(raw_cookie_header, str) and raw_cookie_header.strip():
+        storage_state = {"cookies": _cookies_from_header(raw_cookie_header), "origins": []}
     else:
-        raise ValueError("请输入 Playwright storage_state JSON")
+        raise ValueError("请输入登录态 JSON 或 Cookie")
     cookies = storage_state.get("cookies")
     origins = storage_state.get("origins", [])
     if not isinstance(cookies, list) or not isinstance(origins, list):
@@ -2200,6 +2199,31 @@ def _opencode_go_session_payload(payload: dict[str, Any]) -> tuple[dict[str, Any
         raise ValueError("登录态 cookies 为空")
     workspace_id = str(payload.get("workspace_id") or payload.get("workspaceId") or "").strip() or None
     return storage_state, workspace_id
+
+
+def _cookies_from_header(value: str) -> list[dict[str, str]]:
+    value = value.strip()
+    if value.lower().startswith("cookie:"):
+        value = value.split(":", 1)[1].strip()
+    cookies = []
+    for part in value.split(";"):
+        if "=" not in part:
+            continue
+        name, cookie_value = part.split("=", 1)
+        name = name.strip()
+        if not name:
+            continue
+        cookies.append(
+            {
+                "name": name,
+                "value": cookie_value.strip(),
+                "domain": ".opencode.ai",
+                "path": "/",
+            }
+        )
+    if not cookies:
+        raise ValueError("Cookie 内容格式不正确")
+    return cookies
 
 
 def _public_opencode_go_result(result: dict[str, Any]) -> dict[str, Any]:

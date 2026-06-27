@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { CopyDocument, Delete, Edit, Key, Plus, Refresh, Timer, Upload } from "@element-plus/icons-vue";
+import { CopyDocument, Delete, Edit, Link, Plus, Refresh, Timer, Upload } from "@element-plus/icons-vue";
 import { api } from "../api";
 import { useViewport } from "../composables/useViewport";
 import { boolValue, formatTime } from "../utils";
@@ -163,6 +163,10 @@ async function submitSessionImport() {
   }
 }
 
+function openLocalOpencodeLogin() {
+  window.open("https://auth.opencode.ai/google/authorize", "_blank", "noopener,noreferrer");
+}
+
 function upsertLocal(account) {
   if (!account) {
     loadAccounts();
@@ -192,19 +196,6 @@ async function toggleEnabled(account) {
     ElMessage.success("自动刷新状态已保存");
   } catch (error) {
     ElMessage.error(error.message || "保存失败");
-  }
-}
-
-async function loginAccount(account) {
-  account._loggingIn = true;
-  try {
-    const response = await api.loginOpencodeGo(account.id);
-    upsertLocal(response.account);
-    ElMessage.success("登录成功");
-  } catch (error) {
-    ElMessage.error(error.message || "登录失败");
-  } finally {
-    account._loggingIn = false;
   }
 }
 
@@ -389,11 +380,10 @@ onMounted(loadAccounts);
           <el-table-column label="自动刷新" width="105">
             <template #default="{ row }"><el-switch :model-value="boolValue(row.is_enabled)" @change="toggleEnabled(row)" /></template>
           </el-table-column>
-          <el-table-column label="操作" min-width="430" fixed="right">
+          <el-table-column label="操作" min-width="380" fixed="right">
             <template #default="{ row }">
               <div class="table-actions">
                 <el-button size="small" :icon="Edit" @click="openEdit(row)">编辑</el-button>
-                <el-button size="small" :icon="Key" :loading="row._loggingIn" @click="loginAccount(row)">登录</el-button>
                 <el-button size="small" :icon="Upload" @click="openSessionImport(row)">导入登录态</el-button>
                 <el-button size="small" :icon="Refresh" :loading="row._refreshing" @click="refreshAccount(row)">刷新</el-button>
                 <el-button size="small" :icon="CopyDocument" :disabled="!row.has_api_key && !row.hasApiKey" @click="copyApiKey(row)">复制 Key</el-button>
@@ -442,7 +432,6 @@ onMounted(loadAccounts);
           </div>
           <div class="mobile-actions">
             <el-button size="small" :icon="Edit" @click="openEdit(row)">编辑</el-button>
-            <el-button size="small" :icon="Key" :loading="row._loggingIn" @click="loginAccount(row)">登录</el-button>
             <el-button size="small" :icon="Upload" @click="openSessionImport(row)">导入登录态</el-button>
             <el-button size="small" :icon="Refresh" :loading="row._refreshing" @click="refreshAccount(row)">刷新</el-button>
             <el-button size="small" :icon="CopyDocument" :disabled="!row.has_api_key && !row.hasApiKey" @click="copyApiKey(row)">复制 Key</el-button>
@@ -510,26 +499,31 @@ onMounted(loadAccounts);
         <el-form-item label="账号">
           <el-input :model-value="`${sessionAccount?.name || ''} · ${sessionAccount?.email || ''}`" disabled />
         </el-form-item>
+        <div class="manual-session-panel">
+          <el-button type="primary" :icon="Link" @click="openLocalOpencodeLogin">打开本地浏览器登录页</el-button>
+          <span>会在你当前设备的默认浏览器打开 OpenCode 登录页。登录后从浏览器开发者工具或 Cookie 导出工具复制登录态，再粘贴到下方。</span>
+        </div>
         <el-form-item label="Workspace ID">
           <el-input v-model="sessionForm.workspace_id" placeholder="可留空，刷新时自动识别" />
         </el-form-item>
-        <el-form-item label="Playwright storage_state JSON">
+        <el-form-item label="登录态 JSON 或 Cookie">
           <el-input
             v-model="sessionForm.storage_state"
             type="textarea"
             :rows="12"
             resize="vertical"
-            placeholder="{ &quot;cookies&quot;: [...], &quot;origins&quot;: [...] }"
+            placeholder="{ &quot;cookies&quot;: [...], &quot;origins&quot;: [] } 或 Cookie: name=value; name2=value2"
             autocomplete="off"
           />
         </el-form-item>
         <div class="import-helper">
-          <span>遇到 Google 验证码或 2FA 时，可人工登录后导入 Playwright storage_state。</span>
+          <span>遇到 Google 验证码或 2FA 时，可在本地浏览器完成人工登录后导入登录态。</span>
           <span>导入后系统会加密保存登录态，后续刷新优先复用该会话。</span>
         </div>
       </el-form>
       <template #footer>
         <div class="dialog-footer">
+          <el-button :icon="Link" @click="openLocalOpencodeLogin">打开本地浏览器登录页</el-button>
           <el-button @click="sessionDialogVisible = false">取消</el-button>
           <el-button type="primary" :loading="importingSession" @click="submitSessionImport">导入</el-button>
         </div>

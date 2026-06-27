@@ -276,3 +276,26 @@ def test_opencode_go_import_session_rejects_bad_json(tmp_path, monkeypatch):
 
     assert response.status_code == 400
     assert "JSON" in response.json()["message"]
+
+
+def test_opencode_go_import_session_accepts_cookie_header(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+
+    with TestClient(app) as client:
+        login(client)
+        created = client.post(
+            "/api/opencode-go/accounts",
+            json={"name": "go-main", "email": "user@example.com", "password": "secret-password"},
+        )
+        account_id = created.json()["id"]
+        response = client.post(
+            f"/api/opencode-go/accounts/{account_id}/session",
+            json={"workspace_id": "ws_cookie", "storage_state": "Cookie: session=browser-cookie; other=value"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["account"]["has_session"] is True
+    assert "browser-cookie" not in response.text
+    account = db.get_opencode_go_account(account_id)
+    assert account["workspace_id"] == "ws_cookie"
+    assert "browser-cookie" in decrypt_value(account["storage_state_enc"], "test-key")

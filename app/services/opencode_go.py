@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
-import time
 from typing import Any, Callable, Optional
 
 import httpx
@@ -13,38 +11,20 @@ from app.security import decrypt_value
 LogCallback = Callable[[str, str, str], None]
 
 OPENCODE_BASE_URL = "https://opencode.ai"
-OPENCODE_AUTH_URL = f"{OPENCODE_BASE_URL}/auth"
 OPENCODE_GO_PATH = "/go"
-OPENAUTH_BASE_URL = "https://auth.opencode.ai"
-OPENAUTH_GOOGLE_AUTHORIZE_PATH = "/google/authorize"
-OPENAUTH_GOOGLE_AUTHORIZE_URL = f"{OPENAUTH_BASE_URL}{OPENAUTH_GOOGLE_AUTHORIZE_PATH}"
 SESSION_GET_REFERENCE_ID = "9bc4808361cdaee17059a8d3822b36ee8c9a0d93f1adc289fa1926998e3c9768"
 LITE_SUBSCRIPTION_GET_REFERENCE_ID = "c7389bd0e731f80f49593e5ee53835475f4e28594dd6bd83eb229bab753498cd"
 KEY_LIST_REFERENCE_IDS = (
     "def2ab20a296ef06465b1c3cf86da4ea983c0696e7a5708b9468aaed85083d6b",
     "c22cd964237ba79f2f9b95faa2a14b804f870d1bab49279463379cc6a0fd0c85",
 )
-SERVER_RUNTIME_PATTERN = re.compile(r'href="(?P<path>/_build/assets/server-runtime-[^"]+\.js)"')
-LOGIN_TIMEOUT_MS = 90_000
 QUERY_TIMEOUT_MS = 45_000
-
-
-async def login_opencode_go_account(
-    account: Any,
-    secret_key: str,
-    timeout: float,
-    log: LogCallback | None = None,
-) -> dict[str, Any]:
-    email = decrypt_value(_account_value(account, "email_enc"), secret_key)
-    password = decrypt_value(_account_value(account, "password_enc"), secret_key)
-    if not email:
-        return _invalid("缺少 Google 邮箱")
-    if not password:
-        return _invalid("缺少 Google 密码")
-    try:
-        return await _run_browser_login(email, password, timeout, log)
-    except Exception as exc:
-        return _invalid(_friendly_login_error(exc))
+DEFAULT_BROWSER_HEADERS = {
+    "Accept": "application/json, text/plain, */*",
+    "Origin": OPENCODE_BASE_URL,
+    "Referer": f"{OPENCODE_BASE_URL}{OPENCODE_GO_PATH}",
+    "User-Agent": "Mozilla/5.0",
+}
 
 
 async def refresh_opencode_go_account(
@@ -55,25 +35,12 @@ async def refresh_opencode_go_account(
 ) -> dict[str, Any]:
     storage_state = _decrypt_json(_account_value(account, "storage_state_enc"), secret_key)
     if not storage_state:
-        login_result = await login_opencode_go_account(account, secret_key, timeout, log)
-        if not login_result.get("is_valid"):
-            return login_result
-        storage_state = login_result.get("storage_state")
+        return _invalid("缺少 OpenCode Go 登录态，请先用本地浏览器登录后导入登录态 JSON 或 Cookie")
     try:
-        result = await _run_browser_refresh(storage_state, _account_value(account, "workspace_id"), timeout, log)
+        result = await _run_http_refresh(storage_state, _account_value(account, "workspace_id"), timeout, log)
     except Exception as exc:
         message = _friendly_refresh_error(exc)
-        if _looks_like_session_error(message):
-            login_result = await login_opencode_go_account(account, secret_key, timeout, log)
-            if not login_result.get("is_valid"):
-                return login_result
-            try:
-                result = await _run_browser_refresh(login_result.get("storage_state"), login_result.get("workspace_id"), timeout, log)
-                result["storage_state"] = login_result.get("storage_state")
-            except Exception as retry_exc:
-                return _invalid(_friendly_refresh_error(retry_exc))
-        else:
-            return _invalid(message)
+        return _invalid(message)
     result["checked_at"] = utc_now()
     return result
 
@@ -87,6 +54,7 @@ async def query_opencode_server_reference(
     response = await client.post(
         f"{OPENCODE_BASE_URL}/_server",
         headers={
+            **DEFAULT_BROWSER_HEADERS,
             "Content-Type": "application/json",
             "X-Server-Id": reference_id,
             "X-Server-Instance": instance,
@@ -149,218 +117,58 @@ def mask_api_key(value: str | None) -> str:
     return _mask_api_key(value)
 
 
-async def _run_browser_login(email: str, password: str, timeout: float, log: LogCallback | None) -> dict[str, Any]:
-    playwright = _import_playwright()
-    async with playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context()
-        page = await context.new_page()
-        try:
-            page.set_default_timeout(min(LOGIN_TIMEOUT_MS, max(10_000, int(timeout * 1000))))
-            await page.goto(OPENAUTH_GOOGLE_AUTHORIZE_URL, wait_until="domcontentloaded")
-            await _fill_google_login(page, email, password)
-            await _wait_for_opencode_login(page)
-            storage_state = await context.storage_state()
-            workspace_id = await _discover_workspace_id(page)
-            _log(log, "info", "opencode-go", f"OpenCode Go 登录成功: {email}")
-            return {
-                "is_valid": True,
-                "storage_state": storage_state,
-                "workspace_id": workspace_id,
-            }
-        finally:
-            await context.close()
-            await browser.close()
-
-
-async def _run_browser_refresh(
+async def _run_http_refresh(
     storage_state: Any,
     workspace_id: str | None,
     timeout: float,
     log: LogCallback | None,
 ) -> dict[str, Any]:
-    playwright = _import_playwright()
-    async with playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(storage_state=storage_state or {})
-        page = await context.new_page()
-        try:
-            page.set_default_timeout(min(QUERY_TIMEOUT_MS, max(10_000, int(timeout * 1000))))
-            await page.goto(OPENCODE_BASE_URL, wait_until="domcontentloaded")
-            runtime_path = await _discover_server_runtime_path(page)
-            session = await _call_server_reference_in_page(page, runtime_path, SESSION_GET_REFERENCE_ID, [])
-            workspace_id = workspace_id or _workspace_id_from_session(session) or await _discover_workspace_id(page)
-            if not workspace_id:
-                raise RuntimeError("未能识别 OpenCode workspace，请确认账号已登录并已创建 workspace")
-            subscription = await _call_server_reference_in_page(page, runtime_path, LITE_SUBSCRIPTION_GET_REFERENCE_ID, [workspace_id])
-            keys_payload = None
-            key_errors = []
-            for reference_id in KEY_LIST_REFERENCE_IDS:
-                try:
-                    keys_payload = await _call_server_reference_in_page(page, runtime_path, reference_id, [workspace_id])
-                    break
-                except Exception as exc:
-                    key_errors.append(str(exc))
-            if keys_payload is None:
-                raise RuntimeError("OpenCode key.list 接口不可用，OpenCode 前端接口可能已更新: " + "; ".join(key_errors))
-            result = normalize_usage_result(subscription, keys_payload, workspace_id, session)
-            result["storage_state"] = await context.storage_state()
-            _log(log, "info", "opencode-go", f"OpenCode Go 刷新成功: workspace={workspace_id}")
-            return result
-        finally:
-            await context.close()
-            await browser.close()
+    timeout = max(10.0, min(QUERY_TIMEOUT_MS, float(timeout or QUERY_TIMEOUT_MS)))
+    cookies = _cookies_from_storage_state(storage_state)
+    async with httpx.AsyncClient(cookies=cookies, headers=DEFAULT_BROWSER_HEADERS, follow_redirects=True, timeout=timeout) as client:
+        response = await client.get(OPENCODE_BASE_URL)
+        response.raise_for_status()
+        if "auth.opencode.ai" in str(response.url) or "/auth" in str(response.url):
+            raise RuntimeError("OpenCode 登录态已失效，请重新导入")
+        session = await query_opencode_server_reference(client, SESSION_GET_REFERENCE_ID, [])
+        workspace_id = workspace_id or _workspace_id_from_session(session)
+        if not workspace_id:
+            raise RuntimeError("未能识别 OpenCode workspace，请确认账号已登录并已创建 workspace")
+        subscription = await query_opencode_server_reference(client, LITE_SUBSCRIPTION_GET_REFERENCE_ID, [workspace_id])
+        keys_payload = None
+        key_errors = []
+        for reference_id in KEY_LIST_REFERENCE_IDS:
+            try:
+                keys_payload = await query_opencode_server_reference(client, reference_id, [workspace_id])
+                break
+            except Exception as exc:
+                key_errors.append(str(exc))
+        if keys_payload is None:
+            raise RuntimeError("OpenCode key.list 接口不可用，OpenCode 前端接口可能已更新: " + "; ".join(key_errors))
+        result = normalize_usage_result(subscription, keys_payload, workspace_id, session)
+        result["storage_state"] = storage_state
+        _log(log, "info", "opencode-go", f"OpenCode Go 刷新成功: workspace={workspace_id}")
+        return result
 
 
-async def _fill_google_login(page: Any, email: str, password: str) -> None:
-    await page.wait_for_load_state("domcontentloaded")
-    await _wait_for_google_login_form(page)
-    await _fill_first_available(page, ['input[type="email"]', 'input[name="identifier"]'], email)
-    await _click_first_available(page, ['button:has-text("Next")', '#identifierNext button', 'button[jsname]'])
-    await _fill_first_available(page, ['input[type="password"]', 'input[name="Passwd"]'], password)
-    await _click_first_available(page, ['button:has-text("Next")', '#passwordNext button', 'button[jsname]'])
-
-
-async def _wait_for_google_login_form(page: Any) -> None:
-    started = time.monotonic()
-    while time.monotonic() - started < LOGIN_TIMEOUT_MS / 1000:
-        if await _has_any_selector(page, ['input[type="email"]', 'input[name="identifier"]'], timeout=500):
-            return
-        if "accounts.google.com" in page.url:
-            await page.wait_for_timeout(500)
+def _cookies_from_storage_state(storage_state: Any) -> httpx.Cookies:
+    if not isinstance(storage_state, dict):
+        raise RuntimeError("OpenCode 登录态格式不正确")
+    cookie_items = storage_state.get("cookies")
+    if not isinstance(cookie_items, list) or not cookie_items:
+        raise RuntimeError("OpenCode 登录态 cookies 为空")
+    cookies = httpx.Cookies()
+    for item in cookie_items:
+        if not isinstance(item, dict):
             continue
-        if "auth.opencode.ai" in page.url and "/google/authorize" in page.url:
-            await page.wait_for_load_state("domcontentloaded")
-            await page.wait_for_timeout(1000)
+        name = str(item.get("name") or "").strip()
+        value = str(item.get("value") or "")
+        if not name:
             continue
-        if await _click_first_available_optional(
-            page,
-            [
-                'a[href*="google"]',
-                'button:has-text("Google")',
-                'a:has-text("Google")',
-                '[aria-label*="Google"]',
-            ],
-        ):
-            await page.wait_for_load_state("domcontentloaded")
-            continue
-        await page.wait_for_timeout(1000)
-    raise RuntimeError(f"等待 Google 登录页面超时，当前页面: {page.url}")
-
-
-async def _wait_for_opencode_login(page: Any) -> None:
-    started = time.monotonic()
-    while time.monotonic() - started < LOGIN_TIMEOUT_MS / 1000:
-        url = page.url
-        if "opencode.ai" in url and "/auth" not in url and "accounts.google.com" not in url:
-            return
-        text = ""
-        try:
-            text = (await page.locator("body").inner_text(timeout=1500)).lower()
-        except Exception:
-            pass
-        if any(marker in text for marker in ("verify", "verification", "2-step", "two-step", "captcha", "couldn’t sign you in", "couldn't sign you in")):
-            raise RuntimeError("Google 登录需要验证码、2FA 或人工验证")
-        await page.wait_for_timeout(1000)
-    raise RuntimeError("Google OAuth 登录超时")
-
-
-async def _discover_workspace_id(page: Any) -> Optional[str]:
-    for path in ("/", "/go"):
-        try:
-            await page.goto(f"{OPENCODE_BASE_URL}{path}", wait_until="domcontentloaded")
-            hrefs = await page.locator('a[href^="/workspace/"]').evaluate_all("(nodes) => nodes.map((node) => node.getAttribute('href'))")
-            workspace_id = _workspace_id_from_hrefs(hrefs)
-            if workspace_id:
-                return workspace_id
-            match = re.search(r"/workspace/([^/]+)/", page.url)
-            if match:
-                return match.group(1)
-        except Exception:
-            continue
-    return None
-
-
-async def _discover_server_runtime_path(page: Any) -> str:
-    html = await page.content()
-    match = SERVER_RUNTIME_PATTERN.search(html)
-    if match:
-        return match.group("path")
-    return "/_build/assets/server-runtime-BBEC8-uW.js"
-
-
-async def _call_server_reference_in_page(page: Any, runtime_path: str, reference_id: str, args: list[Any]) -> Any:
-    return await page.evaluate(
-        """
-        async ({ runtimePath, referenceId, args }) => {
-          const mod = await import(runtimePath);
-          const createServerReference = mod.a || mod.createServerReference;
-          if (!createServerReference) {
-            throw new Error("OpenCode server runtime export changed");
-          }
-          const fn = createServerReference(referenceId);
-          return await fn(...args);
-        }
-        """,
-        {"runtimePath": runtime_path, "referenceId": reference_id, "args": args},
-    )
-
-
-async def _fill_first_available(page: Any, selectors: list[str], value: str) -> None:
-    for selector in selectors:
-        locator = page.locator(selector).first
-        try:
-            await locator.wait_for(state="visible", timeout=10_000)
-            await locator.fill(value)
-            return
-        except Exception:
-            continue
-    raise RuntimeError("未找到 Google 登录输入框")
-
-
-async def _has_any_selector(page: Any, selectors: list[str], timeout: int = 1000) -> bool:
-    for selector in selectors:
-        locator = page.locator(selector).first
-        try:
-            await locator.wait_for(state="visible", timeout=timeout)
-            return True
-        except Exception:
-            continue
-    return False
-
-
-async def _click_first_available(page: Any, selectors: list[str]) -> None:
-    for selector in selectors:
-        locator = page.locator(selector).first
-        try:
-            await locator.wait_for(state="visible", timeout=10_000)
-            await locator.click()
-            return
-        except Exception:
-            continue
-    raise RuntimeError("未找到 Google 登录下一步按钮")
-
-
-async def _click_first_available_optional(page: Any, selectors: list[str]) -> bool:
-    for selector in selectors:
-        locator = page.locator(selector).first
-        try:
-            await locator.wait_for(state="visible", timeout=1000)
-            await locator.click()
-            return True
-        except Exception:
-            continue
-    return False
-
-
-def _workspace_id_from_hrefs(hrefs: Any) -> Optional[str]:
-    if not isinstance(hrefs, list):
-        return None
-    for href in hrefs:
-        match = re.search(r"/workspace/([^/]+)", str(href or ""))
-        if match:
-            return match.group(1)
-    return None
+        domain = str(item.get("domain") or "opencode.ai").strip() or "opencode.ai"
+        path = str(item.get("path") or "/").strip() or "/"
+        cookies.set(name, value, domain=domain, path=path)
+    return cookies
 
 
 def _workspace_id_from_session(payload: Any) -> Optional[str]:
@@ -413,14 +221,6 @@ def _summarize_session(payload: Any) -> dict[str, Any]:
             if isinstance(workspace, dict)
         ][:5]
     return summary
-
-
-def _import_playwright() -> Any:
-    try:
-        from playwright.async_api import async_playwright
-    except ImportError as exc:
-        raise RuntimeError("未安装 Playwright，请先安装 playwright 并执行 playwright install chromium") from exc
-    return async_playwright
 
 
 def _account_value(account: Any, key: str, default: Any = None) -> Any:
@@ -524,28 +324,11 @@ def _invalid(message: str) -> dict[str, Any]:
     return {"is_valid": False, "invalid_message": message, "checked_at": utc_now()}
 
 
-def _friendly_login_error(exc: Exception) -> str:
-    text = str(exc)
-    if "Executable doesn't exist" in text or "playwright install" in text:
-        return "Playwright Chromium 未安装，请执行 playwright install chromium"
-    if "2FA" in text or "验证码" in text or "verification" in text.lower() or "captcha" in text.lower():
-        return "Google 登录需要验证码、2FA 或人工验证"
-    return f"OpenCode Go 登录失败: {text}"
-
-
 def _friendly_refresh_error(exc: Exception) -> str:
     text = str(exc)
     if "server runtime export changed" in text or "server reference" in text.lower() or "接口" in text:
         return f"OpenCode 前端接口可能已更新: {text}"
-    if "Playwright" in text or "playwright install" in text:
-        return "Playwright Chromium 未安装，请执行 playwright install chromium"
     return f"OpenCode Go 刷新失败: {text}"
-
-
-def _looks_like_session_error(message: str) -> bool:
-    text = message.lower()
-    return "登录" in message or "unauthorized" in text or "401" in text or "workspace" in text or "auth" in text
-
 
 def _response_text(response: httpx.Response) -> str:
     try:

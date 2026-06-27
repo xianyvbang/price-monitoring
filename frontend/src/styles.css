@@ -613,6 +613,30 @@ a {
   padding: 10px 12px;
 }
 
+.import-helper .el-button {
+  justify-self: flex-start;
+  margin-bottom: 2px;
+}
+
+.manual-session-panel {
+  align-items: center;
+  background: #eef6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 12px;
+  gap: 10px;
+  line-height: 1.45;
+  margin-bottom: 18px;
+  padding: 12px;
+}
+
+.manual-session-panel span {
+  flex: 1 1 260px;
+}
+
 .login-page {
   align-items: center;
   display: grid;
