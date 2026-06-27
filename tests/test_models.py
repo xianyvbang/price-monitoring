@@ -818,6 +818,54 @@ def test_monitor_pause_setting_can_be_toggled(tmp_path):
     assert db.get_general_settings()["monitor_paused"] is False
 
 
+def test_reminder_crud_and_update_resets_sent_state(tmp_path):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+    first_time = "2026-05-19T01:00:00+00:00"
+    second_time = "2026-05-20T01:00:00+00:00"
+
+    reminder_id = db.create_reminder("开会", "准备周会材料", first_time)
+    db.mark_reminder_sent(reminder_id, "2026-05-19T01:00:10+00:00")
+
+    sent = db.get_reminder(reminder_id)
+    assert sent["is_sent"] == 1
+    assert sent["sent_at"] == "2026-05-19T01:00:10+00:00"
+
+    updated = db.update_reminder(reminder_id, "更新会议", "准备复盘材料", second_time)
+
+    assert updated["title"] == "更新会议"
+    assert updated["content"] == "准备复盘材料"
+    assert updated["remind_at"] == second_time
+    assert updated["is_sent"] == 0
+    assert updated["sent_at"] is None
+    assert updated["last_error"] is None
+    assert updated["last_attempt_at"] is None
+    assert [row["id"] for row in db.list_reminders()] == [reminder_id]
+
+    assert db.delete_reminder(reminder_id) is True
+    assert db.get_reminder(reminder_id) is None
+    assert db.delete_reminder(reminder_id) is False
+
+
+def test_due_reminders_respect_retry_window(tmp_path):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+    now = "2026-05-19T01:00:00+00:00"
+    fresh_id = db.create_reminder("到期", "应该发送", "2026-05-19T00:59:00+00:00")
+    future_id = db.create_reminder("未来", "不发送", "2026-05-19T01:01:00+00:00")
+    recent_failed_id = db.create_reminder("刚失败", "暂缓重试", "2026-05-19T00:58:00+00:00")
+    old_failed_id = db.create_reminder("旧失败", "可以重试", "2026-05-19T00:57:00+00:00")
+
+    db.mark_reminder_failed(recent_failed_id, "smtp busy", "2026-05-19T00:58:30+00:00")
+    db.mark_reminder_failed(old_failed_id, "smtp busy", "2026-05-19T00:54:59+00:00")
+
+    due_ids = [row["id"] for row in db.list_due_reminders(now=now, retry_seconds=300)]
+
+    assert due_ids == [old_failed_id, fresh_id]
+    assert future_id not in due_ids
+    assert recent_failed_id not in due_ids
+
+
 def test_default_accounts_only_seed_on_first_init(tmp_path):
     db = Database(str(tmp_path / "app.db"), "test-key")
     db.init()

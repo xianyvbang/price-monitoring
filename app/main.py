@@ -25,6 +25,7 @@ from app.models import (
     actual_consumption_stats,
     format_china_time,
     monitor_group_to_dict,
+    reminder_to_dict,
     row_to_dict,
 )
 from app.security import decrypt_value
@@ -1667,7 +1668,55 @@ async def api_monitor_pause(request: Request):
 @app.get("/api/settings")
 async def api_settings(request: Request):
     require_user(request)
-    return {"settings": db.get_general_settings(), "smtp": public_smtp_settings()}
+    return {"settings": db.get_general_settings(), "smtp": public_smtp_settings(), "reminders": public_reminders()}
+
+
+@app.get("/api/settings/reminders")
+async def api_reminders(request: Request):
+    require_user(request)
+    return {"reminders": public_reminders()}
+
+
+@app.post("/api/settings/reminders")
+async def api_create_reminder(request: Request):
+    require_user(request)
+    payload = await request.json()
+    try:
+        data = _reminder_payload(payload)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+    reminder_id = db.create_reminder(data["title"], data["content"], data["remind_at"])
+    scheduler.notify_settings_changed()
+    db.add_log("info", "reminder", f"API 新增定时提醒: {data['title']}")
+    return {"ok": True, "reminder": reminder_to_dict(db.get_reminder(reminder_id))}
+
+
+@app.put("/api/settings/reminders/{reminder_id}")
+async def api_update_reminder(request: Request, reminder_id: int):
+    require_user(request)
+    if not db.get_reminder(reminder_id):
+        raise HTTPException(status_code=404, detail="提醒事项不存在")
+    payload = await request.json()
+    try:
+        data = _reminder_payload(payload)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+    reminder = db.update_reminder(reminder_id, data["title"], data["content"], data["remind_at"])
+    scheduler.notify_settings_changed()
+    db.add_log("info", "reminder", f"API 更新定时提醒: {data['title']}")
+    return {"ok": True, "reminder": reminder_to_dict(reminder)}
+
+
+@app.delete("/api/settings/reminders/{reminder_id}")
+async def api_delete_reminder(request: Request, reminder_id: int):
+    require_user(request)
+    reminder = db.get_reminder(reminder_id)
+    if not reminder:
+        raise HTTPException(status_code=404, detail="提醒事项不存在")
+    db.delete_reminder(reminder_id)
+    scheduler.notify_settings_changed()
+    db.add_log("warning", "reminder", f"API 删除定时提醒: {reminder['title']}")
+    return {"ok": True}
 
 
 @app.post("/api/settings/general")
@@ -1975,6 +2024,36 @@ def public_smtp_settings() -> dict[str, Any]:
     data.pop("password_enc", None)
     data["has_password"] = bool(row["password_enc"])
     return data
+
+
+def public_reminders() -> list[dict[str, Any]]:
+    return [reminder_to_dict(row) for row in db.list_reminders()]
+
+
+def _reminder_payload(payload: Any) -> dict[str, str]:
+    if not isinstance(payload, dict):
+        raise ValueError("请求内容格式不正确")
+    title = str(payload.get("title") or "").strip()
+    content = str(payload.get("content") or "").strip()
+    remind_at = _parse_reminder_time(payload.get("remind_at", payload.get("remindAt")))
+    if not title:
+        raise ValueError("标题不能为空")
+    if not content:
+        raise ValueError("内容不能为空")
+    return {"title": title, "content": content, "remind_at": remind_at}
+
+
+def _parse_reminder_time(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError("提醒时间不能为空")
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("提醒时间格式不正确") from exc
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=CHINA_TZ)
+    return dt.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
 def _to_bool(value: Any) -> bool:

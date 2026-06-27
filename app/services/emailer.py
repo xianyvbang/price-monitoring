@@ -80,3 +80,16 @@ def build_group_rate_change_email(
         ]
     )
     return subject, body
+
+
+def build_reminder_email(reminder: Any) -> tuple[str, str]:
+    subject = f"定时提醒: {reminder['title']}"
+    body = "\n".join(
+        [
+            f"标题: {reminder['title']}",
+            f"提醒时间: {format_china_time(reminder['remind_at'])}",
+            "",
+            str(reminder["content"] or ""),
+        ]
+    )
+    return subject, body

@@ -7,7 +7,7 @@ from app.models import DEFAULT_BALANCE_UNIT, Database, actual_consumption_stats,
 from app.models import utc_now
 from app.services.alerts import handle_alert_state
 from app.services.balance import query_account, query_newapi_group, query_sub2api_group
-from app.services.emailer import build_group_rate_change_email, send_email
+from app.services.emailer import build_group_rate_change_email, build_reminder_email, send_email
 
 
 class BalanceScheduler:
@@ -15,6 +15,7 @@ class BalanceScheduler:
         self.db = db
         self._task: asyncio.Task[None] | None = None
         self._group_rate_task: asyncio.Task[None] | None = None
+        self._reminder_task: asyncio.Task[None] | None = None
         self._stopped = asyncio.Event()
         self._settings_changed = asyncio.Event()
 
@@ -25,6 +26,9 @@ class BalanceScheduler:
         if self._group_rate_task is None or self._group_rate_task.done():
             self._stopped.clear()
             self._group_rate_task = asyncio.create_task(self._run_group_rate_loop())
+        if self._reminder_task is None or self._reminder_task.done():
+            self._stopped.clear()
+            self._reminder_task = asyncio.create_task(self._run_reminder_loop())
 
     async def stop(self) -> None:
         self._stopped.set()
@@ -36,6 +40,10 @@ class BalanceScheduler:
             self._group_rate_task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._group_rate_task
+        if self._reminder_task:
+            self._reminder_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._reminder_task
 
     async def _run(self) -> None:
         while not self._stopped.is_set():
@@ -54,6 +62,11 @@ class BalanceScheduler:
                 continue
             await query_all_group_rates(self.db, notify=True)
             await self._wait(settings["group_rate_query_interval"])
+
+    async def _run_reminder_loop(self) -> None:
+        while not self._stopped.is_set():
+            await send_due_reminders(self.db)
+            await self._wait(30)
 
     def notify_settings_changed(self) -> None:
         self._settings_changed.set()
@@ -81,6 +94,23 @@ class BalanceScheduler:
             for task in waits:
                 if not task.done():
                     task.cancel()
+
+
+async def send_due_reminders(db: Database, now: str | None = None) -> list[dict]:
+    results = []
+    attempted_at = now or utc_now()
+    for reminder in db.list_due_reminders(now=now):
+        try:
+            subject, body = build_reminder_email(reminder)
+            send_email(db.get_smtp_settings(), db.secret_key, subject, body)
+            db.mark_reminder_sent(reminder["id"], attempted_at)
+            db.add_log("info", "reminder", f"定时提醒已发送: {reminder['title']}")
+            results.append({"id": reminder["id"], "sent": True})
+        except Exception as exc:
+            db.mark_reminder_failed(reminder["id"], str(exc), attempted_at)
+            db.add_log("error", "reminder", f"定时提醒发送失败: {reminder['title']}: {exc}")
+            results.append({"id": reminder["id"], "sent": False, "error": str(exc)})
+    return results
 
 
 async def query_one_account(db: Database, account_id: int) -> dict:

@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.models import Database
-from app.services.scheduler import BalanceScheduler, query_all_accounts, query_all_group_rates, query_group_rate_for_account, query_one_account
+from app.services.scheduler import BalanceScheduler, query_all_accounts, query_all_group_rates, query_group_rate_for_account, query_one_account, send_due_reminders
 
 
 def _sub2api_account(name: str, enabled: bool = True, visible: bool = True, credentials: bool = True) -> dict:
@@ -291,3 +291,59 @@ async def test_scheduler_skips_automatic_queries_while_monitor_paused(tmp_path, 
 
     assert len(balance_calls) == 1
     assert len(group_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_due_reminders_send_email_and_skip_future(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+    due_id = db.create_reminder("交付检查", "看一下测试结果", "2026-05-19T00:00:00+00:00")
+    future_id = db.create_reminder("明天提醒", "未来再说", "2999-05-19T00:00:00+00:00")
+    sent = []
+
+    def fake_send(settings, secret_key, subject, body):
+        sent.append((subject, body))
+
+    monkeypatch.setattr("app.services.scheduler.send_email", fake_send)
+
+    result = await send_due_reminders(db, now="2026-05-19T00:00:10+00:00")
+
+    assert result == [{"id": due_id, "sent": True}]
+    assert sent[0][0] == "定时提醒: 交付检查"
+    assert "看一下测试结果" in sent[0][1]
+    assert "提醒时间:" in sent[0][1]
+    assert db.get_reminder(due_id)["is_sent"] == 1
+    assert db.get_reminder(future_id)["is_sent"] == 0
+
+    again = await send_due_reminders(db, now="2026-05-19T00:00:20+00:00")
+
+    assert again == []
+    assert len(sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_due_reminder_failure_records_error_and_delays_retry(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+    reminder_id = db.create_reminder("失败提醒", "SMTP 暂时不可用", "2026-05-19T00:00:00+00:00")
+    calls = []
+
+    def fake_send(settings, secret_key, subject, body):
+        calls.append(subject)
+        raise RuntimeError("smtp down")
+
+    monkeypatch.setattr("app.services.scheduler.send_email", fake_send)
+
+    first = await send_due_reminders(db, now="2026-05-19T00:00:10+00:00")
+    second = await send_due_reminders(db, now="2026-05-19T00:01:00+00:00")
+
+    reminder = db.get_reminder(reminder_id)
+    logs = db.list_logs()
+
+    assert first == [{"id": reminder_id, "sent": False, "error": "smtp down"}]
+    assert second == []
+    assert calls == ["定时提醒: 失败提醒"]
+    assert reminder["is_sent"] == 0
+    assert reminder["last_error"] == "smtp down"
+    assert reminder["last_attempt_at"] is not None
+    assert any("定时提醒发送失败: 失败提醒: smtp down" in log["message"] for log in logs)
