@@ -205,7 +205,7 @@ async function loadAccounts() {
   loading.value = true;
   try {
     const payload = await api.opencodeGoAccounts();
-    accounts.value = payload.accounts || [];
+    accounts.value = (payload.accounts || []).map(normalizeAccountUsage);
     summary.value = payload.summary || {};
   } catch (error) {
     ElMessage.error(error.message || "加载 OpenCode Go 账号失败");
@@ -230,7 +230,7 @@ function defaultForm() {
     email: "",
     password: "",
     workspace_id: "",
-    is_enabled: true
+    is_enabled: false
   };
 }
 
@@ -416,6 +416,7 @@ function upsertLocal(account) {
     loadAccounts();
     return;
   }
+  account = normalizeAccountUsage(account);
   const index = accounts.value.findIndex((item) => String(item.id) === String(account.id));
   if (index >= 0) {
     accounts.value[index] = account;
@@ -560,7 +561,7 @@ async function openHistory(account) {
   historyRecords.value = [];
   try {
     const payload = await api.opencodeGoHistory(account.id, { limit: 100 });
-    historyRecords.value = payload.records || [];
+    historyRecords.value = (payload.records || []).map(normalizeAccountUsage);
   } catch (error) {
     ElMessage.error(error.message || "获取历史失败");
   } finally {
@@ -582,7 +583,7 @@ function statusText(account) {
 }
 
 function usageWindow(account, key) {
-  return account[key] || account[toCamel(key)] || {};
+  return normalizeUsageWindow(account?.[key] ?? account?.[toCamel(key)] ?? {});
 }
 
 function toCamel(value) {
@@ -630,6 +631,54 @@ function usageCell(account, key) {
 
 function historyUsage(record, key) {
   return usageWindow(record, key);
+}
+
+function normalizeAccountUsage(account) {
+  if (!account || typeof account !== "object") {
+    return account;
+  }
+  return {
+    ...account,
+    rolling_usage: normalizeUsageWindow(account.rolling_usage ?? account.rollingUsage),
+    weekly_usage: normalizeUsageWindow(account.weekly_usage ?? account.weeklyUsage),
+    monthly_usage: normalizeUsageWindow(account.monthly_usage ?? account.monthlyUsage)
+  };
+}
+
+function normalizeUsageWindow(value) {
+  let window = value;
+  if (typeof window === "string") {
+    try {
+      window = JSON.parse(window);
+    } catch (_error) {
+      window = {};
+    }
+  }
+  const found = findUsageWindow(window);
+  const usagePercentValue = found?.usage_percent ?? found?.usagePercent;
+  const resetInSecValue = found?.reset_in_sec ?? found?.resetInSec;
+  const usagePercentNumber = Number(usagePercentValue);
+  const resetInSecNumber = Number(resetInSecValue);
+  return {
+    usage_percent: Number.isFinite(usagePercentNumber) ? usagePercentNumber : null,
+    reset_in_sec: Number.isFinite(resetInSecNumber) ? resetInSecNumber : null
+  };
+}
+
+function findUsageWindow(value) {
+  if (!value || typeof value !== "object") {
+    return {};
+  }
+  if ("usage_percent" in value || "usagePercent" in value || "reset_in_sec" in value || "resetInSec" in value) {
+    return value;
+  }
+  for (const item of Object.values(value)) {
+    const found = findUsageWindow(item);
+    if (found && ("usage_percent" in found || "usagePercent" in found || "reset_in_sec" in found || "resetInSec" in found)) {
+      return found;
+    }
+  }
+  return {};
 }
 
 onMounted(() => {
@@ -685,13 +734,28 @@ onMounted(() => {
             <template #default="{ row }"><el-tag :type="statusType(row)">{{ statusText(row) }}</el-tag></template>
           </el-table-column>
           <el-table-column label="5h 用量" min-width="160">
-            <template #default="{ row }"><UsageBar :value="usageCell(row, 'rolling_usage')" /></template>
+            <template #default="{ row }">
+              <div class="usage-bar">
+                <el-progress :percentage="usagePercent(usageCell(row, 'rolling_usage'))" :stroke-width="8" :color="usageColor(usageCell(row, 'rolling_usage'))" :show-text="false" />
+                <span>{{ usageLabel(usageCell(row, 'rolling_usage')) }}</span>
+              </div>
+            </template>
           </el-table-column>
           <el-table-column label="7d 用量" min-width="160">
-            <template #default="{ row }"><UsageBar :value="usageCell(row, 'weekly_usage')" /></template>
+            <template #default="{ row }">
+              <div class="usage-bar">
+                <el-progress :percentage="usagePercent(usageCell(row, 'weekly_usage'))" :stroke-width="8" :color="usageColor(usageCell(row, 'weekly_usage'))" :show-text="false" />
+                <span>{{ usageLabel(usageCell(row, 'weekly_usage')) }}</span>
+              </div>
+            </template>
           </el-table-column>
           <el-table-column label="30d 用量" min-width="160">
-            <template #default="{ row }"><UsageBar :value="usageCell(row, 'monthly_usage')" /></template>
+            <template #default="{ row }">
+              <div class="usage-bar">
+                <el-progress :percentage="usagePercent(usageCell(row, 'monthly_usage'))" :stroke-width="8" :color="usageColor(usageCell(row, 'monthly_usage'))" :show-text="false" />
+                <span>{{ usageLabel(usageCell(row, 'monthly_usage')) }}</span>
+              </div>
+            </template>
           </el-table-column>
           <el-table-column label="重置倒计时" min-width="150">
             <template #default="{ row }">
@@ -956,41 +1020,3 @@ onMounted(() => {
     </el-dialog>
   </section>
 </template>
-
-<script>
-export default {
-  components: {
-    UsageBar: {
-      props: {
-        value: {
-          type: Object,
-          default: () => ({})
-        }
-      },
-      methods: {
-        percent() {
-          const raw = this.value?.usage_percent ?? this.value?.usagePercent;
-          const number = Number(raw);
-          return Number.isFinite(number) ? Math.max(0, Math.min(100, number)) : 0;
-        },
-        label() {
-          const raw = this.value?.usage_percent ?? this.value?.usagePercent;
-          return raw === null || raw === undefined ? "-" : `${Number(raw).toFixed(1)}%`;
-        },
-        color() {
-          const percent = this.percent();
-          if (percent >= 90) return "#d92d20";
-          if (percent >= 70) return "#b54708";
-          return "#07845f";
-        }
-      },
-      template: `
-        <div class="usage-bar">
-          <el-progress :percentage="percent()" :stroke-width="8" :color="color()" :show-text="false" />
-          <span>{{ label() }}</span>
-        </div>
-      `
-    }
-  }
-};
-</script>

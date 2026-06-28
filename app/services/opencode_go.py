@@ -191,12 +191,12 @@ def _parse_server_reference_response(response: httpx.Response) -> Any:
     response.raise_for_status()
     if response.headers.get("X-Error"):
         raise RuntimeError(_response_text(response) or "OpenCode server reference returned an error")
-    content_type = response.headers.get("content-type", "")
-    if content_type.startswith("application/json"):
-        return response.json()
     parsed_usage = parse_server_function_usage_response(response.text)
     if parsed_usage:
         return parsed_usage
+    content_type = response.headers.get("content-type", "")
+    if content_type.startswith("application/json"):
+        return response.json()
     if content_type.startswith("text/plain"):
         return response.text
     return response.text
@@ -221,7 +221,7 @@ def parse_server_function_usage_response(text: str) -> dict[str, Any]:
 
 
 def normalize_usage_result(subscription: Any, keys_payload: Any, workspace_id: str | None = None, session_payload: Any = None) -> dict[str, Any]:
-    subscription_data = _unwrap_data(subscription)
+    subscription_data = _usage_container(subscription)
     key_items = _extract_keys(keys_payload)
     api_key = _best_api_key(key_items)
     api_key_masked = _mask_api_key(api_key) if api_key else _best_masked_api_key(key_items)
@@ -255,9 +255,7 @@ def public_usage_window(value: Any) -> dict[str, Any]:
     reset_in_sec = _optional_number(value.get("reset_in_sec", value.get("resetInSec")))
     return {
         "usage_percent": usage_percent,
-        "usagePercent": usage_percent,
         "reset_in_sec": reset_in_sec,
-        "resetInSec": reset_in_sec,
     }
 
 
@@ -294,6 +292,9 @@ async def _run_http_refresh(
             raise RuntimeError("缺少 OpenCode Workspace ID，请在导入登录态时填写 Workspace ID")
         lite_subscription_reference_id = await resolve_lite_subscription_reference_id(client, lite_subscription_js_url, lite_subscription_server_id)
         subscription = await query_lite_subscription_usage(client, lite_subscription_reference_id, workspace_id)
+        subscription_data = _usage_container(subscription)
+        if not _has_usage_data(subscription_data):
+            raise RuntimeError("OpenCode 用量接口未返回 rollingUsage/weeklyUsage/monthlyUsage，请检查 auth Cookie、Workspace ID 和 X-Server-Id")
         try:
             keys_payload = await _query_first_server_reference(
                 client,
@@ -517,10 +518,38 @@ def _normalize_usage(value: Any) -> dict[str, Any]:
     reset_in_sec = _optional_number(value.get("resetInSec", value.get("reset_in_sec")))
     return {
         "usage_percent": usage_percent,
-        "usagePercent": usage_percent,
         "reset_in_sec": reset_in_sec,
-        "resetInSec": reset_in_sec,
     }
+
+
+def _usage_container(payload: Any) -> dict[str, Any]:
+    data = _unwrap_data(payload)
+    found = _find_usage_container(data)
+    return found if found is not None else {}
+
+
+def _find_usage_container(value: Any) -> Optional[dict[str, Any]]:
+    if isinstance(value, dict):
+        if any(key in value for key in ("rollingUsage", "rolling_usage", "weeklyUsage", "weekly_usage", "monthlyUsage", "monthly_usage")):
+            return value
+        for item in value.values():
+            found = _find_usage_container(item)
+            if found is not None:
+                return found
+    if isinstance(value, list):
+        for item in value:
+            found = _find_usage_container(item)
+            if found is not None:
+                return found
+    return None
+
+
+def _has_usage_data(value: dict[str, Any]) -> bool:
+    for key in ("rollingUsage", "rolling_usage", "weeklyUsage", "weekly_usage", "monthlyUsage", "monthly_usage"):
+        window = _normalize_usage(value.get(key))
+        if window["usage_percent"] is not None or window["reset_in_sec"] is not None:
+            return True
+    return False
 
 
 def _extract_keys(payload: Any) -> list[dict[str, Any]]:

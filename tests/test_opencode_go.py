@@ -295,6 +295,28 @@ def test_parse_server_function_usage_response_maps_windows():
     assert result["monthly_usage"]["reset_in_sec"] == 2465336
 
 
+def test_normalize_usage_result_finds_nested_usage_payload():
+    result = normalize_usage_result(
+        {
+            "data": {
+                "workspace": {
+                    "subscription": {
+                        "rollingUsage": {"usagePercent": 4, "resetInSec": 50},
+                        "weeklyUsage": {"usagePercent": 5, "resetInSec": 60},
+                        "monthlyUsage": {"usagePercent": 6, "resetInSec": 70},
+                    }
+                }
+            }
+        },
+        {"data": []},
+        "ws_1",
+    )
+
+    assert result["rolling_usage"] == {"usage_percent": 4, "reset_in_sec": 50}
+    assert result["weekly_usage"] == {"usage_percent": 5, "reset_in_sec": 60}
+    assert result["monthly_usage"] == {"usage_percent": 6, "reset_in_sec": 70}
+
+
 def test_normalize_usage_result_allows_missing_key():
     result = normalize_usage_result(
         {
@@ -427,11 +449,17 @@ def test_opencode_go_api_crud_and_masks_secrets(tmp_path, monkeypatch):
 
     assert created.status_code == 200
     assert created.json()["account"]["email"] == "user@example.com"
+    assert created.json()["account"]["is_enabled"] is False
     assert "secret-password" not in created.text
     assert refreshed.status_code == 200
     assert "sk-opencode-secret" not in refreshed.text
     assert refreshed.json()["account"]["api_key_masked"] == "sk-openc******cret"
-    assert listed.json()["accounts"][0]["has_api_key"] is True
+    listed_account = listed.json()["accounts"][0]
+    assert listed_account["has_api_key"] is True
+    assert listed_account["rolling_usage"] == {"usage_percent": 11, "reset_in_sec": 60}
+    assert "rollingUsage" not in listed_account
+    assert "usagePercent" not in listed_account["rolling_usage"]
+    assert "resetInSec" not in listed_account["rolling_usage"]
     assert "sk-opencode-secret" not in listed.text
     assert "secret-password" not in listed.text
     assert key_response.json()["api_key"] == "sk-opencode-secret"
@@ -492,6 +520,7 @@ def test_opencode_go_bulk_import_uses_email_as_name_and_masks_password(tmp_path,
     assert response.json()["count"] == 2
     assert response.json()["accounts"][0]["name"] == "first@example.com"
     assert response.json()["accounts"][0]["email"] == "first@example.com"
+    assert response.json()["accounts"][0]["is_enabled"] is False
     assert "first-pass" not in response.text
     first = db.get_opencode_go_account(response.json()["accounts"][0]["id"])
     assert decrypt_value(first["password_enc"], "test-key") == "first-pass"

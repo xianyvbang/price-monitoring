@@ -211,7 +211,7 @@ class Database:
                     last_monthly_usage TEXT,
                     last_raw_json TEXT,
                     last_checked_at TEXT,
-                    is_enabled INTEGER NOT NULL DEFAULT 1,
+                    is_enabled INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -1016,7 +1016,7 @@ class Database:
         api_key = str(data.get("api_key") or "").strip()
         api_key_enc = encrypt_value(api_key, self.secret_key)
         api_key_masked = _mask_opencode_api_key(api_key) if api_key else data.get("api_key_masked")
-        is_enabled = 1 if data.get("is_enabled", True) else 0
+        is_enabled = 1 if data.get("is_enabled", False) else 0
         with self.connect() as conn:
             conn.execute(
                 """

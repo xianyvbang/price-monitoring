@@ -482,11 +482,8 @@ def public_opencode_go_account(row: Any, include_api_key: bool = False) -> dict[
         data["api_key"] = api_key or ""
         data["apiKey"] = data["api_key"]
     data["rolling_usage"] = public_usage_window(data.pop("last_rolling_usage", None))
-    data["rollingUsage"] = data["rolling_usage"]
     data["weekly_usage"] = public_usage_window(data.pop("last_weekly_usage", None))
-    data["weeklyUsage"] = data["weekly_usage"]
     data["monthly_usage"] = public_usage_window(data.pop("last_monthly_usage", None))
-    data["monthlyUsage"] = data["monthly_usage"]
     data.pop("last_raw_json", None)
     data["last_checked_at_formatted"] = format_china_time(data.get("last_checked_at"))
     data["lastCheckedAtFormatted"] = data["last_checked_at_formatted"]
@@ -500,11 +497,8 @@ def public_opencode_go_history(row: Any) -> dict[str, Any]:
     data["is_valid"] = bool(data.get("is_valid"))
     data["isValid"] = data["is_valid"]
     data["rolling_usage"] = public_usage_window(data.pop("rolling_usage", None))
-    data["rollingUsage"] = data["rolling_usage"]
     data["weekly_usage"] = public_usage_window(data.pop("weekly_usage", None))
-    data["weeklyUsage"] = data["weekly_usage"]
     data["monthly_usage"] = public_usage_window(data.pop("monthly_usage", None))
-    data["monthlyUsage"] = data["monthly_usage"]
     data["checked_at_formatted"] = format_china_time(data.get("checked_at"))
     data["checkedAtFormatted"] = data["checked_at_formatted"]
     return data
@@ -2211,7 +2205,7 @@ def _opencode_go_account_payload(payload: dict[str, Any], require_password: bool
     data = {
         "name": name,
         "email": email,
-        "is_enabled": _to_bool(payload.get("is_enabled", payload.get("isEnabled", payload.get("enabled", True)))),
+        "is_enabled": _to_bool(payload.get("is_enabled", payload.get("isEnabled", payload.get("enabled", False)))),
     }
     if password:
         data["password"] = password
@@ -2247,7 +2241,7 @@ def import_bulk_opencode_go_accounts(bulk_text: str) -> dict[str, Any]:
             errors.append(f"第 {line_number} 行邮箱重复: {email}")
             continue
         seen_emails.add(normalized_email)
-        accounts.append({"name": email, "email": email, "password": password, "is_enabled": True})
+        accounts.append({"name": email, "email": email, "password": password, "is_enabled": False})
     if errors:
         raise ValueError("；".join(errors[:5]) + ("；..." if len(errors) > 5 else ""))
     if not accounts:
@@ -2372,14 +2366,17 @@ def _public_opencode_go_result(result: dict[str, Any]) -> dict[str, Any]:
             "raw",
             "raw_json",
             "rawJson",
+            "rollingUsage",
+            "weeklyUsage",
+            "monthlyUsage",
+            "rolling_usage",
+            "weekly_usage",
+            "monthly_usage",
         }
     }
     public["rolling_usage"] = public_usage_window(result.get("rolling_usage") or result.get("rollingUsage"))
-    public["rollingUsage"] = public["rolling_usage"]
     public["weekly_usage"] = public_usage_window(result.get("weekly_usage") or result.get("weeklyUsage"))
-    public["weeklyUsage"] = public["weekly_usage"]
     public["monthly_usage"] = public_usage_window(result.get("monthly_usage") or result.get("monthlyUsage"))
-    public["monthlyUsage"] = public["monthly_usage"]
     if result.get("api_key") or result.get("apiKey"):
         masked = result.get("api_key_masked") or result.get("apiKeyMasked") or mask_api_key(result.get("api_key") or result.get("apiKey"))
         public["api_key_masked"] = masked
