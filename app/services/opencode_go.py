@@ -15,12 +15,17 @@ OPENCODE_BASE_URL = "https://opencode.ai"
 OPENCODE_GO_PATH = "/go"
 OPENCODE_GO_LITE_JS_URL_SETTING = "opencode_go_lite_subscription_js_url"
 OPENCODE_GO_LITE_SERVER_ID_SETTING = "opencode_go_lite_subscription_server_id"
+OPENCODE_GO_KEY_LIST_JS_URL_SETTING = "opencode_go_key_list_js_url"
+OPENCODE_GO_KEY_LIST_SERVER_ID_SETTING = "opencode_go_key_list_server_id"
 SESSION_GET_REFERENCE_ID = "9bc4808361cdaee17059a8d3822b36ee8c9a0d93f1adc289fa1926998e3c9768"
 LITE_SUBSCRIPTION_GET_REFERENCE_ID = "c7389bd0e731f80f49593e5ee53835475f4e28594dd6bd83eb229bab753498cd"
+KEY_LIST_GET_REFERENCE_ID = "c22cd964237ba79f2f9b95faa2a14b804f870d1bab49279463379cc6a0fd0c85"
+KEY_LIST_DEFAULT_JS_URL = "https://opencode.ai/_build/assets/index-PbCOrg8_.js"
 LITE_SUBSCRIPTION_SERVER_INSTANCE = "server-fn:3"
+KEY_LIST_SERVER_INSTANCE = "server-fn:2"
 KEY_LIST_REFERENCE_IDS = (
+    KEY_LIST_GET_REFERENCE_ID,
     "def2ab20a296ef06465b1c3cf86da4ea983c0696e7a5708b9468aaed85083d6b",
-    "c22cd964237ba79f2f9b95faa2a14b804f870d1bab49279463379cc6a0fd0c85",
 )
 SERVER_REFERENCE_ALIASES = {
     "session.get": ("session.get", "session", "sessionGet", "session_get", "querySessionInfo", "querySessionInfo_query"),
@@ -41,12 +46,24 @@ LITE_SUBSCRIPTION_QUERY_RE = re.compile(
     r"queryLiteSubscription_query\s*=\s*createServerReference\(\s*[\"']([0-9a-f]{64})[\"']",
     re.IGNORECASE,
 )
+KEY_LIST_QUERY_RE = re.compile(
+    r"listKeys_query\s*=\s*createServerReference\(\s*[\"']([0-9a-f]{64})[\"']",
+    re.IGNORECASE,
+)
 SERVER_FN_USAGE_WINDOW_RE = re.compile(
     r"(?P<name>rollingUsage|weeklyUsage|monthlyUsage)\s*:\s*\$R\[\d+\]\s*=\s*\{(?P<body>.*?)\}",
     re.DOTALL,
 )
 SERVER_FN_FIELD_RE = re.compile(
     r"(?P<key>status|resetInSec|usagePercent)\s*:\s*(?P<value>\"[^\"]*\"|'[^']*'|-?\d+(?:\.\d+)?)",
+    re.DOTALL,
+)
+SERVER_FN_KEY_OBJECT_RE = re.compile(
+    r"\{(?P<body>[^{}]*(?:\bkey\b|\bapiKey\b|\bapi_key\b|\btoken\b)\s*:[^{}]*)\}",
+    re.DOTALL,
+)
+SERVER_FN_KEY_FIELD_RE = re.compile(
+    r"(?P<key>[A-Za-z_$][\w$]*|\"[^\"]+\"|'[^']+')\s*:\s*(?P<value>\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*'|-?\d+(?:\.\d+)?|true|false|null)",
     re.DOTALL,
 )
 QUERY_TIMEOUT_MS = 45_000
@@ -57,6 +74,7 @@ DEFAULT_BROWSER_HEADERS = {
     "User-Agent": "Mozilla/5.0",
 }
 _LITE_SUBSCRIPTION_REFERENCE_CACHE: dict[str, str] = {}
+_KEY_LIST_REFERENCE_CACHE: dict[str, str] = {}
 
 
 async def refresh_opencode_go_account(
@@ -66,6 +84,8 @@ async def refresh_opencode_go_account(
     log: LogCallback | None = None,
     lite_subscription_js_url: str | None = None,
     lite_subscription_server_id: str | None = None,
+    key_list_js_url: str | None = None,
+    key_list_server_id: str | None = None,
 ) -> dict[str, Any]:
     storage_state = _decrypt_json(_account_value(account, "storage_state_enc"), secret_key)
     if not storage_state:
@@ -78,6 +98,8 @@ async def refresh_opencode_go_account(
             log,
             lite_subscription_js_url,
             lite_subscription_server_id,
+            key_list_js_url,
+            key_list_server_id,
         )
     except Exception as exc:
         message = _friendly_refresh_error(exc)
@@ -123,10 +145,35 @@ async def query_lite_subscription_usage(
     return _parse_server_reference_response(response)
 
 
+async def query_key_list(
+    client: httpx.AsyncClient,
+    reference_id: str,
+    workspace_id: str,
+) -> Any:
+    args = json.dumps(_serialize_server_args([workspace_id]), ensure_ascii=False, separators=(",", ":"))
+    response = await client.get(
+        f"{OPENCODE_BASE_URL}/_server",
+        params={"id": reference_id, "args": args},
+        headers={
+            **DEFAULT_BROWSER_HEADERS,
+            "X-Server-Id": reference_id,
+            "X-Server-Instance": KEY_LIST_SERVER_INSTANCE,
+        },
+    )
+    return _parse_server_reference_response(response)
+
+
 def extract_lite_subscription_reference_id(source: str) -> str:
     match = LITE_SUBSCRIPTION_QUERY_RE.search(source or "")
     if not match:
         raise ValueError("未在 JS 文件中找到 queryLiteSubscription_query 的 server id")
+    return match.group(1)
+
+
+def extract_key_list_reference_id(source: str) -> str:
+    match = KEY_LIST_QUERY_RE.search(source or "")
+    if not match:
+        raise ValueError("未在 JS 文件中找到 listKeys_query 的 server id")
     return match.group(1)
 
 
@@ -136,6 +183,13 @@ def validate_opencode_go_lite_js_url(value: str | None) -> str:
         return ""
     if not re.match(r"^https://opencode\.ai/_build/assets/[^?#]+\.js(?:[?#].*)?$", text, re.IGNORECASE):
         raise ValueError("JS 文件地址必须是 https://opencode.ai/_build/assets/*.js")
+    return text
+
+
+def validate_opencode_go_key_list_js_url(value: str | None) -> str:
+    text = str(value or "").strip() or KEY_LIST_DEFAULT_JS_URL
+    if not re.match(r"^https://opencode\.ai/_build/assets/[^?#]+\.js(?:[?#].*)?$", text, re.IGNORECASE):
+        raise ValueError("API key JS 文件地址必须是 https://opencode.ai/_build/assets/*.js")
     return text
 
 
@@ -154,6 +208,12 @@ async def fetch_lite_subscription_reference_id(js_url: str, timeout: float = 15.
         raise ValueError("JS 文件地址不能为空")
     async with httpx.AsyncClient(headers=DEFAULT_BROWSER_HEADERS, follow_redirects=True, timeout=timeout) as client:
         return await resolve_lite_subscription_reference_id(client, url)
+
+
+async def fetch_key_list_reference_id(js_url: str | None = None, timeout: float = 15.0) -> str:
+    url = validate_opencode_go_key_list_js_url(js_url)
+    async with httpx.AsyncClient(headers=DEFAULT_BROWSER_HEADERS, follow_redirects=True, timeout=timeout) as client:
+        return await resolve_key_list_reference_id(client, url)
 
 
 async def resolve_lite_subscription_reference_id(
@@ -187,6 +247,35 @@ async def resolve_lite_subscription_reference_id(
     return reference_id
 
 
+async def resolve_key_list_reference_id(
+    client: httpx.AsyncClient,
+    js_url: str | None,
+    reference_id: str | None = None,
+) -> str:
+    configured_reference_id = validate_server_reference_id(reference_id)
+    if configured_reference_id:
+        return configured_reference_id
+    url = validate_opencode_go_key_list_js_url(js_url)
+    cached = _KEY_LIST_REFERENCE_CACHE.get(url)
+    if cached:
+        return cached
+    response = await client.get(
+        url,
+        headers={
+            **DEFAULT_BROWSER_HEADERS,
+            "Accept": "application/javascript, text/javascript, */*",
+            "Referer": f"{OPENCODE_BASE_URL}{OPENCODE_GO_PATH}",
+        },
+    )
+    response.raise_for_status()
+    try:
+        reference_id = extract_key_list_reference_id(response.text)
+    except ValueError as exc:
+        raise RuntimeError(f"{exc}，OpenCode 前端接口可能已更新") from exc
+    _KEY_LIST_REFERENCE_CACHE[url] = reference_id
+    return reference_id
+
+
 def _parse_server_reference_response(response: httpx.Response) -> Any:
     response.raise_for_status()
     if response.headers.get("X-Error"):
@@ -194,12 +283,30 @@ def _parse_server_reference_response(response: httpx.Response) -> Any:
     parsed_usage = parse_server_function_usage_response(response.text)
     if parsed_usage:
         return parsed_usage
+    parsed_keys = parse_server_function_key_response(response.text)
+    if parsed_keys:
+        return {"data": parsed_keys}
     content_type = response.headers.get("content-type", "")
     if content_type.startswith("application/json"):
         return response.json()
     if content_type.startswith("text/plain"):
         return response.text
     return response.text
+
+
+def parse_server_function_key_response(text: str) -> list[dict[str, Any]]:
+    value = str(text or "")
+    if "apiKey" not in value and "api_key" not in value and "key" not in value and "token" not in value:
+        return []
+    items: list[dict[str, Any]] = []
+    for match in SERVER_FN_KEY_OBJECT_RE.finditer(value):
+        item: dict[str, Any] = {}
+        for field in SERVER_FN_KEY_FIELD_RE.finditer(match.group("body")):
+            key = _strip_js_field_name(field.group("key"))
+            item[key] = _parse_js_scalar(field.group("value").strip())
+        if any(item.get(key) for key in ("key", "api_key", "apiKey", "token")):
+            items.append(item)
+    return items
 
 
 def parse_server_function_usage_response(text: str) -> dict[str, Any]:
@@ -270,6 +377,8 @@ async def _run_http_refresh(
     log: LogCallback | None,
     lite_subscription_js_url: str | None,
     lite_subscription_server_id: str | None,
+    key_list_js_url: str | None,
+    key_list_server_id: str | None,
 ) -> dict[str, Any]:
     timeout = max(10.0, min(QUERY_TIMEOUT_MS, float(timeout or QUERY_TIMEOUT_MS)))
     cookies = _cookies_from_storage_state(storage_state)
@@ -296,9 +405,9 @@ async def _run_http_refresh(
         if not _has_usage_data(subscription_data):
             raise RuntimeError("OpenCode 用量接口未返回 rollingUsage/weeklyUsage/monthlyUsage，请检查 auth Cookie、Workspace ID 和 X-Server-Id")
         try:
-            keys_payload = await _query_first_server_reference(
+            keys_payload = await _query_first_key_list_reference(
                 client,
-                _server_reference_ids(server_ids, "key.list", KEY_LIST_REFERENCE_IDS),
+                await _key_list_reference_ids(client, server_ids, key_list_js_url, key_list_server_id),
                 [workspace_id],
                 "key.list",
             )
@@ -324,6 +433,40 @@ async def _query_first_server_reference(
         except Exception as exc:
             errors.append(f"{reference_id[:8]}: {exc}")
     raise RuntimeError(f"OpenCode {label} 接口不可用，OpenCode 前端接口可能已更新或 server id 无效: " + "; ".join(errors))
+
+
+async def _query_first_key_list_reference(
+    client: httpx.AsyncClient,
+    reference_ids: list[str],
+    args: list[Any],
+    label: str,
+) -> Any:
+    errors = []
+    workspace_id = str(args[0] if args else "")
+    for reference_id in reference_ids:
+        try:
+            return await query_key_list(client, reference_id, workspace_id)
+        except Exception as exc:
+            errors.append(f"{reference_id[:8]}: {exc}")
+    raise RuntimeError(f"OpenCode {label} 接口不可用，OpenCode 前端接口可能已更新或 server id 无效: " + "; ".join(errors))
+
+
+async def _key_list_reference_ids(
+    client: httpx.AsyncClient,
+    server_ids: dict[str, list[str]],
+    js_url: str | None,
+    reference_id: str | None,
+) -> list[str]:
+    values: list[str] = []
+    try:
+        _append_server_reference_ids(values, await resolve_key_list_reference_id(client, js_url, reference_id))
+    except Exception:
+        pass
+    for value in server_ids.get("key.list", []):
+        _append_server_reference_ids(values, value)
+    for value in KEY_LIST_REFERENCE_IDS:
+        _append_server_reference_ids(values, value)
+    return values
 
 
 def _cookies_from_storage_state(storage_state: Any) -> httpx.Cookies:
@@ -553,6 +696,10 @@ def _has_usage_data(value: dict[str, Any]) -> bool:
 
 
 def _extract_keys(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, str):
+        return parse_server_function_key_response(payload)
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
     data = _unwrap_data(payload)
     if isinstance(data, list):
         return [item for item in data if isinstance(item, dict)]
@@ -597,6 +744,32 @@ def _safe_raw(value: Any) -> Any:
 def _is_sensitive_key(key: str) -> bool:
     normalized = key.replace("-", "_").lower()
     return "password" in normalized or "token" in normalized or "secret" in normalized or normalized in {"key", "api_key", "apikey"}
+
+
+def _strip_js_field_name(value: str) -> str:
+    text = str(value or "").strip()
+    if text.startswith(("'", '"')) and text.endswith(("'", '"')):
+        return text[1:-1]
+    return text
+
+
+def _parse_js_scalar(value: str) -> Any:
+    text = str(value or "").strip()
+    if text.startswith('"') and text.endswith('"'):
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return text[1:-1]
+    if text.startswith("'") and text.endswith("'"):
+        return text[1:-1].replace("\\'", "'").replace('\\"', '"')
+    if text == "true":
+        return True
+    if text == "false":
+        return False
+    if text == "null":
+        return None
+    number = _optional_number(text)
+    return number if number is not None else text
 
 
 def _mask_api_key(value: str | None) -> str:

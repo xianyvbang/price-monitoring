@@ -6,10 +6,16 @@ from app.main import app
 from app.models import Database
 from app.security import decrypt_value
 from app.services.opencode_go import (
+    KEY_LIST_DEFAULT_JS_URL,
+    KEY_LIST_GET_REFERENCE_ID,
+    KEY_LIST_SERVER_INSTANCE,
     LITE_SUBSCRIPTION_GET_REFERENCE_ID,
+    extract_key_list_reference_id,
     extract_lite_subscription_reference_id,
+    query_key_list,
     query_lite_subscription_usage,
     normalize_usage_result,
+    parse_server_function_key_response,
     parse_server_function_usage_response,
     query_opencode_server_reference,
     refresh_opencode_go_account,
@@ -64,8 +70,18 @@ class DummyRefreshClient:
                 text='const queryLiteSubscription_query = createServerReference("' + ("b" * 64) + '");',
                 url=url,
             )
+        if url == KEY_LIST_DEFAULT_JS_URL:
+            return DummyHttpxResponse(
+                None,
+                headers={"content-type": "application/javascript"},
+                text='const listKeys_query = createServerReference("' + ("c" * 64) + '");',
+                url=url,
+            )
         if url == "https://opencode.ai/_server":
             server_id = (headers or {})["X-Server-Id"]
+            server_instance = (headers or {})["X-Server-Instance"]
+            if server_instance == KEY_LIST_SERVER_INSTANCE and server_id in {KEY_LIST_GET_REFERENCE_ID, "c" * 64}:
+                return DummyHttpxResponse({"data": [{"key": "sk-dynamic-secret"}]})
             if server_id in {LITE_SUBSCRIPTION_GET_REFERENCE_ID, "b" * 64}:
                 return DummyHttpxResponse(
                     None,
@@ -190,10 +206,31 @@ async def test_lite_subscription_usage_uses_fixed_get_endpoint():
     assert DummyAsyncClient.last_request["headers"]["X-Server-Instance"] == "server-fn:3"
 
 
+@pytest.mark.asyncio
+async def test_key_list_uses_fixed_get_endpoint_and_instance():
+    client = DummyAsyncClient()
+
+    result = await query_key_list(client, KEY_LIST_GET_REFERENCE_ID, "wrk_01KW01D1")
+
+    assert result == {"ok": True}
+    assert DummyAsyncClient.last_request["url"] == "https://opencode.ai/_server"
+    assert DummyAsyncClient.last_request["params"]["id"] == KEY_LIST_GET_REFERENCE_ID
+    assert DummyAsyncClient.last_request["params"]["args"].startswith('{"t":{"t":9')
+    assert '"s":"wrk_01KW01D1"' in DummyAsyncClient.last_request["params"]["args"]
+    assert DummyAsyncClient.last_request["headers"]["X-Server-Id"] == KEY_LIST_GET_REFERENCE_ID
+    assert DummyAsyncClient.last_request["headers"]["X-Server-Instance"] == KEY_LIST_SERVER_INSTANCE
+
+
 def test_extract_lite_subscription_reference_id_from_js():
     source = 'const queryLiteSubscription_query = createServerReference("c7389bd0e731f80f49593e5ee53835475f4e28594dd6bd83eb229bab753498cd");'
 
     assert extract_lite_subscription_reference_id(source) == LITE_SUBSCRIPTION_GET_REFERENCE_ID
+
+
+def test_extract_key_list_reference_id_from_js():
+    source = 'const listKeys_query = createServerReference("c22cd964237ba79f2f9b95faa2a14b804f870d1bab49279463379cc6a0fd0c85");'
+
+    assert extract_key_list_reference_id(source) == KEY_LIST_GET_REFERENCE_ID
 
 
 @pytest.mark.asyncio
@@ -293,6 +330,17 @@ def test_parse_server_function_usage_response_maps_windows():
     assert result["weekly_usage"]["reset_in_sec"] == 75218
     assert result["monthly_usage"]["usage_percent"] == 33
     assert result["monthly_usage"]["reset_in_sec"] == 2465336
+
+
+def test_parse_server_function_key_response_maps_keys():
+    payload = r''';0x00000124;
+(($R => $R[0] = [
+  $R[1] = { id: "key_1", name: "Default", key: "sk-opencode-secret", createdAt: 1 }
+])($R["server-fn:2"]))'''
+
+    parsed = parse_server_function_key_response(payload)
+
+    assert parsed == [{"id": "key_1", "name": "Default", "key": "sk-opencode-secret", "createdAt": 1.0}]
 
 
 def test_normalize_usage_result_finds_nested_usage_payload():
@@ -418,7 +466,16 @@ def test_opencode_go_api_requires_login(tmp_path, monkeypatch):
 def test_opencode_go_api_crud_and_masks_secrets(tmp_path, monkeypatch):
     db = setup_test_db(tmp_path, monkeypatch)
 
-    async def fake_refresh(account, secret_key, timeout, log=None, lite_subscription_js_url=None, lite_subscription_server_id=None):
+    async def fake_refresh(
+        account,
+        secret_key,
+        timeout,
+        log=None,
+        lite_subscription_js_url=None,
+        lite_subscription_server_id=None,
+        key_list_js_url=None,
+        key_list_server_id=None,
+    ):
         return {
             "is_valid": True,
             "workspace_id": "ws_1",
@@ -476,23 +533,36 @@ def test_opencode_go_settings_save_js_url(tmp_path, monkeypatch):
     async def fake_fetch_js_server_id(js_url, timeout=15.0):
         return "d" * 64
 
+    async def fake_fetch_key_js_server_id(js_url=None, timeout=15.0):
+        return "e" * 64
+
     monkeypatch.setattr("app.main.fetch_lite_subscription_reference_id", fake_fetch_js_server_id)
+    monkeypatch.setattr("app.main.fetch_key_list_reference_id", fake_fetch_key_js_server_id)
 
     with TestClient(app) as client:
         login(client)
         saved = client.post(
             "/api/opencode-go/settings",
-            json={"lite_subscription_js_url": "https://opencode.ai/_build/assets/index-DtPYjwk4.js"},
+            json={
+                "lite_subscription_js_url": "https://opencode.ai/_build/assets/index-DtPYjwk4.js",
+                "key_list_js_url": "https://opencode.ai/_build/assets/index-PbCOrg8_.js",
+            },
         )
         loaded = client.get("/api/opencode-go/settings")
 
     assert saved.status_code == 200
     assert saved.json()["settings"]["lite_subscription_js_url"] == "https://opencode.ai/_build/assets/index-DtPYjwk4.js"
     assert saved.json()["settings"]["lite_subscription_server_id"] == "d" * 64
+    assert saved.json()["settings"]["key_list_js_url"] == "https://opencode.ai/_build/assets/index-PbCOrg8_.js"
+    assert saved.json()["settings"]["key_list_server_id"] == "e" * 64
     assert loaded.json()["settings"]["lite_subscription_js_url"] == "https://opencode.ai/_build/assets/index-DtPYjwk4.js"
     assert loaded.json()["settings"]["lite_subscription_server_id"] == "d" * 64
+    assert loaded.json()["settings"]["key_list_js_url"] == "https://opencode.ai/_build/assets/index-PbCOrg8_.js"
+    assert loaded.json()["settings"]["key_list_server_id"] == "e" * 64
     assert db.get_setting("opencode_go_lite_subscription_js_url") == "https://opencode.ai/_build/assets/index-DtPYjwk4.js"
     assert db.get_setting("opencode_go_lite_subscription_server_id") == "d" * 64
+    assert db.get_setting("opencode_go_key_list_js_url") == "https://opencode.ai/_build/assets/index-PbCOrg8_.js"
+    assert db.get_setting("opencode_go_key_list_server_id") == "e" * 64
 
 
 def test_opencode_go_settings_rejects_non_opencode_js_url(tmp_path, monkeypatch):

@@ -33,13 +33,20 @@ from app.security import verify_password
 from app.services.balance import login_sub2api_tokens, query_newapi_group_options, query_sub2api_group_options
 from app.services.emailer import send_email
 from app.services.opencode_go import (
+    KEY_LIST_DEFAULT_JS_URL,
+    KEY_LIST_GET_REFERENCE_ID,
+    KEY_LIST_SERVER_INSTANCE,
     LITE_SUBSCRIPTION_GET_REFERENCE_ID,
     LITE_SUBSCRIPTION_SERVER_INSTANCE,
+    OPENCODE_GO_KEY_LIST_JS_URL_SETTING,
+    OPENCODE_GO_KEY_LIST_SERVER_ID_SETTING,
     OPENCODE_GO_LITE_JS_URL_SETTING,
     OPENCODE_GO_LITE_SERVER_ID_SETTING,
+    fetch_key_list_reference_id,
     fetch_lite_subscription_reference_id,
     mask_api_key,
     public_usage_window,
+    validate_opencode_go_key_list_js_url,
     validate_opencode_go_lite_js_url,
 )
 from app.services.scheduler import (
@@ -1358,16 +1365,28 @@ async def api_opencode_go_settings(request: Request):
     require_user(request)
     js_url = db.get_setting(OPENCODE_GO_LITE_JS_URL_SETTING, "")
     server_id = db.get_setting(OPENCODE_GO_LITE_SERVER_ID_SETTING, "")
+    key_js_url = db.get_setting(OPENCODE_GO_KEY_LIST_JS_URL_SETTING, KEY_LIST_DEFAULT_JS_URL)
+    key_server_id = db.get_setting(OPENCODE_GO_KEY_LIST_SERVER_ID_SETTING, "")
     return {
         "settings": {
             "lite_subscription_js_url": js_url,
             "liteSubscriptionJsUrl": js_url,
             "lite_subscription_server_id": server_id,
             "liteSubscriptionServerId": server_id,
+            "key_list_js_url": key_js_url,
+            "keyListJsUrl": key_js_url,
+            "key_list_server_id": key_server_id,
+            "keyListServerId": key_server_id,
             "default_server_id": LITE_SUBSCRIPTION_GET_REFERENCE_ID,
             "defaultServerId": LITE_SUBSCRIPTION_GET_REFERENCE_ID,
             "server_instance": LITE_SUBSCRIPTION_SERVER_INSTANCE,
             "serverInstance": LITE_SUBSCRIPTION_SERVER_INSTANCE,
+            "default_key_list_js_url": KEY_LIST_DEFAULT_JS_URL,
+            "defaultKeyListJsUrl": KEY_LIST_DEFAULT_JS_URL,
+            "default_key_list_server_id": KEY_LIST_GET_REFERENCE_ID,
+            "defaultKeyListServerId": KEY_LIST_GET_REFERENCE_ID,
+            "key_list_server_instance": KEY_LIST_SERVER_INSTANCE,
+            "keyListServerInstance": KEY_LIST_SERVER_INSTANCE,
         }
     }
 
@@ -1377,8 +1396,10 @@ async def api_save_opencode_go_settings(request: Request):
     require_user(request)
     payload = await request.json()
     raw_url = payload.get("lite_subscription_js_url", payload.get("liteSubscriptionJsUrl", payload.get("js_url", payload.get("jsUrl", "")))) if isinstance(payload, dict) else ""
+    raw_key_url = payload.get("key_list_js_url", payload.get("keyListJsUrl", payload.get("api_key_js_url", payload.get("apiKeyJsUrl", KEY_LIST_DEFAULT_JS_URL)))) if isinstance(payload, dict) else KEY_LIST_DEFAULT_JS_URL
     try:
         js_url = validate_opencode_go_lite_js_url(raw_url)
+        key_js_url = validate_opencode_go_key_list_js_url(raw_key_url)
     except ValueError as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
     server_id = ""
@@ -1387,10 +1408,16 @@ async def api_save_opencode_go_settings(request: Request):
             server_id = await fetch_lite_subscription_reference_id(js_url, timeout=15)
         except Exception as exc:
             return JSONResponse({"ok": False, "message": f"解析 JS 文件失败: {exc}"}, status_code=400)
+    try:
+        key_server_id = await fetch_key_list_reference_id(key_js_url, timeout=15)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": f"解析 API key JS 文件失败: {exc}"}, status_code=400)
     db.set_setting(OPENCODE_GO_LITE_JS_URL_SETTING, js_url)
     db.set_setting(OPENCODE_GO_LITE_SERVER_ID_SETTING, server_id)
+    db.set_setting(OPENCODE_GO_KEY_LIST_JS_URL_SETTING, key_js_url)
+    db.set_setting(OPENCODE_GO_KEY_LIST_SERVER_ID_SETTING, key_server_id)
     scheduler.notify_settings_changed()
-    db.add_log("info", "opencode-go", "API 更新 OpenCode Go 用量 JS 文件配置")
+    db.add_log("info", "opencode-go", "API 更新 OpenCode Go 用量和 API key JS 文件配置")
     return {
         "ok": True,
         "settings": {
@@ -1398,10 +1425,20 @@ async def api_save_opencode_go_settings(request: Request):
             "liteSubscriptionJsUrl": js_url,
             "lite_subscription_server_id": server_id,
             "liteSubscriptionServerId": server_id,
+            "key_list_js_url": key_js_url,
+            "keyListJsUrl": key_js_url,
+            "key_list_server_id": key_server_id,
+            "keyListServerId": key_server_id,
             "default_server_id": LITE_SUBSCRIPTION_GET_REFERENCE_ID,
             "defaultServerId": LITE_SUBSCRIPTION_GET_REFERENCE_ID,
             "server_instance": LITE_SUBSCRIPTION_SERVER_INSTANCE,
             "serverInstance": LITE_SUBSCRIPTION_SERVER_INSTANCE,
+            "default_key_list_js_url": KEY_LIST_DEFAULT_JS_URL,
+            "defaultKeyListJsUrl": KEY_LIST_DEFAULT_JS_URL,
+            "default_key_list_server_id": KEY_LIST_GET_REFERENCE_ID,
+            "defaultKeyListServerId": KEY_LIST_GET_REFERENCE_ID,
+            "key_list_server_instance": KEY_LIST_SERVER_INSTANCE,
+            "keyListServerInstance": KEY_LIST_SERVER_INSTANCE,
         },
     }
 

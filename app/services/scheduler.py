@@ -297,6 +297,8 @@ async def query_opencode_go_for_account(db: Database, account_id: int) -> dict:
     settings = db.get_general_settings()
     lite_subscription_js_url = db.get_setting("opencode_go_lite_subscription_js_url", "")
     lite_subscription_server_id = db.get_setting("opencode_go_lite_subscription_server_id", "")
+    key_list_js_url = db.get_setting("opencode_go_key_list_js_url", "")
+    key_list_server_id = db.get_setting("opencode_go_key_list_server_id", "")
     result = await refresh_opencode_go_account(
         account,
         db.secret_key,
@@ -304,6 +306,8 @@ async def query_opencode_go_for_account(db: Database, account_id: int) -> dict:
         db.add_log,
         lite_subscription_js_url=lite_subscription_js_url,
         lite_subscription_server_id=lite_subscription_server_id,
+        key_list_js_url=key_list_js_url,
+        key_list_server_id=key_list_server_id,
     )
     result["account_id"] = account_id
     result["accountId"] = account_id

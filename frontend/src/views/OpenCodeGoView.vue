@@ -18,8 +18,18 @@ const bulkText = ref("");
 const importingBulk = ref(false);
 const settingsDialogVisible = ref(false);
 const savingSettings = ref(false);
-const opencodeSettings = ref({ lite_subscription_js_url: "", lite_subscription_server_id: "", default_server_id: "", server_instance: "server-fn:3" });
-const settingsForm = reactive({ lite_subscription_js_url: "" });
+const opencodeSettings = ref({
+  lite_subscription_js_url: "",
+  lite_subscription_server_id: "",
+  default_server_id: "",
+  server_instance: "server-fn:3",
+  key_list_js_url: "",
+  key_list_server_id: "",
+  default_key_list_js_url: "https://opencode.ai/_build/assets/index-PbCOrg8_.js",
+  default_key_list_server_id: "",
+  key_list_server_instance: "server-fn:2"
+});
+const settingsForm = reactive({ lite_subscription_js_url: "", key_list_js_url: "" });
 const sessionDialogVisible = ref(false);
 const importingSession = ref(false);
 const sessionAccount = ref(null);
@@ -42,6 +52,11 @@ const liteSubscriptionJsUrl = computed(() => opencodeSettings.value.lite_subscri
 const liteSubscriptionServerId = computed(() => opencodeSettings.value.lite_subscription_server_id || opencodeSettings.value.liteSubscriptionServerId || "");
 const defaultServerId = computed(() => opencodeSettings.value.default_server_id || opencodeSettings.value.defaultServerId || "");
 const serverInstance = computed(() => opencodeSettings.value.server_instance || opencodeSettings.value.serverInstance || "server-fn:3");
+const defaultKeyListJsUrl = computed(() => opencodeSettings.value.default_key_list_js_url || opencodeSettings.value.defaultKeyListJsUrl || "https://opencode.ai/_build/assets/index-PbCOrg8_.js");
+const defaultKeyListServerId = computed(() => opencodeSettings.value.default_key_list_server_id || opencodeSettings.value.defaultKeyListServerId || "");
+const keyListJsUrl = computed(() => opencodeSettings.value.key_list_js_url || opencodeSettings.value.keyListJsUrl || defaultKeyListJsUrl.value);
+const keyListServerId = computed(() => opencodeSettings.value.key_list_server_id || opencodeSettings.value.keyListServerId || "");
+const keyListServerInstance = computed(() => opencodeSettings.value.key_list_server_instance || opencodeSettings.value.keyListServerInstance || "server-fn:2");
 const storageStateConsoleCommand = String.raw`(async () => {
   const write = (value) => typeof copy === "function" ? copy(value) : navigator.clipboard.writeText(value);
   const fetchText = async (url) => {
@@ -251,6 +266,7 @@ function openBulkImport() {
 
 function openSettingsDialog() {
   settingsForm.lite_subscription_js_url = liteSubscriptionJsUrl.value;
+  settingsForm.key_list_js_url = keyListJsUrl.value;
   settingsDialogVisible.value = true;
 }
 
@@ -258,11 +274,12 @@ async function saveSettings() {
   savingSettings.value = true;
   try {
     const response = await api.saveOpencodeGoSettings({
-      lite_subscription_js_url: settingsForm.lite_subscription_js_url
+      lite_subscription_js_url: settingsForm.lite_subscription_js_url,
+      key_list_js_url: settingsForm.key_list_js_url
     });
     opencodeSettings.value = response.settings || {};
     settingsDialogVisible.value = false;
-    ElMessage.success("OpenCode Go 用量 JS 文件已保存");
+    ElMessage.success("OpenCode Go JS 文件配置已保存");
   } catch (error) {
     ElMessage.error(error.message || "保存配置失败");
   } finally {
@@ -715,6 +732,18 @@ onMounted(() => {
         <span>当前 X-Server-Id</span>
         <strong>{{ liteSubscriptionServerId || defaultServerId || "-" }}</strong>
       </div>
+      <div>
+        <span>API key JS 文件</span>
+        <strong>{{ keyListJsUrl || defaultKeyListJsUrl }}</strong>
+      </div>
+      <div>
+        <span>API key X-Server-Instance</span>
+        <strong>{{ keyListServerInstance }}</strong>
+      </div>
+      <div>
+        <span>API key X-Server-Id</span>
+        <strong>{{ keyListServerId || defaultKeyListServerId || "-" }}</strong>
+      </div>
     </div>
 
     <div class="panel table-card">
@@ -891,12 +920,19 @@ onMounted(() => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="settingsDialogVisible" title="配置 OpenCode Go 用量 JS 文件" width="720px">
+    <el-dialog v-model="settingsDialogVisible" title="配置 OpenCode Go JS 文件" width="720px">
       <el-form label-position="top" @submit.prevent="saveSettings">
-        <el-form-item label="JS 文件地址">
+        <el-form-item label="用量 JS 文件地址">
           <el-input
             v-model="settingsForm.lite_subscription_js_url"
             placeholder="https://opencode.ai/_build/assets/index-DtPYjwk4.js"
+            autocomplete="off"
+          />
+        </el-form-item>
+        <el-form-item label="API key JS 文件地址">
+          <el-input
+            v-model="settingsForm.key_list_js_url"
+            placeholder="https://opencode.ai/_build/assets/index-PbCOrg8_.js"
             autocomplete="off"
           />
         </el-form-item>
@@ -904,6 +940,8 @@ onMounted(() => {
           <span>系统会下载这个 JS 文件，并从 const queryLiteSubscription_query = createServerReference(&quot;...&quot;) 中解析 X-Server-Id。</span>
           <span>用量请求固定为 /_server?id=解析到的 server id&amp;args=序列化后的 Workspace ID，X-Server-Instance 固定为 server-fn:3。</span>
           <span>当前解析到的 server id：{{ liteSubscriptionServerId || "未配置" }}；留空时会使用内置默认 server id：{{ defaultServerId || "-" }}</span>
+          <span>API key 会从 listKeys_query 解析 X-Server-Id，请求固定使用 X-Server-Instance: {{ keyListServerInstance }}。</span>
+          <span>当前 API key server id：{{ keyListServerId || "未配置" }}；默认 JS：{{ defaultKeyListJsUrl }}。</span>
         </div>
       </el-form>
       <template #footer>

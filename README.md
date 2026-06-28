@@ -100,7 +100,7 @@ JSON 示例：
 
 页面顶部的 `OpenCode Go` 用于监控 OpenCode Go 订阅的 5h、7d、30d 用量和 API key。新增账号时填写 Google 邮箱和密码用于账号归档；服务端不会启动内置浏览器，也不会自动操作 Google 登录。
 
-OpenCode Go 的自动刷新沿用通用查询间隔和暂停开关。刷新时服务端使用已导入并加密保存的 OpenCode 登录态调用 OpenCode 前端 `_server` 接口。
+OpenCode Go 的自动刷新沿用通用查询间隔和暂停开关。刷新时服务端使用已导入并加密保存的 OpenCode 登录态调用 OpenCode 前端 `_server` 接口。页面里的“配置 OpenCode Go JS 文件”可以分别配置用量 JS 和 API key JS：用量 JS 会解析 `queryLiteSubscription_query`，请求使用 `X-Server-Instance: server-fn:3`；API key JS 默认是 `https://opencode.ai/_build/assets/index-PbCOrg8_.js`，会解析 `listKeys_query`，请求使用 `X-Server-Instance: server-fn:2`。两个请求都会把解析到的 server id 写入 `_server?id=...` 和 `X-Server-Id`。
 
 导入登录态时，在 OpenCode Go 页面点击“导入登录态”，再点击“打开本地浏览器登录页”。系统会在你当前设备的默认浏览器打开 OpenCode 登录页；登录完成后，从浏览器开发者工具或 Cookie 导出工具复制 OpenCode 的登录态，粘贴到弹窗中保存。
 
