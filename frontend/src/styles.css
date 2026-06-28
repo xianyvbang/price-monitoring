@@ -312,6 +312,37 @@ a {
   -webkit-overflow-scrolling: touch;
 }
 
+.opencode-config-strip {
+  align-items: stretch;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 2fr) minmax(180px, 0.7fr) minmax(0, 1.5fr);
+  margin-bottom: 16px;
+  padding: 12px 14px;
+}
+
+.opencode-config-strip div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.opencode-config-strip span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.opencode-config-strip strong {
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
 .table-actions {
   align-items: center;
   display: flex;
@@ -882,6 +913,10 @@ a {
 
   .page-actions .el-button {
     flex: 1;
+  }
+
+  .opencode-config-strip {
+    grid-template-columns: 1fr;
   }
 
   .toolbar {

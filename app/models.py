@@ -543,6 +543,18 @@ class Database:
                 ("1" if paused else "0",),
             )
 
+    def get_setting(self, key: str, default: str = "") -> str:
+        with self.connect() as conn:
+            row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        return str(row["value"]) if row else default
+
+    def set_setting(self, key: str, value: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+
     def get_smtp_settings(self) -> sqlite3.Row:
         with self.connect() as conn:
             return conn.execute("SELECT * FROM smtp_settings WHERE id = 1").fetchone()

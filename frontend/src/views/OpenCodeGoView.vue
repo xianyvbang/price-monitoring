@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { CopyDocument, Delete, Edit, Link, Plus, Refresh, Timer, Upload } from "@element-plus/icons-vue";
+import { CopyDocument, Delete, Edit, Link, Plus, Refresh, Setting, Timer, Upload } from "@element-plus/icons-vue";
 import { api } from "../api";
 import { useViewport } from "../composables/useViewport";
 import { boolValue, formatTime } from "../utils";
@@ -16,11 +16,16 @@ const saving = ref(false);
 const bulkDialogVisible = ref(false);
 const bulkText = ref("");
 const importingBulk = ref(false);
+const settingsDialogVisible = ref(false);
+const savingSettings = ref(false);
+const opencodeSettings = ref({ lite_subscription_js_url: "", lite_subscription_server_id: "", default_server_id: "", server_instance: "server-fn:3" });
+const settingsForm = reactive({ lite_subscription_js_url: "" });
 const sessionDialogVisible = ref(false);
 const importingSession = ref(false);
 const sessionAccount = ref(null);
 const sessionPassword = ref("");
 const sessionPasswordLoading = ref(false);
+const sessionStateLoading = ref(false);
 const sessionForm = reactive({ workspace_id: "", storage_state: "" });
 const historyVisible = ref(false);
 const historyLoading = ref(false);
@@ -33,6 +38,10 @@ const { isMobile } = useViewport();
 const accountCount = computed(() => summary.value.account_count ?? summary.value.accountCount ?? accounts.value.length);
 const lastSuccessAt = computed(() => summary.value.last_success_at ?? summary.value.lastSuccessAt);
 const bulkPreviewCount = computed(() => bulkText.value.split(/\r?\n/).filter((line) => line.trim()).length);
+const liteSubscriptionJsUrl = computed(() => opencodeSettings.value.lite_subscription_js_url || opencodeSettings.value.liteSubscriptionJsUrl || "");
+const liteSubscriptionServerId = computed(() => opencodeSettings.value.lite_subscription_server_id || opencodeSettings.value.liteSubscriptionServerId || "");
+const defaultServerId = computed(() => opencodeSettings.value.default_server_id || opencodeSettings.value.defaultServerId || "");
+const serverInstance = computed(() => opencodeSettings.value.server_instance || opencodeSettings.value.serverInstance || "server-fn:3");
 const storageStateConsoleCommand = String.raw`(async () => {
   const write = (value) => typeof copy === "function" ? copy(value) : navigator.clipboard.writeText(value);
   const fetchText = async (url) => {
@@ -88,10 +97,39 @@ const storageStateConsoleCommand = String.raw`(async () => {
       /listKeys\s*=\s*createServerReference\("([0-9a-f]{64})"\)/
     ])
   };
-  const cookies = document.cookie
+  const storageAuthPair = () => {
+    for (const storage of [localStorage, sessionStorage]) {
+      for (let index = 0; index < storage.length; index += 1) {
+        const key = storage.key(index);
+        if (!key || key.toLowerCase() !== "auth") continue;
+        const value = storage.getItem(key) || "";
+        if (value) return "auth=" + value;
+      }
+    }
+    for (const storage of [localStorage, sessionStorage]) {
+      for (let index = 0; index < storage.length; index += 1) {
+        const key = storage.key(index);
+        if (!key || !key.toLowerCase().includes("auth")) continue;
+        const value = storage.getItem(key) || "";
+        if (value) return key + "=" + value;
+      }
+    }
+    return "";
+  };
+  const cookiePairs = document.cookie
     .split(";")
     .map((item) => item.trim())
-    .filter(Boolean)
+    .filter(Boolean);
+  const authPair = cookiePairs.find((item) => item.split("=")[0] === "auth") || storageAuthPair();
+  if (!authPair) {
+    throw new Error("没有读取到 auth。auth 是 HttpOnly 时控制台无法读取，请在 DevTools 的 Application > Cookies 或 Network 请求头里手动复制 auth=...");
+  }
+  const authName = authPair.split("=")[0];
+  const authCookiePairs = [authPair, ...cookiePairs.filter((item) => item.split("=")[0] !== authName && item.split("=")[0] !== "oc_locale")];
+  if (!authCookiePairs.some((item) => item.split("=")[0] === "auth")) {
+    throw new Error("没有读取到名为 auth 的键值，请手动复制 auth=...");
+  }
+  const cookies = authCookiePairs
     .map((item) => {
       const [name, ...valueParts] = item.split("=");
       return {
@@ -118,7 +156,29 @@ const storageStateConsoleCommand = String.raw`(async () => {
   return storageState;
 })()`;
 const cookieConsoleCommand = `(() => {
-  const value = "Cookie: " + document.cookie;
+  const pairs = document.cookie.split(";").map((item) => item.trim()).filter(Boolean);
+  const authPair = pairs.find((item) => item.split("=")[0] === "auth");
+  const storageAuthPair = () => {
+    for (const storage of [localStorage, sessionStorage]) {
+      for (let index = 0; index < storage.length; index += 1) {
+        const key = storage.key(index);
+        if (!key || key.toLowerCase() !== "auth") continue;
+        const value = storage.getItem(key) || "";
+        if (value) return "auth=" + value;
+      }
+    }
+    for (const storage of [localStorage, sessionStorage]) {
+      for (let index = 0; index < storage.length; index += 1) {
+        const key = storage.key(index);
+        if (!key || !key.toLowerCase().includes("auth")) continue;
+        const value = storage.getItem(key) || "";
+        if (value) return key + "=" + value;
+      }
+    }
+    return "";
+  };
+  const value = authPair || storageAuthPair();
+  if (!value) throw new Error("没有读取到 auth。若 Application/Cookies 里能看到 auth 但这里读不到，说明它是 HttpOnly，只能在开发者工具 Application 或 Network 请求头里手动复制 auth=...");
   const write = (text) => typeof copy === "function" ? copy(text) : navigator.clipboard.writeText(text);
   write(value);
   return value;
@@ -154,6 +214,15 @@ async function loadAccounts() {
   }
 }
 
+async function loadOpenCodeSettings() {
+  try {
+    const payload = await api.opencodeGoSettings();
+    opencodeSettings.value = payload.settings || {};
+  } catch (error) {
+    ElMessage.error(error.message || "加载 OpenCode Go 配置失败");
+  }
+}
+
 function defaultForm() {
   return {
     id: "",
@@ -178,6 +247,27 @@ function openCreate() {
 function openBulkImport() {
   bulkText.value = "";
   bulkDialogVisible.value = true;
+}
+
+function openSettingsDialog() {
+  settingsForm.lite_subscription_js_url = liteSubscriptionJsUrl.value;
+  settingsDialogVisible.value = true;
+}
+
+async function saveSettings() {
+  savingSettings.value = true;
+  try {
+    const response = await api.saveOpencodeGoSettings({
+      lite_subscription_js_url: settingsForm.lite_subscription_js_url
+    });
+    opencodeSettings.value = response.settings || {};
+    settingsDialogVisible.value = false;
+    ElMessage.success("OpenCode Go 用量 JS 文件已保存");
+  } catch (error) {
+    ElMessage.error(error.message || "保存配置失败");
+  } finally {
+    savingSettings.value = false;
+  }
 }
 
 function openEdit(account) {
@@ -236,6 +326,7 @@ function openSessionImport(account) {
   sessionForm.storage_state = "";
   sessionDialogVisible.value = true;
   loadSessionPassword(account);
+  loadSessionState(account);
 }
 
 async function loadSessionPassword(account) {
@@ -260,8 +351,39 @@ async function loadSessionPassword(account) {
   }
 }
 
+async function loadSessionState(account) {
+  const hasSession = account?.has_session || account?.hasSession;
+  if (!hasSession) {
+    return;
+  }
+  sessionStateLoading.value = true;
+  try {
+    const payload = await api.opencodeGoSession(account.id);
+    if (String(sessionAccount.value?.id) === String(account.id)) {
+      sessionForm.workspace_id = payload.workspace_id || payload.workspaceId || sessionForm.workspace_id;
+      sessionForm.storage_state = payload.storage_state || payload.storageState || "";
+    }
+  } catch (error) {
+    if (String(sessionAccount.value?.id) === String(account.id)) {
+      ElMessage.error(error.message || "读取登录态失败");
+    }
+  } finally {
+    if (String(sessionAccount.value?.id) === String(account.id)) {
+      sessionStateLoading.value = false;
+    }
+  }
+}
+
 async function submitSessionImport() {
   if (!sessionAccount.value) {
+    return;
+  }
+  if (!String(sessionForm.workspace_id || "").trim()) {
+    ElMessage.error("请填写 Workspace ID");
+    return;
+  }
+  if (!String(sessionForm.storage_state || "").trim()) {
+    ElMessage.error("请填写 auth Cookie 或登录态 JSON");
     return;
   }
   importingSession.value = true;
@@ -510,7 +632,10 @@ function historyUsage(record, key) {
   return usageWindow(record, key);
 }
 
-onMounted(loadAccounts);
+onMounted(() => {
+  loadOpenCodeSettings();
+  loadAccounts();
+});
 </script>
 
 <template>
@@ -521,9 +646,25 @@ onMounted(loadAccounts);
         <p>{{ accountCount }} 个账号，最近成功 {{ formatTime(lastSuccessAt) }}</p>
       </div>
       <div class="page-actions">
+        <el-button :icon="Setting" @click="openSettingsDialog">配置用量 JS</el-button>
         <el-button type="primary" :icon="Plus" @click="openCreate">添加账号</el-button>
         <el-button :icon="Upload" @click="openBulkImport">批量导入</el-button>
         <el-button :icon="Refresh" :loading="refreshingAll" @click="refreshAll">刷新全部</el-button>
+      </div>
+    </div>
+
+    <div class="opencode-config-strip">
+      <div>
+        <span>用量 JS 文件</span>
+        <strong>{{ liteSubscriptionJsUrl || "未配置，暂用内置默认 server id" }}</strong>
+      </div>
+      <div>
+        <span>X-Server-Instance</span>
+        <strong>{{ serverInstance }}</strong>
+      </div>
+      <div>
+        <span>当前 X-Server-Id</span>
+        <strong>{{ liteSubscriptionServerId || defaultServerId || "-" }}</strong>
       </div>
     </div>
 
@@ -686,6 +827,29 @@ onMounted(loadAccounts);
       </template>
     </el-dialog>
 
+    <el-dialog v-model="settingsDialogVisible" title="配置 OpenCode Go 用量 JS 文件" width="720px">
+      <el-form label-position="top" @submit.prevent="saveSettings">
+        <el-form-item label="JS 文件地址">
+          <el-input
+            v-model="settingsForm.lite_subscription_js_url"
+            placeholder="https://opencode.ai/_build/assets/index-DtPYjwk4.js"
+            autocomplete="off"
+          />
+        </el-form-item>
+        <div class="import-helper">
+          <span>系统会下载这个 JS 文件，并从 const queryLiteSubscription_query = createServerReference(&quot;...&quot;) 中解析 X-Server-Id。</span>
+          <span>用量请求固定为 /_server?id=解析到的 server id&amp;args=序列化后的 Workspace ID，X-Server-Instance 固定为 server-fn:3。</span>
+          <span>当前解析到的 server id：{{ liteSubscriptionServerId || "未配置" }}；留空时会使用内置默认 server id：{{ defaultServerId || "-" }}</span>
+        </div>
+      </el-form>
+      <template #footer>
+        <div class="dialog-footer">
+          <el-button @click="settingsDialogVisible = false">取消</el-button>
+          <el-button type="primary" :loading="savingSettings" @click="saveSettings">保存</el-button>
+        </div>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="sessionDialogVisible" title="导入 OpenCode Go 登录态" width="760px">
       <el-form label-position="top" @submit.prevent="submitSessionImport">
         <el-form-item label="账号">
@@ -710,13 +874,13 @@ onMounted(loadAccounts);
           <el-button type="primary" :icon="Link" @click="openLocalOpencodeLogin">打开本地浏览器登录页</el-button>
           <span>会在你当前设备的默认浏览器打开 OpenCode 登录页，并把当前邮箱作为登录提示带过去。密码不会写入链接；登录后复制登录态再粘贴到下方。</span>
         </div>
-        <el-form-item label="Workspace ID">
-          <el-input v-model="sessionForm.workspace_id" placeholder="可留空，刷新时自动识别" />
+        <el-form-item label="Workspace ID（必填）">
+          <el-input v-model="sessionForm.workspace_id" placeholder="wrk_01KW01D1MG4VHNMJWA2KSH83CQ" />
         </el-form-item>
         <div class="session-command-panel">
           <div>
             <strong>浏览器控制台获取命令</strong>
-            <span>登录 OpenCode 后，在页面按 F12 打开控制台，复制下面命令执行；命令会把 Cookie、localStorage、Workspace ID 和 _server 的 ServerId 一起写入剪贴板，再粘到下方输入框。</span>
+            <span>登录 OpenCode 后，在页面按 F12 打开控制台，复制下面命令执行。若 auth 是 HttpOnly，控制台无法读取，请在 DevTools 的 Application > Cookies 或 Network 请求头里手动复制 auth=...。</span>
           </div>
           <button class="session-command-copy" type="button" @click="copyConsoleCommand(storageStateConsoleCommand, '登录态 JSON 命令')">
             <span>
@@ -725,26 +889,28 @@ onMounted(loadAccounts);
             </span>
             <el-icon><CopyDocument /></el-icon>
           </button>
-          <button class="session-command-copy" type="button" @click="copyConsoleCommand(cookieConsoleCommand, 'Cookie 命令')">
+          <button class="session-command-copy" type="button" @click="copyConsoleCommand(cookieConsoleCommand, 'Auth 值命令')">
             <span>
-              <small>Cookie 命令</small>
+              <small>Auth 值命令</small>
               <code>{{ cookieConsoleCommand }}</code>
             </span>
             <el-icon><CopyDocument /></el-icon>
           </button>
         </div>
-        <el-form-item label="登录态 JSON 或 Cookie">
+        <el-form-item label="登录态 JSON 或 Cookie（必填，必须包含 auth）">
           <el-input
+            v-loading="sessionStateLoading"
             v-model="sessionForm.storage_state"
             type="textarea"
             :rows="12"
             resize="vertical"
-            placeholder="{ &quot;cookies&quot;: [...], &quot;origins&quot;: [] } 或 Cookie: name=value; name2=value2"
+            placeholder="auth=你的值 或 { &quot;cookies&quot;: [{ &quot;name&quot;: &quot;auth&quot;, &quot;value&quot;: &quot;你的值&quot;, &quot;domain&quot;: &quot;.opencode.ai&quot;, &quot;path&quot;: &quot;/&quot; }], &quot;origins&quot;: [] }"
             autocomplete="off"
           />
         </el-form-item>
         <div class="import-helper">
           <span>遇到 Google 验证码或 2FA 时，可在本地浏览器完成人工登录后导入登录态。</span>
+          <span>如果 auth Cookie 勾选了 HttpOnly，控制台命令读不到它；请从 DevTools 的 Application > Cookies 复制 auth 的值，粘贴为 auth=你的值。</span>
           <span>导入后系统会加密保存登录态，后续刷新优先复用该会话。</span>
         </div>
       </el-form>

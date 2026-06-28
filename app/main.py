@@ -32,7 +32,16 @@ from app.security import decrypt_value
 from app.security import verify_password
 from app.services.balance import login_sub2api_tokens, query_newapi_group_options, query_sub2api_group_options
 from app.services.emailer import send_email
-from app.services.opencode_go import mask_api_key, public_usage_window
+from app.services.opencode_go import (
+    LITE_SUBSCRIPTION_GET_REFERENCE_ID,
+    LITE_SUBSCRIPTION_SERVER_INSTANCE,
+    OPENCODE_GO_LITE_JS_URL_SETTING,
+    OPENCODE_GO_LITE_SERVER_ID_SETTING,
+    fetch_lite_subscription_reference_id,
+    mask_api_key,
+    public_usage_window,
+    validate_opencode_go_lite_js_url,
+)
 from app.services.scheduler import (
     BalanceScheduler,
     query_all_accounts,
@@ -1350,6 +1359,59 @@ async def api_opencode_go_accounts(request: Request):
     }
 
 
+@app.get("/api/opencode-go/settings")
+async def api_opencode_go_settings(request: Request):
+    require_user(request)
+    js_url = db.get_setting(OPENCODE_GO_LITE_JS_URL_SETTING, "")
+    server_id = db.get_setting(OPENCODE_GO_LITE_SERVER_ID_SETTING, "")
+    return {
+        "settings": {
+            "lite_subscription_js_url": js_url,
+            "liteSubscriptionJsUrl": js_url,
+            "lite_subscription_server_id": server_id,
+            "liteSubscriptionServerId": server_id,
+            "default_server_id": LITE_SUBSCRIPTION_GET_REFERENCE_ID,
+            "defaultServerId": LITE_SUBSCRIPTION_GET_REFERENCE_ID,
+            "server_instance": LITE_SUBSCRIPTION_SERVER_INSTANCE,
+            "serverInstance": LITE_SUBSCRIPTION_SERVER_INSTANCE,
+        }
+    }
+
+
+@app.post("/api/opencode-go/settings")
+async def api_save_opencode_go_settings(request: Request):
+    require_user(request)
+    payload = await request.json()
+    raw_url = payload.get("lite_subscription_js_url", payload.get("liteSubscriptionJsUrl", payload.get("js_url", payload.get("jsUrl", "")))) if isinstance(payload, dict) else ""
+    try:
+        js_url = validate_opencode_go_lite_js_url(raw_url)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+    server_id = ""
+    if js_url:
+        try:
+            server_id = await fetch_lite_subscription_reference_id(js_url, timeout=15)
+        except Exception as exc:
+            return JSONResponse({"ok": False, "message": f"解析 JS 文件失败: {exc}"}, status_code=400)
+    db.set_setting(OPENCODE_GO_LITE_JS_URL_SETTING, js_url)
+    db.set_setting(OPENCODE_GO_LITE_SERVER_ID_SETTING, server_id)
+    scheduler.notify_settings_changed()
+    db.add_log("info", "opencode-go", "API 更新 OpenCode Go 用量 JS 文件配置")
+    return {
+        "ok": True,
+        "settings": {
+            "lite_subscription_js_url": js_url,
+            "liteSubscriptionJsUrl": js_url,
+            "lite_subscription_server_id": server_id,
+            "liteSubscriptionServerId": server_id,
+            "default_server_id": LITE_SUBSCRIPTION_GET_REFERENCE_ID,
+            "defaultServerId": LITE_SUBSCRIPTION_GET_REFERENCE_ID,
+            "server_instance": LITE_SUBSCRIPTION_SERVER_INSTANCE,
+            "serverInstance": LITE_SUBSCRIPTION_SERVER_INSTANCE,
+        },
+    }
+
+
 @app.post("/api/opencode-go/accounts")
 async def api_create_opencode_go_account(request: Request):
     require_user(request)
@@ -1445,6 +1507,33 @@ async def api_import_opencode_go_session(request: Request, account_id: int):
     updated = db.get_opencode_go_account(account_id)
     db.add_log("info", "opencode-go", f"API 导入 OpenCode Go 登录态: {account['name']}")
     return {"ok": True, "account": public_opencode_go_account(updated)}
+
+
+@app.get("/api/opencode-go/accounts/{account_id}/session")
+async def api_opencode_go_session(request: Request, account_id: int):
+    require_user(request)
+    account = db.get_opencode_go_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="OpenCode Go 账号不存在")
+    storage_state_enc = account["storage_state_enc"]
+    if not storage_state_enc:
+        raise HTTPException(status_code=404, detail="尚未保存登录态")
+    storage_state_text = decrypt_value(storage_state_enc, db.secret_key) or ""
+    workspace_id = str(account["workspace_id"] or "")
+    try:
+        storage_state_value = json.loads(storage_state_text)
+        if isinstance(storage_state_value, dict):
+            workspace_id = workspace_id or str(storage_state_value.get("workspace_id") or storage_state_value.get("workspaceId") or "")
+        storage_state_text = json.dumps(storage_state_value, ensure_ascii=False, indent=2)
+    except json.JSONDecodeError:
+        pass
+    db.add_log("info", "opencode-go", f"API 读取 OpenCode Go 登录态用于编辑: {account['name']}")
+    return {
+        "workspace_id": workspace_id,
+        "workspaceId": workspace_id,
+        "storage_state": storage_state_text,
+        "storageState": storage_state_text,
+    }
 
 
 @app.post("/api/opencode-go/accounts/{account_id}/refresh")
@@ -2172,7 +2261,7 @@ def import_bulk_opencode_go_accounts(bulk_text: str) -> dict[str, Any]:
     return {"count": len(imported), "accounts": imported}
 
 
-def _opencode_go_session_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+def _opencode_go_session_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], str]:
     if not isinstance(payload, dict):
         raise ValueError("请求内容格式不正确")
     raw_state = (
@@ -2222,14 +2311,27 @@ def _opencode_go_session_payload(payload: dict[str, Any]) -> tuple[dict[str, Any
         raise ValueError("登录态必须包含 cookies 和 origins 数组")
     if not cookies:
         raise ValueError("登录态 cookies 为空")
+    if not _has_cookie(cookies, "auth"):
+        raise ValueError("登录态必须包含 auth Cookie，请从 DevTools 的 Application 或 Network 请求头复制 auth=...")
     workspace_id = str(
         payload.get("workspace_id")
         or payload.get("workspaceId")
         or (storage_state.get("workspace_id") if isinstance(storage_state, dict) else "")
         or (storage_state.get("workspaceId") if isinstance(storage_state, dict) else "")
         or ""
-    ).strip() or None
+    ).strip()
+    if not workspace_id:
+        raise ValueError("Workspace ID 不能为空")
     return storage_state, workspace_id
+
+
+def _has_cookie(cookies: list[Any], name: str) -> bool:
+    for item in cookies:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("name") or "").strip() == name and str(item.get("value") or ""):
+            return True
+    return False
 
 
 def _cookies_from_header(value: str) -> list[dict[str, str]]:

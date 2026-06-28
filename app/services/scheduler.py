@@ -295,7 +295,16 @@ async def query_opencode_go_for_account(db: Database, account_id: int) -> dict:
         db.add_log("error", "opencode-go", f"OpenCode Go 查询失败，账号不存在: {account_id}")
         return {"is_valid": False, "invalid_message": "OpenCode Go 账号不存在"}
     settings = db.get_general_settings()
-    result = await refresh_opencode_go_account(account, db.secret_key, settings["request_timeout"], db.add_log)
+    lite_subscription_js_url = db.get_setting("opencode_go_lite_subscription_js_url", "")
+    lite_subscription_server_id = db.get_setting("opencode_go_lite_subscription_server_id", "")
+    result = await refresh_opencode_go_account(
+        account,
+        db.secret_key,
+        settings["request_timeout"],
+        db.add_log,
+        lite_subscription_js_url=lite_subscription_js_url,
+        lite_subscription_server_id=lite_subscription_server_id,
+    )
     result["account_id"] = account_id
     result["accountId"] = account_id
     result["checked_at"] = result.get("checked_at") or utc_now()
