@@ -52,6 +52,7 @@ class Sub2ApiAdminClient:
             "name": f"opencode-{email}",
             "platform": SUB2API_OPENAI_PLATFORM,
             "type": SUB2API_APIKEY_TYPE,
+            "concurrency": 10,
             "credentials": credentials,
             "extra": {"codex_image_generation_bridge": False},
             "group_ids": group_ids,

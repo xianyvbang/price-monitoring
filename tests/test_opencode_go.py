@@ -935,6 +935,7 @@ def test_opencode_go_import_sub2api_creates_remote_account_with_synced_models(tm
     assert create_request["json"]["name"] == "opencode-user@example.com"
     assert create_request["json"]["platform"] == "openai"
     assert create_request["json"]["type"] == "apikey"
+    assert create_request["json"]["concurrency"] == 10
     assert create_request["json"]["group_ids"] == [2, 3]
     assert create_request["json"]["credentials"]["base_url"] == "https://opencode.ai/zen/go"
     assert create_request["json"]["credentials"]["api_key"] == "sk-opencode-secret"
