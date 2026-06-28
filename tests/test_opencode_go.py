@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.models import Database
-from app.security import decrypt_value
+from app.security import decrypt_value, encrypt_value
 from app.services.opencode_go import (
     KEY_LIST_DEFAULT_JS_URL,
     KEY_LIST_GET_REFERENCE_ID,
@@ -20,6 +20,36 @@ from app.services.opencode_go import (
     query_opencode_server_reference,
     refresh_opencode_go_account,
 )
+
+
+class DummySub2ApiResponse:
+    def __init__(self, payload, status_code=200):
+        self.payload = payload
+        self.status_code = status_code
+
+    def json(self):
+        return self.payload
+
+
+class DummySub2ApiClient:
+    requests = []
+    responses = []
+
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return None
+
+    async def request(self, method, url, headers=None, **kwargs):
+        self.requests.append({"method": method, "url": url, "headers": headers or {}, **kwargs})
+        if not self.responses:
+            return DummySub2ApiResponse({"code": 0, "data": {}})
+        return self.responses.pop(0)
 
 
 class DummyResponse:
@@ -137,6 +167,11 @@ def setup_test_db(tmp_path, monkeypatch) -> Database:
 
     monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
     return test_db
+
+
+def configure_sub2api(test_db: Database) -> None:
+    test_db.set_setting("sub2api_site_url", "https://sub.example")
+    test_db.set_setting("sub2api_admin_key_enc", encrypt_value("admin-secret", test_db.secret_key) or "")
 
 
 def test_opencode_go_account_encrypts_secrets(tmp_path):
@@ -752,3 +787,182 @@ def test_opencode_go_import_session_accepts_wrapped_server_ids(tmp_path, monkeyp
     assert account["workspace_id"] == "ws_wrapped"
     assert "manual-cookie" in saved_state
     assert "serverIds" in saved_state
+
+
+def test_opencode_go_sub2api_groups_requires_config(tmp_path, monkeypatch):
+    setup_test_db(tmp_path, monkeypatch)
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.get("/api/opencode-go/sub2api/groups")
+
+    assert response.status_code == 400
+    assert "Sub2API 站点地址" in response.json()["message"]
+
+
+def test_opencode_go_sub2api_groups_requires_admin_key(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    db.set_setting("sub2api_site_url", "https://sub.example")
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.get("/api/opencode-go/sub2api/groups")
+
+    assert response.status_code == 400
+    assert "AdminKey" in response.json()["message"]
+
+
+def test_opencode_go_sub2api_groups_filters_openai_and_unwraps_response(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    configure_sub2api(db)
+    DummySub2ApiClient.requests = []
+    DummySub2ApiClient.responses = [
+        DummySub2ApiResponse(
+            {
+                "code": 0,
+                "data": [
+                    {"id": 1, "name": "OpenAI A", "platform": "openai"},
+                    {"id": 2, "name": "Anthropic", "platform": "anthropic"},
+                    {"id": 3, "name": "Legacy"},
+                ],
+            }
+        )
+    ]
+    monkeypatch.setattr("app.services.sub2api_admin.httpx.AsyncClient", DummySub2ApiClient)
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.get("/api/opencode-go/sub2api/groups")
+
+    assert response.status_code == 200
+    assert [group["id"] for group in response.json()["groups"]] == [1, 3]
+    request = DummySub2ApiClient.requests[0]
+    assert request["method"] == "GET"
+    assert request["url"] == "https://sub.example/api/v1/admin/groups/all"
+    assert request["params"] == {"platform": "openai"}
+    assert request["headers"]["x-api-key"] == "admin-secret"
+    assert "admin-secret" not in response.text
+
+
+def test_opencode_go_import_sub2api_requires_api_key(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    configure_sub2api(db)
+    account_id = db.upsert_opencode_go_account(
+        {"name": "go-main", "email": "user@example.com", "password": "secret-password"}
+    )
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.post(f"/api/opencode-go/accounts/{account_id}/import-sub2api", json={"group_ids": [1]})
+
+    assert response.status_code == 400
+    assert "尚未获取 API key" in response.json()["message"]
+
+
+def test_opencode_go_import_sub2api_requires_existing_account(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    configure_sub2api(db)
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.post("/api/opencode-go/accounts/999/import-sub2api", json={"group_ids": [1]})
+
+    assert response.status_code == 404
+    assert "OpenCode Go 账号不存在" in response.json()["detail"]
+
+
+def test_opencode_go_import_sub2api_creates_remote_account_with_synced_models(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    configure_sub2api(db)
+    account_id = db.upsert_opencode_go_account(
+        {
+            "name": "go-main",
+            "email": "user@example.com",
+            "password": "secret-password",
+            "api_key": "sk-opencode-secret",
+        }
+    )
+    DummySub2ApiClient.requests = []
+    DummySub2ApiClient.responses = [
+        DummySub2ApiResponse({"code": 0, "data": {"models": ["gpt-5", "gpt-5-mini", "gpt-5"]}}),
+        DummySub2ApiResponse(
+            {
+                "code": 0,
+                "data": {
+                    "id": 123,
+                    "name": "opencode-user@example.com",
+                    "credentials": {
+                        "base_url": "https://opencode.ai/zen/go",
+                        "api_key": "sk-opencode-secret",
+                        "model_mapping": {"gpt-5": "gpt-5"},
+                    },
+                },
+            }
+        ),
+    ]
+    monkeypatch.setattr("app.services.sub2api_admin.httpx.AsyncClient", DummySub2ApiClient)
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.post(f"/api/opencode-go/accounts/{account_id}/import-sub2api", json={"group_ids": ["2", 3, 2]})
+        logs = client.get("/api/logs")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["name"] == "opencode-user@example.com"
+    assert payload["models"] == ["gpt-5", "gpt-5-mini"]
+    assert payload["group_ids"] == [2, 3]
+    assert payload["account"]["credentials"] == {
+        "base_url": "https://opencode.ai/zen/go",
+        "model_mapping": {"gpt-5": "gpt-5"},
+    }
+    assert "sk-opencode-secret" not in response.text
+    assert "admin-secret" not in response.text
+
+    preview_request = DummySub2ApiClient.requests[0]
+    assert preview_request["method"] == "POST"
+    assert preview_request["url"] == "https://sub.example/api/v1/admin/accounts/models/sync-upstream-preview"
+    assert preview_request["json"] == {
+        "platform": "openai",
+        "type": "apikey",
+        "base_url": "https://opencode.ai/zen/go",
+        "api_key": "sk-opencode-secret",
+    }
+
+    create_request = DummySub2ApiClient.requests[1]
+    assert create_request["method"] == "POST"
+    assert create_request["url"] == "https://sub.example/api/v1/admin/accounts"
+    assert create_request["json"]["name"] == "opencode-user@example.com"
+    assert create_request["json"]["platform"] == "openai"
+    assert create_request["json"]["type"] == "apikey"
+    assert create_request["json"]["group_ids"] == [2, 3]
+    assert create_request["json"]["credentials"]["base_url"] == "https://opencode.ai/zen/go"
+    assert create_request["json"]["credentials"]["api_key"] == "sk-opencode-secret"
+    assert create_request["json"]["credentials"]["pool_mode"] is True
+    assert create_request["json"]["credentials"]["model_mapping"] == {
+        "gpt-5": "gpt-5",
+        "gpt-5-mini": "gpt-5-mini",
+    }
+    assert create_request["json"]["extra"]["codex_image_generation_bridge"] is False
+    assert "sk-opencode-secret" not in logs.text
+    assert "admin-secret" not in logs.text
+
+
+def test_opencode_go_import_sub2api_requires_groups(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    configure_sub2api(db)
+    account_id = db.upsert_opencode_go_account(
+        {
+            "name": "go-main",
+            "email": "user@example.com",
+            "password": "secret-password",
+            "api_key": "sk-opencode-secret",
+        }
+    )
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.post(f"/api/opencode-go/accounts/{account_id}/import-sub2api", json={"group_ids": []})
+
+    assert response.status_code == 400
+    assert "请选择至少一个" in response.json()["message"]

@@ -41,6 +41,12 @@ const historyVisible = ref(false);
 const historyLoading = ref(false);
 const historyAccount = ref(null);
 const historyRecords = ref([]);
+const sub2ApiImportVisible = ref(false);
+const sub2ApiImportLoading = ref(false);
+const sub2ApiImporting = ref(false);
+const sub2ApiImportAccount = ref(null);
+const sub2ApiGroups = ref([]);
+const sub2ApiSelectedGroupIds = ref([]);
 const formRef = ref(null);
 const form = reactive(defaultForm());
 const { isMobile } = useViewport();
@@ -57,6 +63,10 @@ const defaultKeyListServerId = computed(() => opencodeSettings.value.default_key
 const keyListJsUrl = computed(() => opencodeSettings.value.key_list_js_url || opencodeSettings.value.keyListJsUrl || defaultKeyListJsUrl.value);
 const keyListServerId = computed(() => opencodeSettings.value.key_list_server_id || opencodeSettings.value.keyListServerId || "");
 const keyListServerInstance = computed(() => opencodeSettings.value.key_list_server_instance || opencodeSettings.value.keyListServerInstance || "server-fn:2");
+const sub2ApiImportName = computed(() => {
+  const email = String(sub2ApiImportAccount.value?.email || "").trim();
+  return email ? `opencode-${email}` : "-";
+});
 const storageStateConsoleCommand = String.raw`(async () => {
   const write = (value) => typeof copy === "function" ? copy(value) : navigator.clipboard.writeText(value);
   const fetchText = async (url) => {
@@ -490,6 +500,65 @@ async function refreshAll() {
   }
 }
 
+async function openSub2ApiImport(account) {
+  sub2ApiImportAccount.value = account;
+  sub2ApiGroups.value = [];
+  sub2ApiSelectedGroupIds.value = [];
+  sub2ApiImportVisible.value = true;
+  sub2ApiImportLoading.value = true;
+  try {
+    const payload = await api.opencodeGoSub2ApiGroups();
+    sub2ApiGroups.value = payload.groups || [];
+  } catch (error) {
+    ElMessage.error(error.message || "加载 Sub2API 分组失败");
+  } finally {
+    sub2ApiImportLoading.value = false;
+  }
+}
+
+function sub2ApiGroupId(group) {
+  return Number(group.id ?? group.group_id ?? group.groupId);
+}
+
+function sub2ApiGroupLabel(group) {
+  return group.name || group.plan_name || group.planName || group.description || `分组 ${sub2ApiGroupId(group)}`;
+}
+
+function sub2ApiGroupMeta(group) {
+  const parts = [`ID: ${sub2ApiGroupId(group)}`];
+  const platform = group.platform || "openai";
+  if (platform) {
+    parts.push(`平台 ${platform}`);
+  }
+  if (group.status) {
+    parts.push(group.status);
+  }
+  return parts.join(" · ");
+}
+
+async function submitSub2ApiImport() {
+  if (!sub2ApiImportAccount.value) {
+    return;
+  }
+  if (!sub2ApiSelectedGroupIds.value.length) {
+    ElMessage.error("请选择至少一个 Sub2API 分组");
+    return;
+  }
+  sub2ApiImporting.value = true;
+  try {
+    const payload = await api.importOpencodeGoToSub2Api(sub2ApiImportAccount.value.id, {
+      group_ids: sub2ApiSelectedGroupIds.value
+    });
+    sub2ApiImportVisible.value = false;
+    const modelCount = payload.model_count ?? payload.modelCount ?? (payload.models || []).length;
+    ElMessage.success(`已导入 Sub2API，模型 ${modelCount} 个`);
+  } catch (error) {
+    ElMessage.error(error.message || "导入 Sub2API 失败");
+  } finally {
+    sub2ApiImporting.value = false;
+  }
+}
+
 async function copyApiKey(account) {
   try {
     const payload = await api.opencodeGoApiKey(account.id);
@@ -811,6 +880,7 @@ onMounted(() => {
               <div class="table-actions">
                 <el-button size="small" :icon="Edit" @click="openEdit(row)">编辑</el-button>
                 <el-button size="small" :icon="Upload" @click="openSessionImport(row)">导入登录态</el-button>
+                <el-button size="small" :icon="Upload" :disabled="!row.has_api_key && !row.hasApiKey" @click="openSub2ApiImport(row)">导入 Sub2API</el-button>
                 <el-button size="small" :icon="Refresh" :loading="row._refreshing" @click="refreshAccount(row)">刷新</el-button>
                 <el-button size="small" :icon="CopyDocument" :disabled="!row.has_api_key && !row.hasApiKey" @click="copyApiKey(row)">复制 Key</el-button>
                 <el-button size="small" :icon="Timer" @click="openHistory(row)">历史</el-button>
@@ -859,6 +929,7 @@ onMounted(() => {
           <div class="mobile-actions">
             <el-button size="small" :icon="Edit" @click="openEdit(row)">编辑</el-button>
             <el-button size="small" :icon="Upload" @click="openSessionImport(row)">导入登录态</el-button>
+            <el-button size="small" :icon="Upload" :disabled="!row.has_api_key && !row.hasApiKey" @click="openSub2ApiImport(row)">导入 Sub2API</el-button>
             <el-button size="small" :icon="Refresh" :loading="row._refreshing" @click="refreshAccount(row)">刷新</el-button>
             <el-button size="small" :icon="CopyDocument" :disabled="!row.has_api_key && !row.hasApiKey" @click="copyApiKey(row)">复制 Key</el-button>
             <el-button size="small" :icon="Timer" @click="openHistory(row)">历史</el-button>
@@ -916,6 +987,37 @@ onMounted(() => {
         <div class="dialog-footer">
           <el-button @click="bulkDialogVisible = false">取消</el-button>
           <el-button type="primary" :loading="importingBulk" @click="submitBulkImport">导入</el-button>
+        </div>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="sub2ApiImportVisible" title="导入 Sub2API" width="680px">
+      <el-form label-position="top" @submit.prevent="submitSub2ApiImport">
+        <el-form-item label="导入账号名称">
+          <el-input :model-value="sub2ApiImportName" readonly />
+        </el-form-item>
+        <el-form-item label="Sub2API 分组">
+          <div v-loading="sub2ApiImportLoading" class="sub2api-group-picker">
+            <el-empty v-if="!sub2ApiImportLoading && !sub2ApiGroups.length" description="暂无可选 OpenAI 分组" />
+            <el-checkbox-group v-else v-model="sub2ApiSelectedGroupIds" class="sub2api-group-list">
+              <el-checkbox v-for="group in sub2ApiGroups" :key="sub2ApiGroupId(group)" :label="sub2ApiGroupId(group)" border class="sub2api-group-option">
+                <div class="sub2api-group-copy">
+                  <span>{{ sub2ApiGroupLabel(group) }}</span>
+                  <small>{{ sub2ApiGroupMeta(group) }}</small>
+                </div>
+              </el-checkbox>
+            </el-checkbox-group>
+          </div>
+        </el-form-item>
+        <div class="import-helper">
+          <span>导入会在已配置的 Sub2API 站点创建 OpenAI APIkey 账号，Base URL 固定为 https://opencode.ai/zen/go。</span>
+          <span>创建前会同步上游模型列表，开启池模式，并强制关闭 Codex 图片生成桥接。</span>
+        </div>
+      </el-form>
+      <template #footer>
+        <div class="dialog-footer">
+          <el-button @click="sub2ApiImportVisible = false">取消</el-button>
+          <el-button type="primary" :loading="sub2ApiImporting" :disabled="sub2ApiImportLoading || !sub2ApiSelectedGroupIds.length" @click="submitSub2ApiImport">导入</el-button>
         </div>
       </template>
     </el-dialog>

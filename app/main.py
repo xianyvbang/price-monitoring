@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlparse
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
@@ -28,7 +28,7 @@ from app.models import (
     reminder_to_dict,
     row_to_dict,
 )
-from app.security import decrypt_value
+from app.security import decrypt_value, encrypt_value
 from app.security import verify_password
 from app.services.balance import login_sub2api_tokens, query_newapi_group_options, query_sub2api_group_options
 from app.services.emailer import send_email
@@ -58,6 +58,7 @@ from app.services.scheduler import (
     query_opencode_go_for_account,
     query_sub2api_group_for_account,
 )
+from app.services.sub2api_admin import Sub2ApiAdminClient, Sub2ApiAdminError
 
 config = get_config()
 db = Database(config.database_path, config.app_secret_key)
@@ -99,6 +100,8 @@ CONSUMPTION_PERIODS = [
     {"key": "this_month", "label": "本月实际消耗总金额", "count_label": "个 Base URL 有本月记录"},
     {"key": "last_month", "label": "上月实际消耗总金额", "count_label": "个 Base URL 有上月记录"},
 ]
+SUB2API_ADMIN_KEY_SETTING = "sub2api_admin_key_enc"
+SUB2API_SITE_URL_SETTING = "sub2api_site_url"
 
 
 @asynccontextmanager
@@ -1510,6 +1513,39 @@ async def api_opencode_go_enabled(request: Request, account_id: int):
     return {"ok": True, "account": public_opencode_go_account(updated)}
 
 
+@app.get("/api/opencode-go/sub2api/groups")
+async def api_opencode_go_sub2api_groups(request: Request):
+    require_user(request)
+    try:
+        groups = await sub2api_admin_client().list_openai_groups()
+    except Sub2ApiAdminError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=exc.status_code)
+    return {"ok": True, "groups": groups}
+
+
+@app.post("/api/opencode-go/accounts/{account_id}/import-sub2api")
+async def api_import_opencode_go_to_sub2api(request: Request, account_id: int):
+    require_user(request)
+    account = db.get_opencode_go_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="OpenCode Go 账号不存在")
+    payload = await request.json()
+    try:
+        group_ids = _sub2api_import_group_ids(payload)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+
+    email = decrypt_value(account["email_enc"], db.secret_key) if account["email_enc"] else ""
+    api_key = decrypt_value(account["api_key_enc"], db.secret_key) if account["api_key_enc"] else ""
+    try:
+        result = await sub2api_admin_client().import_opencode_go_account(email, api_key, group_ids)
+    except Sub2ApiAdminError as exc:
+        db.add_log("error", "opencode-go", f"{account['name']} 导入 Sub2API 失败: {exc}")
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=exc.status_code)
+    db.add_log("info", "opencode-go", f"{account['name']} 已导入 Sub2API: {result['name']}")
+    return {"ok": True, **result}
+
+
 @app.post("/api/opencode-go/accounts/{account_id}/login")
 async def api_login_opencode_go_account(request: Request, account_id: int):
     require_user(request)
@@ -2030,7 +2066,12 @@ async def api_monitor_pause(request: Request):
 @app.get("/api/settings")
 async def api_settings(request: Request):
     require_user(request)
-    return {"settings": db.get_general_settings(), "smtp": public_smtp_settings(), "reminders": public_reminders()}
+    return {
+        "settings": db.get_general_settings(),
+        "smtp": public_smtp_settings(),
+        "sub2api": public_sub2api_settings(),
+        "reminders": public_reminders(),
+    }
 
 
 @app.get("/api/settings/reminders")
@@ -2113,6 +2154,22 @@ async def api_smtp_settings(request: Request):
     )
     db.add_log("info", "settings", "API 更新 SMTP 设置")
     return {"ok": True, "smtp": public_smtp_settings()}
+
+
+@app.post("/api/settings/sub2api")
+async def api_sub2api_settings(request: Request):
+    require_user(request)
+    payload = await request.json()
+    try:
+        admin_key = str(payload.get("admin_key", payload.get("adminKey", "")) or "").strip()
+        site_url = _normalize_sub2api_site_url(payload.get("site_url", payload.get("siteUrl", "")))
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+    if admin_key:
+        db.set_setting(SUB2API_ADMIN_KEY_SETTING, encrypt_value(admin_key, db.secret_key) or "")
+    db.set_setting(SUB2API_SITE_URL_SETTING, site_url)
+    db.add_log("info", "settings", "API 更新 Sub2API 配置")
+    return {"ok": True, "sub2api": public_sub2api_settings()}
 
 
 @app.post("/api/settings/smtp/test")
@@ -2589,8 +2646,67 @@ def public_smtp_settings() -> dict[str, Any]:
     return data
 
 
+def public_sub2api_settings() -> dict[str, Any]:
+    admin_key_enc = db.get_setting(SUB2API_ADMIN_KEY_SETTING, "")
+    admin_key = decrypt_value(admin_key_enc, db.secret_key) if admin_key_enc else ""
+    site_url = db.get_setting(SUB2API_SITE_URL_SETTING, "")
+    masked = mask_api_key(admin_key) if admin_key else ""
+    return {
+        "site_url": site_url,
+        "siteUrl": site_url,
+        "has_admin_key": bool(admin_key),
+        "hasAdminKey": bool(admin_key),
+        "admin_key_masked": masked,
+        "adminKeyMasked": masked,
+    }
+
+
+def sub2api_admin_client() -> Sub2ApiAdminClient:
+    admin_key_enc = db.get_setting(SUB2API_ADMIN_KEY_SETTING, "")
+    admin_key = decrypt_value(admin_key_enc, db.secret_key) if admin_key_enc else ""
+    site_url = db.get_setting(SUB2API_SITE_URL_SETTING, "")
+    timeout = db.get_general_settings().get("request_timeout", REQUEST_TIMEOUT_SECONDS)
+    return Sub2ApiAdminClient(site_url, admin_key, timeout=float(timeout or REQUEST_TIMEOUT_SECONDS))
+
+
+def _sub2api_import_group_ids(payload: Any) -> list[int]:
+    if not isinstance(payload, dict):
+        raise ValueError("请求内容格式不正确")
+    raw = payload.get("group_ids", payload.get("groupIds", []))
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list):
+        raise ValueError("分组必须是数组")
+    group_ids: list[int] = []
+    seen = set()
+    for item in raw:
+        try:
+            group_id = int(item)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("分组 ID 格式不正确") from exc
+        if group_id <= 0:
+            raise ValueError("分组 ID 格式不正确")
+        if group_id in seen:
+            continue
+        seen.add(group_id)
+        group_ids.append(group_id)
+    if not group_ids:
+        raise ValueError("请选择至少一个 Sub2API 分组")
+    return group_ids
+
+
 def public_reminders() -> list[dict[str, Any]]:
     return [reminder_to_dict(row) for row in db.list_reminders()]
+
+
+def _normalize_sub2api_site_url(value: Any) -> str:
+    text = str(value or "").strip().rstrip("/")
+    if not text:
+        return ""
+    parsed = urlparse(text)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("站点地址必须是 http 或 https URL")
+    return text
 
 
 def _reminder_payload(payload: Any) -> dict[str, str]:

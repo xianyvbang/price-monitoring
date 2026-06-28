@@ -54,6 +54,7 @@ export const api = {
   setGroupRateChange: (id, payload) => request(`/api/accounts/${id}/group-rate-change-status`, { method: "POST", body: JSON.stringify(payload) }),
   settings: () => request("/api/settings"),
   saveGeneralSettings: (payload) => request("/api/settings/general", { method: "POST", body: JSON.stringify(payload) }),
+  saveSub2ApiSettings: (payload) => request("/api/settings/sub2api", { method: "POST", body: JSON.stringify(payload) }),
   saveSmtpSettings: (payload) => request("/api/settings/smtp", { method: "POST", body: JSON.stringify(payload) }),
   testSmtp: () => request("/api/settings/smtp/test", { method: "POST" }),
   reminders: () => request("/api/settings/reminders"),
@@ -76,6 +77,8 @@ export const api = {
   opencodeGoHistory: (id, params = {}) => request(`/api/opencode-go/accounts/${id}/history${queryString(params)}`),
   opencodeGoApiKey: (id) => request(`/api/opencode-go/accounts/${id}/api-key`),
   opencodeGoPassword: (id) => request(`/api/opencode-go/accounts/${id}/password`),
+  opencodeGoSub2ApiGroups: () => request("/api/opencode-go/sub2api/groups"),
+  importOpencodeGoToSub2Api: (id, payload) => request(`/api/opencode-go/accounts/${id}/import-sub2api`, { method: "POST", body: JSON.stringify(payload) }),
   logs: (params = {}) => request(`/api/logs${queryString(params)}`),
   clearLogs: () => request("/api/logs", { method: "DELETE" })
 };

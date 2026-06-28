@@ -2,13 +2,14 @@
 import { inject, onMounted, reactive, ref } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { Bell, Check, Delete, Edit, Lock, Message, Plus, Refresh, Setting } from "@element-plus/icons-vue";
+import { Bell, Check, Connection, Delete, Edit, Lock, Message, Plus, Refresh, Setting } from "@element-plus/icons-vue";
 import { api } from "../api";
 
 const router = useRouter();
 const refreshSession = inject("refreshSession");
 const loading = ref(false);
 const savingGeneral = ref(false);
+const savingSub2Api = ref(false);
 const savingSmtp = ref(false);
 const testingSmtp = ref(false);
 const changingPassword = ref(false);
@@ -17,6 +18,7 @@ const savingReminder = ref(false);
 const deletingReminderId = ref(null);
 
 const queryDialog = ref(false);
+const sub2ApiDialog = ref(false);
 const smtpDialog = ref(false);
 const passwordDialog = ref(false);
 const remindersDialog = ref(false);
@@ -29,6 +31,12 @@ const general = reactive({
   group_rate_query_interval: 300,
   default_threshold: 5,
   monitor_paused: false
+});
+const sub2api = reactive({
+  admin_key: "",
+  admin_key_masked: "",
+  has_admin_key: false,
+  site_url: ""
 });
 const smtp = reactive({
   host: "",
@@ -58,6 +66,7 @@ async function loadSettings() {
   try {
     const payload = await api.settings();
     Object.assign(general, payload.settings || {});
+    assignSub2Api(payload.sub2api || {});
     Object.assign(smtp, payload.smtp || {});
     smtp.password = "";
     reminders.value = payload.reminders || [];
@@ -66,6 +75,13 @@ async function loadSettings() {
   } finally {
     loading.value = false;
   }
+}
+
+function assignSub2Api(value) {
+  sub2api.admin_key = "";
+  sub2api.admin_key_masked = value.admin_key_masked || value.adminKeyMasked || "";
+  sub2api.has_admin_key = Boolean(value.has_admin_key || value.hasAdminKey);
+  sub2api.site_url = value.site_url || value.siteUrl || "";
 }
 
 async function loadReminders() {
@@ -91,6 +107,20 @@ async function saveGeneral() {
     ElMessage.error(error.message || "保存失败");
   } finally {
     savingGeneral.value = false;
+  }
+}
+
+async function saveSub2Api() {
+  savingSub2Api.value = true;
+  try {
+    const payload = await api.saveSub2ApiSettings(sub2api);
+    assignSub2Api(payload.sub2api || {});
+    sub2ApiDialog.value = false;
+    ElMessage.success("Sub2API 配置已保存");
+  } catch (error) {
+    ElMessage.error(error.message || "保存失败");
+  } finally {
+    savingSub2Api.value = false;
   }
 }
 
@@ -239,6 +269,9 @@ onMounted(loadSettings);
       <el-button class="settings-launch-button" :icon="Setting" @click="queryDialog = true">
         查询设置
       </el-button>
+      <el-button class="settings-launch-button" :icon="Connection" @click="sub2ApiDialog = true">
+        Sub2API 配置
+      </el-button>
       <el-button class="settings-launch-button" :icon="Message" @click="smtpDialog = true">
         SMTP 邮件
       </el-button>
@@ -272,6 +305,32 @@ onMounted(loadSettings);
         <div class="dialog-footer">
           <el-button @click="queryDialog = false">取消</el-button>
           <el-button type="primary" :icon="Check" :loading="savingGeneral" @click="saveGeneral">保存</el-button>
+        </div>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="sub2ApiDialog" title="Sub2API 配置" width="620px">
+      <el-form :model="sub2api" label-position="top" @submit.prevent="saveSub2Api">
+        <el-form-item label="AdminKey">
+          <el-input
+            v-model="sub2api.admin_key"
+            type="password"
+            show-password
+            :placeholder="sub2api.has_admin_key ? `已配置：${sub2api.admin_key_masked}，留空不修改` : ''"
+            autocomplete="off"
+          />
+        </el-form-item>
+        <div class="import-helper sub2api-helper">
+          <span>系统设置-&gt;安全与认证-&gt;创建秘钥</span>
+        </div>
+        <el-form-item label="站点地址">
+          <el-input v-model="sub2api.site_url" placeholder="https://your-sub2api.example.com" autocomplete="off" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <div class="dialog-footer">
+          <el-button @click="sub2ApiDialog = false">取消</el-button>
+          <el-button type="primary" :loading="savingSub2Api" @click="saveSub2Api">保存 Sub2API</el-button>
         </div>
       </template>
     </el-dialog>
@@ -395,7 +454,7 @@ onMounted(loadSettings);
 .settings-launch-grid {
   display: grid;
   gap: 16px;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
 }
 
 .settings-launch-button.el-button {
@@ -419,6 +478,10 @@ onMounted(loadSettings);
   gap: 8px;
   justify-content: flex-end;
   margin-bottom: 12px;
+}
+
+.sub2api-helper {
+  margin: -8px 0 18px;
 }
 
 .reminder-list {

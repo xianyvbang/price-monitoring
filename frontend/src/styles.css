@@ -649,6 +649,51 @@ a {
   margin-bottom: 2px;
 }
 
+.sub2api-group-picker {
+  min-height: 96px;
+  width: 100%;
+}
+
+.sub2api-group-list {
+  display: grid;
+  gap: 10px;
+}
+
+.sub2api-group-option {
+  align-items: center;
+  height: auto;
+  margin-right: 0;
+  padding: 10px 12px;
+  width: 100%;
+}
+
+.sub2api-group-option .el-checkbox__label {
+  min-width: 0;
+  width: 100%;
+}
+
+.sub2api-group-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.sub2api-group-copy span,
+.sub2api-group-copy small {
+  overflow-wrap: anywhere;
+}
+
+.sub2api-group-copy span {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.sub2api-group-copy small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .manual-session-panel {
   align-items: center;
   background: #eef6ff;
