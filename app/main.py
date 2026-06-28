@@ -2204,13 +2204,31 @@ def _opencode_go_session_payload(payload: dict[str, Any]) -> tuple[dict[str, Any
         storage_state = {"cookies": _cookies_from_header(raw_cookie_header), "origins": []}
     else:
         raise ValueError("请输入登录态 JSON 或 Cookie")
+    if isinstance(storage_state, dict):
+        raw_state_dict = raw_state if isinstance(raw_state, dict) else storage_state
+        nested_state = raw_state_dict.get("storage_state") or raw_state_dict.get("storageState")
+        if isinstance(nested_state, dict):
+            for key, value in raw_state_dict.items():
+                if key not in nested_state and key not in {"storage_state", "storageState"}:
+                    nested_state[key] = value
+            storage_state = nested_state
+            raw_state_dict = storage_state
+        for key in ("serverIds", "server_ids", "serverReferences", "server_references", "serverId", "serverID", "server_id"):
+            if key in raw_state_dict and key not in storage_state:
+                storage_state[key] = raw_state_dict[key]
     cookies = storage_state.get("cookies")
     origins = storage_state.get("origins", [])
     if not isinstance(cookies, list) or not isinstance(origins, list):
         raise ValueError("登录态必须包含 cookies 和 origins 数组")
     if not cookies:
         raise ValueError("登录态 cookies 为空")
-    workspace_id = str(payload.get("workspace_id") or payload.get("workspaceId") or "").strip() or None
+    workspace_id = str(
+        payload.get("workspace_id")
+        or payload.get("workspaceId")
+        or (storage_state.get("workspace_id") if isinstance(storage_state, dict) else "")
+        or (storage_state.get("workspaceId") if isinstance(storage_state, dict) else "")
+        or ""
+    ).strip() or None
     return storage_state, workspace_id
 
 

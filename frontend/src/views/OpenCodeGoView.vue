@@ -33,6 +33,96 @@ const { isMobile } = useViewport();
 const accountCount = computed(() => summary.value.account_count ?? summary.value.accountCount ?? accounts.value.length);
 const lastSuccessAt = computed(() => summary.value.last_success_at ?? summary.value.lastSuccessAt);
 const bulkPreviewCount = computed(() => bulkText.value.split(/\r?\n/).filter((line) => line.trim()).length);
+const storageStateConsoleCommand = String.raw`(async () => {
+  const write = (value) => typeof copy === "function" ? copy(value) : navigator.clipboard.writeText(value);
+  const fetchText = async (url) => {
+    try {
+      const response = await fetch(url, { credentials: "include" });
+      return response.ok ? await response.text() : "";
+    } catch (_error) {
+      return "";
+    }
+  };
+  const assetUrls = new Set(
+    Array.from(document.querySelectorAll("script[src],link[href]"))
+      .map((element) => element.src || element.href)
+      .filter((url) => url && url.includes("/_build/assets/") && url.endsWith(".js"))
+  );
+  const pageHtml = await fetchText(location.href);
+  for (const match of pageHtml.matchAll(/(?:src|href)=["']([^"']*\/_build\/assets\/[^"']+\.js)["']/g)) {
+    assetUrls.add(new URL(match[1], location.origin).href);
+  }
+  const loadedUrls = new Set();
+  const sources = [];
+  for (let round = 0; round < 2; round += 1) {
+    for (const url of Array.from(assetUrls)) {
+      if (loadedUrls.has(url)) continue;
+      loadedUrls.add(url);
+      const source = await fetchText(url);
+      sources.push(source);
+      for (const match of source.matchAll(/["'](_build\/assets\/[^"']+\.js)["']/g)) {
+        assetUrls.add(new URL("/" + match[1], location.origin).href);
+      }
+    }
+  }
+  const findServerId = (patterns) => {
+    for (const source of sources) {
+      for (const pattern of patterns) {
+        const match = source.match(pattern);
+        if (match) return match[1];
+      }
+    }
+    return "";
+  };
+  const serverIds = {
+    "session.get": findServerId([
+      /querySessionInfo_query\s*=\s*createServerReference\("([0-9a-f]{64})"\)/,
+      /querySessionInfo\s*=\s*createServerReference\("([0-9a-f]{64})"\)/
+    ]),
+    "lite.subscription.get": findServerId([
+      /queryLiteSubscription_query\s*=\s*createServerReference\("([0-9a-f]{64})"\)/,
+      /queryLiteSubscription\s*=\s*createServerReference\("([0-9a-f]{64})"\)/
+    ]),
+    "key.list": findServerId([
+      /listKeys_query\s*=\s*createServerReference\("([0-9a-f]{64})"\)/,
+      /listKeys\s*=\s*createServerReference\("([0-9a-f]{64})"\)/
+    ])
+  };
+  const cookies = document.cookie
+    .split(";")
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => {
+      const [name, ...valueParts] = item.split("=");
+      return {
+        name,
+        value: valueParts.join("="),
+        domain: location.hostname,
+        path: "/",
+        secure: location.protocol === "https:",
+        httpOnly: false,
+        sameSite: "Lax"
+      };
+    });
+  const localStorageItems = Object.keys(localStorage).map((name) => ({
+    name,
+    value: localStorage.getItem(name) || ""
+  }));
+  const storageState = {
+    cookies,
+    origins: [{ origin: location.origin, localStorage: localStorageItems }],
+    serverIds,
+    workspace_id: (location.pathname.match(/\/workspace\/([^/]+)/) || [])[1] || ""
+  };
+  await write(JSON.stringify(storageState, null, 2));
+  return storageState;
+})()`;
+const cookieConsoleCommand = `(() => {
+  const value = "Cookie: " + document.cookie;
+  const write = (text) => typeof copy === "function" ? copy(text) : navigator.clipboard.writeText(text);
+  write(value);
+  return value;
+})()`;
 
 const rules = {
   name: [{ required: true, message: "请输入名称", trigger: "blur" }],
@@ -333,6 +423,14 @@ async function copySessionPassword() {
   }
 }
 
+async function copyConsoleCommand(command, label) {
+  try {
+    await copyText(command, `${label}已复制`);
+  } catch (error) {
+    ElMessage.error(error.message || "复制命令失败");
+  }
+}
+
 async function openHistory(account) {
   historyVisible.value = true;
   historyLoading.value = true;
@@ -615,6 +713,26 @@ onMounted(loadAccounts);
         <el-form-item label="Workspace ID">
           <el-input v-model="sessionForm.workspace_id" placeholder="可留空，刷新时自动识别" />
         </el-form-item>
+        <div class="session-command-panel">
+          <div>
+            <strong>浏览器控制台获取命令</strong>
+            <span>登录 OpenCode 后，在页面按 F12 打开控制台，复制下面命令执行；命令会把 Cookie、localStorage、Workspace ID 和 _server 的 ServerId 一起写入剪贴板，再粘到下方输入框。</span>
+          </div>
+          <button class="session-command-copy" type="button" @click="copyConsoleCommand(storageStateConsoleCommand, '登录态 JSON 命令')">
+            <span>
+              <small>登录态 JSON + ServerId 命令</small>
+              <code>{{ storageStateConsoleCommand }}</code>
+            </span>
+            <el-icon><CopyDocument /></el-icon>
+          </button>
+          <button class="session-command-copy" type="button" @click="copyConsoleCommand(cookieConsoleCommand, 'Cookie 命令')">
+            <span>
+              <small>Cookie 命令</small>
+              <code>{{ cookieConsoleCommand }}</code>
+            </span>
+            <el-icon><CopyDocument /></el-icon>
+          </button>
+        </div>
         <el-form-item label="登录态 JSON 或 Cookie">
           <el-input
             v-model="sessionForm.storage_state"

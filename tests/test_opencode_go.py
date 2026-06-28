@@ -9,6 +9,7 @@ from app.services.opencode_go import (
     LITE_SUBSCRIPTION_GET_REFERENCE_ID,
     normalize_usage_result,
     query_opencode_server_reference,
+    refresh_opencode_go_account,
 )
 
 
@@ -32,6 +33,56 @@ class DummyAsyncClient:
     async def post(self, url, headers, json):
         DummyAsyncClient.last_request = {"url": url, "headers": headers, "json": json}
         return DummyResponse({"ok": True})
+
+
+class DummyRefreshClient:
+    requests = []
+
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return None
+
+    async def get(self, url):
+        return DummyHttpxResponse({}, url="https://opencode.ai/")
+
+    async def post(self, url, headers, json):
+        self.requests.append({"url": url, "headers": headers, "json": json})
+        server_id = headers["X-Server-Id"]
+        if server_id == "a" * 64:
+            return DummyHttpxResponse({"data": {"workspaces": [{"id": "ws_dynamic", "name": "Main"}]}})
+        if server_id == "b" * 64:
+            return DummyHttpxResponse(
+                {
+                    "data": {
+                        "rollingUsage": {"usagePercent": 12, "resetInSec": 60},
+                        "weeklyUsage": {"usagePercent": 23, "resetInSec": 120},
+                        "monthlyUsage": {"usagePercent": 34, "resetInSec": 180},
+                    }
+                }
+            )
+        if server_id == "c" * 64:
+            return DummyHttpxResponse({"data": [{"key": "sk-dynamic-secret"}]})
+        return DummyHttpxResponse({"message": "bad server id"}, headers={"X-Error": "1"})
+
+
+class DummyHttpxResponse:
+    def __init__(self, payload, headers=None, url="https://opencode.ai/_server"):
+        self.payload = payload
+        self.headers = {"content-type": "application/json", **(headers or {})}
+        self.text = "{}"
+        self.url = url
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self.payload
 
 
 def login(client: TestClient) -> None:
@@ -98,10 +149,11 @@ async def test_opencode_server_reference_request_headers():
     result = await query_opencode_server_reference(client, LITE_SUBSCRIPTION_GET_REFERENCE_ID, ["ws_1"], instance="server-fn:test")
 
     assert result == {"ok": True}
-    assert DummyAsyncClient.last_request["url"] == "https://opencode.ai/_server"
+    assert DummyAsyncClient.last_request["url"] == f"https://opencode.ai/_server?id={LITE_SUBSCRIPTION_GET_REFERENCE_ID}"
     assert DummyAsyncClient.last_request["headers"]["X-Server-Id"] == LITE_SUBSCRIPTION_GET_REFERENCE_ID
     assert DummyAsyncClient.last_request["headers"]["X-Server-Instance"] == "server-fn:test"
-    assert DummyAsyncClient.last_request["json"] == ["ws_1"]
+    assert DummyAsyncClient.last_request["json"]["t"]["a"][0]["s"] == "ws_1"
+    assert DummyAsyncClient.last_request["json"]["f"] == 31
 
 
 def test_normalize_usage_result_maps_go_windows_and_keys():
@@ -145,6 +197,39 @@ def test_normalize_usage_result_allows_missing_key():
 
     assert result["api_key"] is None
     assert result["api_key_masked"] is None
+
+
+@pytest.mark.asyncio
+async def test_refresh_uses_imported_server_ids(tmp_path, monkeypatch):
+    DummyRefreshClient.requests = []
+    monkeypatch.setattr("app.services.opencode_go.httpx.AsyncClient", DummyRefreshClient)
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+
+    account_id = db.upsert_opencode_go_account(
+        {"name": "go-main", "email": "user@example.com", "password": "secret-password"}
+    )
+    db.update_opencode_go_session(
+        account_id,
+        {
+            "cookies": [{"name": "session", "value": "cookie", "domain": ".opencode.ai"}],
+            "origins": [],
+            "serverIds": {
+                "session.get": "a" * 64,
+                "lite.subscription.get": "b" * 64,
+                "key.list": "c" * 64,
+            },
+        },
+    )
+
+    result = await refresh_opencode_go_account(db.get_opencode_go_account(account_id), "test-key", 10)
+
+    assert result["is_valid"] is True
+    assert result["workspace_id"] == "ws_dynamic"
+    assert result["rolling_usage"]["usage_percent"] == 12
+    assert result["api_key"] == "sk-dynamic-secret"
+    assert [request["headers"]["X-Server-Id"] for request in DummyRefreshClient.requests] == ["a" * 64, "b" * 64, "c" * 64]
+    assert DummyRefreshClient.requests[1]["json"]["t"]["a"][0]["s"] == "ws_dynamic"
 
 
 def test_opencode_go_api_requires_login(tmp_path, monkeypatch):
@@ -307,3 +392,35 @@ def test_opencode_go_import_session_accepts_cookie_header(tmp_path, monkeypatch)
     account = db.get_opencode_go_account(account_id)
     assert account["workspace_id"] == "ws_cookie"
     assert "browser-cookie" in decrypt_value(account["storage_state_enc"], "test-key")
+
+
+def test_opencode_go_import_session_accepts_wrapped_server_ids(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+
+    with TestClient(app) as client:
+        login(client)
+        created = client.post(
+            "/api/opencode-go/accounts",
+            json={"name": "go-main", "email": "user@example.com", "password": "secret-password"},
+        )
+        account_id = created.json()["id"]
+        response = client.post(
+            f"/api/opencode-go/accounts/{account_id}/session",
+            json={
+                "storage_state": {
+                    "storage_state": {
+                        "cookies": [{"name": "session", "value": "manual-cookie", "domain": ".opencode.ai"}],
+                        "origins": [],
+                    },
+                    "serverIds": {"lite.subscription.get": "b" * 64},
+                    "workspace_id": "ws_wrapped",
+                }
+            },
+        )
+
+    assert response.status_code == 200
+    account = db.get_opencode_go_account(account_id)
+    saved_state = decrypt_value(account["storage_state_enc"], "test-key")
+    assert account["workspace_id"] == "ws_wrapped"
+    assert "manual-cookie" in saved_state
+    assert "serverIds" in saved_state

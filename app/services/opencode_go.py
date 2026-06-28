@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Callable, Optional
 
 import httpx
@@ -18,6 +19,21 @@ KEY_LIST_REFERENCE_IDS = (
     "def2ab20a296ef06465b1c3cf86da4ea983c0696e7a5708b9468aaed85083d6b",
     "c22cd964237ba79f2f9b95faa2a14b804f870d1bab49279463379cc6a0fd0c85",
 )
+SERVER_REFERENCE_ALIASES = {
+    "session.get": ("session.get", "session", "sessionGet", "session_get", "querySessionInfo", "querySessionInfo_query"),
+    "lite.subscription.get": (
+        "lite.subscription.get",
+        "subscription",
+        "usage",
+        "goUsage",
+        "liteSubscription",
+        "lite_subscription",
+        "queryLiteSubscription",
+        "queryLiteSubscription_query",
+    ),
+    "key.list": ("key.list", "keys", "keyList", "key_list", "listKeys", "listKeys_query"),
+}
+SERVER_REFERENCE_ID_RE = re.compile(r"[0-9a-f]{64}", re.IGNORECASE)
 QUERY_TIMEOUT_MS = 45_000
 DEFAULT_BROWSER_HEADERS = {
     "Accept": "application/json, text/plain, */*",
@@ -52,14 +68,14 @@ async def query_opencode_server_reference(
     instance: str = "server-fn:0",
 ) -> Any:
     response = await client.post(
-        f"{OPENCODE_BASE_URL}/_server",
+        f"{OPENCODE_BASE_URL}/_server?id={reference_id}",
         headers={
             **DEFAULT_BROWSER_HEADERS,
             "Content-Type": "application/json",
             "X-Server-Id": reference_id,
             "X-Server-Instance": instance,
         },
-        json=args,
+        json=_serialize_server_args(args),
     )
     response.raise_for_status()
     if response.headers.get("X-Error"):
@@ -125,30 +141,52 @@ async def _run_http_refresh(
 ) -> dict[str, Any]:
     timeout = max(10.0, min(QUERY_TIMEOUT_MS, float(timeout or QUERY_TIMEOUT_MS)))
     cookies = _cookies_from_storage_state(storage_state)
+    server_ids = _server_ids_from_storage_state(storage_state)
     async with httpx.AsyncClient(cookies=cookies, headers=DEFAULT_BROWSER_HEADERS, follow_redirects=True, timeout=timeout) as client:
         response = await client.get(OPENCODE_BASE_URL)
         response.raise_for_status()
         if "auth.opencode.ai" in str(response.url) or "/auth" in str(response.url):
             raise RuntimeError("OpenCode 登录态已失效，请重新导入")
-        session = await query_opencode_server_reference(client, SESSION_GET_REFERENCE_ID, [])
+        session = await _query_first_server_reference(
+            client,
+            _server_reference_ids(server_ids, "session.get", [SESSION_GET_REFERENCE_ID]),
+            [],
+            "session.get",
+        )
         workspace_id = workspace_id or _workspace_id_from_session(session)
         if not workspace_id:
             raise RuntimeError("未能识别 OpenCode workspace，请确认账号已登录并已创建 workspace")
-        subscription = await query_opencode_server_reference(client, LITE_SUBSCRIPTION_GET_REFERENCE_ID, [workspace_id])
-        keys_payload = None
-        key_errors = []
-        for reference_id in KEY_LIST_REFERENCE_IDS:
-            try:
-                keys_payload = await query_opencode_server_reference(client, reference_id, [workspace_id])
-                break
-            except Exception as exc:
-                key_errors.append(str(exc))
-        if keys_payload is None:
-            raise RuntimeError("OpenCode key.list 接口不可用，OpenCode 前端接口可能已更新: " + "; ".join(key_errors))
+        subscription = await _query_first_server_reference(
+            client,
+            _server_reference_ids(server_ids, "lite.subscription.get", [LITE_SUBSCRIPTION_GET_REFERENCE_ID]),
+            [workspace_id],
+            "lite.subscription.get",
+        )
+        keys_payload = await _query_first_server_reference(
+            client,
+            _server_reference_ids(server_ids, "key.list", KEY_LIST_REFERENCE_IDS),
+            [workspace_id],
+            "key.list",
+        )
         result = normalize_usage_result(subscription, keys_payload, workspace_id, session)
         result["storage_state"] = storage_state
         _log(log, "info", "opencode-go", f"OpenCode Go 刷新成功: workspace={workspace_id}")
         return result
+
+
+async def _query_first_server_reference(
+    client: httpx.AsyncClient,
+    reference_ids: list[str],
+    args: list[Any],
+    label: str,
+) -> Any:
+    errors = []
+    for reference_id in reference_ids:
+        try:
+            return await query_opencode_server_reference(client, reference_id, args)
+        except Exception as exc:
+            errors.append(f"{reference_id[:8]}: {exc}")
+    raise RuntimeError(f"OpenCode {label} 接口不可用，OpenCode 前端接口可能已更新或 server id 无效: " + "; ".join(errors))
 
 
 def _cookies_from_storage_state(storage_state: Any) -> httpx.Cookies:
@@ -169,6 +207,95 @@ def _cookies_from_storage_state(storage_state: Any) -> httpx.Cookies:
         path = str(item.get("path") or "/").strip() or "/"
         cookies.set(name, value, domain=domain, path=path)
     return cookies
+
+
+def _server_ids_from_storage_state(storage_state: Any) -> dict[str, list[str]]:
+    if not isinstance(storage_state, dict):
+        return {}
+    server_ids: dict[str, list[str]] = {}
+    containers = []
+    for key in ("serverIds", "server_ids", "serverReferences", "server_references"):
+        value = storage_state.get(key)
+        if isinstance(value, dict):
+            containers.append(value)
+    for container in containers:
+        for label, aliases in SERVER_REFERENCE_ALIASES.items():
+            for alias in aliases:
+                _append_server_reference_ids(server_ids.setdefault(label, []), container.get(alias))
+    for label, aliases in SERVER_REFERENCE_ALIASES.items():
+        for alias in aliases:
+            _append_server_reference_ids(server_ids.setdefault(label, []), storage_state.get(alias))
+    for key in ("serverId", "serverID", "server_id"):
+        _append_server_reference_ids(server_ids.setdefault("lite.subscription.get", []), storage_state.get(key))
+    return {key: value for key, value in server_ids.items() if value}
+
+
+def _server_reference_ids(server_ids: dict[str, list[str]], label: str, defaults: tuple[str, ...] | list[str]) -> list[str]:
+    values: list[str] = []
+    for value in server_ids.get(label, []):
+        _append_server_reference_ids(values, value)
+    for value in defaults:
+        _append_server_reference_ids(values, value)
+    return values
+
+
+def _append_server_reference_ids(target: list[str], value: Any) -> None:
+    if value is None:
+        return
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            _append_server_reference_ids(target, item)
+        return
+    if isinstance(value, dict):
+        for key in ("id", "serverId", "serverID", "server_id", "value"):
+            _append_server_reference_ids(target, value.get(key))
+        return
+    match = SERVER_REFERENCE_ID_RE.search(str(value))
+    if not match:
+        return
+    reference_id = match.group(0)
+    if reference_id not in target:
+        target.append(reference_id)
+
+
+def _serialize_server_args(args: list[Any]) -> dict[str, Any]:
+    return {
+        "t": {
+            "t": 9,
+            "i": 0,
+            "l": len(args),
+            "a": [_serialize_server_value(item) for item in args],
+            "o": 0,
+        },
+        "f": 31,
+        "m": [],
+    }
+
+
+def _serialize_server_value(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {"t": 8}
+    if isinstance(value, bool):
+        return {"t": 0, "s": value}
+    if isinstance(value, (int, float)):
+        return {"t": 0, "s": value}
+    if isinstance(value, str):
+        return {"t": 1, "s": value}
+    if isinstance(value, list):
+        return {"t": 9, "i": 0, "l": len(value), "a": [_serialize_server_value(item) for item in value], "o": 0}
+    if isinstance(value, dict):
+        keys = list(value.keys())
+        return {
+            "t": 10,
+            "i": 1,
+            "p": {
+                "k": [str(key) for key in keys],
+                "v": [_serialize_server_value(value[key]) for key in keys],
+                "s": 1,
+            },
+            "o": 0,
+        }
+    return {"t": 1, "s": str(value)}
 
 
 def _workspace_id_from_session(payload: Any) -> Optional[str]:
