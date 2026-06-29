@@ -620,6 +620,46 @@ def test_opencode_go_settings_rejects_non_opencode_js_url(tmp_path, monkeypatch)
     assert "opencode.ai" in response.json()["message"]
 
 
+def test_opencode_go_query_all_skips_disabled_accounts(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    calls = []
+
+    async def fake_refresh(
+        account,
+        secret_key,
+        timeout,
+        log=None,
+        lite_subscription_js_url=None,
+        lite_subscription_server_id=None,
+        key_list_js_url=None,
+        key_list_server_id=None,
+    ):
+        calls.append(account["name"])
+        return {
+            "is_valid": True,
+            "workspace_id": "ws_1",
+            "rolling_usage": {"usagePercent": 11, "resetInSec": 60},
+            "weekly_usage": {"usagePercent": 22, "resetInSec": 120},
+            "monthly_usage": {"usagePercent": 33, "resetInSec": 180},
+        }
+
+    monkeypatch.setattr("app.services.scheduler.refresh_opencode_go_account", fake_refresh)
+    enabled_id = db.upsert_opencode_go_account({"name": "enabled", "email": "enabled@example.com", "is_enabled": True})
+    disabled_id = db.upsert_opencode_go_account({"name": "disabled", "email": "disabled@example.com", "is_enabled": False})
+
+    with TestClient(app) as client:
+        login(client)
+        all_response = client.post("/api/opencode-go/query-all")
+        manual_response = client.post(f"/api/opencode-go/accounts/{disabled_id}/refresh")
+
+    assert all_response.status_code == 200
+    assert [result["account_id"] for result in all_response.json()["results"]] == [enabled_id]
+    assert calls == ["enabled", "disabled"]
+    assert manual_response.status_code == 200
+    assert db.list_opencode_go_history(enabled_id)
+    assert db.list_opencode_go_history(disabled_id)
+
+
 def test_opencode_go_bulk_import_uses_email_as_name_and_masks_password(tmp_path, monkeypatch):
     db = setup_test_db(tmp_path, monkeypatch)
 

@@ -289,11 +289,21 @@ async def query_all_accounts(db: Database) -> list[dict]:
     return results
 
 
-async def query_opencode_go_for_account(db: Database, account_id: int) -> dict:
+async def query_opencode_go_for_account(db: Database, account_id: int, *, respect_enabled: bool = False) -> dict:
     account = db.get_opencode_go_account(account_id)
     if not account:
         db.add_log("error", "opencode-go", f"OpenCode Go 查询失败，账号不存在: {account_id}")
         return {"is_valid": False, "invalid_message": "OpenCode Go 账号不存在"}
+    if respect_enabled and not account["is_enabled"]:
+        db.add_log("info", "opencode-go", f"{account['name']} OpenCode Go 自动刷新已关闭，跳过")
+        return {
+            "is_valid": True,
+            "skipped": True,
+            "skip_reason": "auto_refresh_disabled",
+            "account_id": account_id,
+            "accountId": account_id,
+            "checked_at": utc_now(),
+        }
     settings = db.get_general_settings()
     lite_subscription_js_url = db.get_setting("opencode_go_lite_subscription_js_url", "")
     lite_subscription_server_id = db.get_setting("opencode_go_lite_subscription_server_id", "")
@@ -323,7 +333,9 @@ async def query_opencode_go_for_account(db: Database, account_id: int) -> dict:
 async def query_all_opencode_go_accounts(db: Database) -> list[dict]:
     results = []
     for account in db.list_opencode_go_accounts(enabled_only=True):
-        results.append(await query_opencode_go_for_account(db, account["id"]))
+        result = await query_opencode_go_for_account(db, account["id"], respect_enabled=True)
+        if not result.get("skipped"):
+            results.append(result)
     return results
 
 
