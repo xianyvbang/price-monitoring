@@ -1366,12 +1366,17 @@ async def api_opencode_go_accounts(request: Request):
 @app.get("/api/opencode-go/settings")
 async def api_opencode_go_settings(request: Request):
     require_user(request)
+    general_settings = db.get_general_settings()
     js_url = db.get_setting(OPENCODE_GO_LITE_JS_URL_SETTING, "")
     server_id = db.get_setting(OPENCODE_GO_LITE_SERVER_ID_SETTING, "")
     key_js_url = db.get_setting(OPENCODE_GO_KEY_LIST_JS_URL_SETTING, KEY_LIST_DEFAULT_JS_URL)
     key_server_id = db.get_setting(OPENCODE_GO_KEY_LIST_SERVER_ID_SETTING, "")
     return {
         "settings": {
+            "query_interval": general_settings["query_interval"],
+            "queryInterval": general_settings["query_interval"],
+            "monitor_paused": general_settings["monitor_paused"],
+            "monitorPaused": general_settings["monitor_paused"],
             "lite_subscription_js_url": js_url,
             "liteSubscriptionJsUrl": js_url,
             "lite_subscription_server_id": server_id,
@@ -1420,10 +1425,15 @@ async def api_save_opencode_go_settings(request: Request):
     db.set_setting(OPENCODE_GO_KEY_LIST_JS_URL_SETTING, key_js_url)
     db.set_setting(OPENCODE_GO_KEY_LIST_SERVER_ID_SETTING, key_server_id)
     scheduler.notify_settings_changed()
+    general_settings = db.get_general_settings()
     db.add_log("info", "opencode-go", "API 更新 OpenCode Go 用量和 API key JS 文件配置")
     return {
         "ok": True,
         "settings": {
+            "query_interval": general_settings["query_interval"],
+            "queryInterval": general_settings["query_interval"],
+            "monitor_paused": general_settings["monitor_paused"],
+            "monitorPaused": general_settings["monitor_paused"],
             "lite_subscription_js_url": js_url,
             "liteSubscriptionJsUrl": js_url,
             "lite_subscription_server_id": server_id,

@@ -564,6 +564,7 @@ def test_opencode_go_api_crud_and_masks_secrets(tmp_path, monkeypatch):
 
 def test_opencode_go_settings_save_js_url(tmp_path, monkeypatch):
     db = setup_test_db(tmp_path, monkeypatch)
+    db.update_general_settings(10, 900, 5, 60, monitor_paused=True)
 
     async def fake_fetch_js_server_id(js_url, timeout=15.0):
         return "d" * 64
@@ -590,10 +591,18 @@ def test_opencode_go_settings_save_js_url(tmp_path, monkeypatch):
     assert saved.json()["settings"]["lite_subscription_server_id"] == "d" * 64
     assert saved.json()["settings"]["key_list_js_url"] == "https://opencode.ai/_build/assets/index-PbCOrg8_.js"
     assert saved.json()["settings"]["key_list_server_id"] == "e" * 64
+    assert saved.json()["settings"]["query_interval"] == 900
+    assert saved.json()["settings"]["queryInterval"] == 900
+    assert saved.json()["settings"]["monitor_paused"] is True
+    assert saved.json()["settings"]["monitorPaused"] is True
     assert loaded.json()["settings"]["lite_subscription_js_url"] == "https://opencode.ai/_build/assets/index-DtPYjwk4.js"
     assert loaded.json()["settings"]["lite_subscription_server_id"] == "d" * 64
     assert loaded.json()["settings"]["key_list_js_url"] == "https://opencode.ai/_build/assets/index-PbCOrg8_.js"
     assert loaded.json()["settings"]["key_list_server_id"] == "e" * 64
+    assert loaded.json()["settings"]["query_interval"] == 900
+    assert loaded.json()["settings"]["queryInterval"] == 900
+    assert loaded.json()["settings"]["monitor_paused"] is True
+    assert loaded.json()["settings"]["monitorPaused"] is True
     assert db.get_setting("opencode_go_lite_subscription_js_url") == "https://opencode.ai/_build/assets/index-DtPYjwk4.js"
     assert db.get_setting("opencode_go_lite_subscription_server_id") == "d" * 64
     assert db.get_setting("opencode_go_key_list_js_url") == "https://opencode.ai/_build/assets/index-PbCOrg8_.js"
