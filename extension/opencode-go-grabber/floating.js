@@ -1,0 +1,174 @@
+// floating.js — 注入到 https://opencode.ai/workspace/*
+// 在页面右侧显示一个悬浮按钮 + 面板：自动抓取 workspace/cookie/api_key，并可一键推送到 app。
+// 用 Shadow DOM 隔离样式。推送复用 background 的 push 处理器（含 401 兜底登录）。
+
+(() => {
+  "use strict";
+
+  // 避免重复注入
+  if (window.__opencodeGoGrabberFloating) return;
+  window.__opencodeGoGrabberFloating = true;
+
+  const MASK = (v) => {
+    if (!v) return "";
+    if (v.length <= 8) return v.slice(0, 2) + "***";
+    return v.slice(0, 4) + "…" + v.slice(-4);
+  };
+
+  // ---- UI 构建 ----
+  const host = document.createElement("div");
+  host.id = "opencode-go-grabber-floating";
+  host.style.cssText = "all:initial;position:fixed;top:120px;right:0;z-index:2147483647;";
+  const root = host.attachShadow({ mode: "open" });
+  root.innerHTML = `
+    <style>
+      :host, * { box-sizing: border-box; font-family: system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; }
+      .fab {
+        position: absolute; right: 0; top: 0;
+        width: 44px; height: 44px; border-radius: 8px 0 0 8px;
+        background: #2563eb; color: #fff; border: none; cursor: pointer;
+        font-size: 20px; line-height: 1; box-shadow: 0 2px 8px rgba(0,0,0,.25);
+        display: flex; align-items: center; justify-content: center;
+      }
+      .fab:hover { background: #1d4ed8; }
+      .panel {
+        position: absolute; right: 52px; top: 0; width: 320px;
+        background: #fff; border: 1px solid #ddd; border-radius: 8px;
+        box-shadow: 0 4px 16px rgba(0,0,0,.2); padding: 12px;
+        color: #222; font-size: 13px; display: none;
+      }
+      .panel.open { display: block; }
+      h1 { font-size: 14px; margin: 0 0 8px; }
+      .row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+      .row > label { width: 70px; color: #555; font-weight: 600; flex-shrink: 0; }
+      .row > .val { flex: 1; font-family: ui-monospace, Consolas, monospace; color: #111; word-break: break-all; }
+      .ok { color: #16a34a; }
+      .bad { color: #dc2626; }
+      textarea {
+        width: 100%; padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px;
+        font-size: 12px; font-family: ui-monospace, Consolas, monospace; resize: vertical;
+        margin-top: 4px;
+      }
+      button.push {
+        width: 100%; padding: 8px; margin-top: 10px; font-size: 13px;
+        border: none; background: #2563eb; color: #fff; border-radius: 4px; cursor: pointer;
+      }
+      button.push:hover { background: #1d4ed8; }
+      button.push:disabled { background: #93a3ef; cursor: not-allowed; }
+      button.small { padding: 3px 8px; font-size: 11px; border: 1px solid #ccc; background: #fff; border-radius: 3px; cursor: pointer; }
+      #status { margin-top: 6px; min-height: 16px; font-size: 12px; }
+      .muted { color: #888; font-size: 11px; margin-top: 4px; }
+      .chk { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
+    </style>
+    <button class="fab" id="fab" title="OpenCode Go Grabber">G</button>
+    <div class="panel" id="panel">
+      <h1>OpenCode Go Grabber</h1>
+      <div class="row"><label>Workspace</label><span class="val" id="workspaceId">读取中…</span></div>
+      <div class="row"><label>Cookie</label><span class="val" id="cookieState">读取中…</span></div>
+      <div class="row"><label>API Key</label><span class="val" id="apiKey">—</span><button class="small" id="copyKey">复制</button></div>
+      <div class="muted">账号信息（邮箱|密码|恢复邮箱，恢复邮箱可空）</div>
+      <textarea id="accountLine" rows="2" placeholder="谷歌邮箱|谷歌密码|恢复邮箱"></textarea>
+      <div class="chk"><input type="checkbox" id="enabled" /><label for="enabled">启用自动刷新</label></div>
+      <button class="push" id="push">推送到 App</button>
+      <div id="status"></div>
+    </div>
+  `;
+  document.documentElement.appendChild(host);
+
+  const $ = (id) => root.getElementById(id);
+
+  function setStatus(text, kind) {
+    const s = $("status");
+    s.textContent = text || "";
+    s.className = kind || "";
+  }
+
+  // ---- toggle ----
+  $("fab").addEventListener("click", () => $("panel").classList.toggle("open"));
+  // 点面板外关闭
+  document.addEventListener("click", (e) => {
+    if (!host.contains(e.target)) $("panel").classList.remove("open");
+  }, true);
+
+  // ---- 取值 ----
+  function bg(msg) {
+    return new Promise((resolve) => chrome.runtime.sendMessage(msg, (r) => resolve(r || {})));
+  }
+
+  async function refresh() {
+    // workspace: 优先 content.js 写的 storage，兜底问 background
+    let workspaceId = "";
+    try {
+      const sess = await chrome.storage.session.get(["capture"]);
+      workspaceId = (sess.capture && sess.capture.workspaceId) || "";
+    } catch {}
+    $("workspaceId").textContent = workspaceId || "（未识别，稍候自动更新）";
+
+    // cookie / api_key 从 background 快照
+    const snap = await bg({ type: "get-snapshot" });
+    const cs = $("cookieState");
+    if (snap.hasAuth) {
+      cs.textContent = "已捕获（含 auth）";
+      cs.className = "val ok";
+    } else {
+      cs.textContent = "缺少 auth，请先登录";
+      cs.className = "val bad";
+    }
+    const key = snap.capture && snap.capture.apiKey;
+    $("apiKey").textContent = key ? MASK(key) : "尚未抓到";
+    $("apiKey").dataset.raw = key || "";
+    return { workspaceId, cookieHeader: snap.cookieHeader || "" };
+  }
+
+  // storage 变化时（content.js 抓到新 workspace/key）自动刷新
+  chrome.storage.session.onChanged.addListener((changes) => {
+    if (changes.capture || changes.opencodeCookie) refresh();
+  });
+  // 首次 + 定期兜底刷新（cookie 由 background webRequest 更新，未必触发 storage.onChanged）
+  refresh();
+  setInterval(refresh, 3000);
+
+  // ---- 复制 api key ----
+  $("copyKey").addEventListener("click", async () => {
+    const raw = $("apiKey").dataset.raw;
+    if (!raw) return;
+    await navigator.clipboard.writeText(raw);
+    setStatus("API key 已复制", "ok");
+  });
+
+  // 解析「邮箱|密码|恢复邮箱」（恢复邮箱可空）。分隔符支持 | 或制表符。
+  function parseAccountLine(line) {
+    const raw = String(line || "").trim();
+    if (!raw) return { email: "", password: "", recoveryEmail: "" };
+    const segs = raw.split(/[|\t]/).map((s) => s.trim());
+    return { email: segs[0] || "", password: segs[1] || "", recoveryEmail: segs[2] || "" };
+  }
+
+  // ---- 推送 ----
+  $("push").addEventListener("click", async () => {
+    const acct = parseAccountLine($("accountLine").value);
+    const { workspaceId, cookieHeader } = await refresh();
+    const payload = {
+      email: acct.email,
+      password: acct.password,
+      recoveryEmail: acct.recoveryEmail,
+      workspaceId: workspaceId || "",
+      cookieHeader,
+      enabled: $("enabled").checked,
+    };
+    if (!payload.email || !payload.password) {
+      setStatus("请按 邮箱|密码|恢复邮箱 粘贴", "bad");
+      return;
+    }
+    setStatus("推送中…");
+    $("push").disabled = true;
+    const r = await bg({ type: "push", payload });
+    $("push").disabled = false;
+    if (r.ok) {
+      const masked = r.maskedKey || (r.account && (r.account.api_key_masked || r.account.apiKeyMasked)) || "";
+      setStatus(`成功，账号 ID=${r.accountId}${masked ? "，key：" + masked : ""}`, "ok");
+    } else {
+      setStatus(r.message || "推送失败", "bad");
+    }
+  });
+})();

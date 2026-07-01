@@ -29,6 +29,12 @@
       "all_frames": false
     },
     {
+      "matches": ["https://opencode.ai/workspace/*"],
+      "js": ["floating.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    },
+    {
       "matches": ["__APP_ORIGIN_MATCH__"],
       "js": ["app_bridge.js"],
       "run_at": "document_start",
