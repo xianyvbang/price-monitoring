@@ -9,9 +9,13 @@
       label { display: block; margin: 12px 0 4px; font-size: 13px; font-weight: 600; }
       input { width: 100%; padding: 7px 9px; font-size: 13px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
       .hint { color: #888; font-size: 12px; margin-top: 4px; }
-      button { margin-top: 18px; padding: 8px 18px; font-size: 13px; border: none; background: #2563eb; color: #fff; border-radius: 4px; cursor: pointer; }
+      .row { display: flex; gap: 8px; margin-top: 18px; }
+      button { padding: 8px 18px; font-size: 13px; border: none; background: #2563eb; color: #fff; border-radius: 4px; cursor: pointer; }
       button:hover { background: #1d4ed8; }
+      button.secondary { background: #6b7280; }
+      button.secondary:hover { background: #4b5563; }
       #status { margin-top: 12px; font-size: 13px; color: #16a34a; min-height: 18px; }
+      #status.err { color: #dc2626; }
     </style>
   </head>
   <body>
@@ -34,6 +38,16 @@
 
     <button id="save">保存</button>
     <div id="status"></div>
+
+    <div class="row">
+      <button id="export" class="secondary">导出配置</button>
+      <button id="import-btn" class="secondary">导入配置…</button>
+      <input id="import-file" type="file" accept="application/json,.json" hidden />
+    </div>
+    <div class="hint" style="margin-top:10px">
+      导出当前 4 项配置为 JSON 文件（含明文管理员密码，请妥善保管）。
+      无痕模式下打开此选项页，点「导入配置…」选择文件可一键回填，再点上方「保存」。
+    </div>
 
     <script src="options.js"></script>
   </body>
