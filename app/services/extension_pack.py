@@ -60,7 +60,7 @@ def build_extension_zip(base_url: str) -> tuple[bytes, str]:
                 text = data.decode("utf-8")
                 text = text.replace(BASE_URL_PLACEHOLDER, base_url_clean)
                 data = text.encode("utf-8")
-            zf.writestr(f"opencode-go-grabber/{rel}", data)
+            zf.writestr(rel, data)
     return buf.getvalue(), "opencode-go-grabber.zip"
 
 
