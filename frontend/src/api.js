@@ -52,6 +52,7 @@ export const api = {
   balanceHistory: (id) => request(`/api/accounts/${id}/balance-history`),
   clearBalanceHistory: (id) => request(`/api/accounts/${id}/balance-history`, { method: "DELETE" }),
   setGroupRateChange: (id, payload) => request(`/api/accounts/${id}/group-rate-change-status`, { method: "POST", body: JSON.stringify(payload) }),
+  resetGroupRateChanges: (params = {}) => request(`/api/group-rate-change-status/bulk-reset${queryString(params)}`, { method: "POST" }),
   settings: () => request("/api/settings"),
   saveGeneralSettings: (payload) => request("/api/settings/general", { method: "POST", body: JSON.stringify(payload) }),
   saveSub2ApiSettings: (payload) => request("/api/settings/sub2api", { method: "POST", body: JSON.stringify(payload) }),

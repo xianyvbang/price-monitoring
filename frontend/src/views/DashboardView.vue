@@ -19,7 +19,17 @@ const filter = reactive({
   platform: String(route.query.platform || ""),
   low_balance: String(route.query.low_balance || route.query.lowBalance || "")
 });
+function dashboardFilterParams(source) {
+  return {
+    name: String(source?.name || ""),
+    platform: String(source?.platform || ""),
+    low_balance: String(source?.low_balance || source?.lowBalance || "")
+  };
+}
+
+const appliedFilter = ref(dashboardFilterParams(filter));
 const queryAllLoading = ref(false);
+const resetGroupRateChangesLoading = ref(false);
 const refreshRemaining = ref(300);
 const timer = ref(null);
 const groupPicker = ref(null);
@@ -57,6 +67,12 @@ const columnDefs = [
 
 const platformEntries = computed(() => Object.entries(grouped.value).filter(([, rows]) => Array.isArray(rows)));
 const monitorPaused = computed(() => boolValue(settings.value.monitor_paused));
+const groupRateChangedRows = computed(() =>
+  Object.values(grouped.value)
+    .flatMap((rows) => (Array.isArray(rows) ? rows : []))
+    .filter((row) => (row.platform === "newApi" || row.platform === "sub2Api") && boolValue(row.last_group_rate_changed))
+);
+const groupRateChangedCount = computed(() => groupRateChangedRows.value.length);
 const columnConfig = reactive(loadColumnConfig());
 
 function columnDefsForPlatform(platform) {
@@ -147,6 +163,7 @@ async function loadDashboard() {
     grouped.value = payload.grouped || {};
     settings.value = payload.settings || settings.value;
     summaries.value = payload.consumption_summaries || [];
+    appliedFilter.value = dashboardFilterParams(payload.account_filter || payload.accountFilter || filter);
     refreshRemaining.value = Math.max(300, Number(settings.value.query_interval || 300));
   } catch (error) {
     if (error.status === 401) {
@@ -387,6 +404,28 @@ async function resetGroupRate(row) {
     ElMessage.success("倍率变化状态已重置");
   } catch (error) {
     ElMessage.error(error.message || "重置失败");
+  }
+}
+
+async function resetGroupRateChanges() {
+  if (!groupRateChangedCount.value || resetGroupRateChangesLoading.value) {
+    return;
+  }
+  try {
+    await ElMessageBox.confirm(`确定重置当前筛选结果中的 ${groupRateChangedCount.value} 条倍率变化吗？`, "批量重置倍率变化", { type: "warning" });
+  } catch {
+    return;
+  }
+  resetGroupRateChangesLoading.value = true;
+  try {
+    const payload = await api.resetGroupRateChanges(appliedFilter.value);
+    await loadDashboard();
+    const count = payload.reset_count ?? payload.resetCount ?? payload.count ?? 0;
+    ElMessage.success(`已重置 ${count} 条倍率变化`);
+  } catch (error) {
+    ElMessage.error(error.message || "批量重置失败");
+  } finally {
+    resetGroupRateChangesLoading.value = false;
   }
 }
 
@@ -676,6 +715,10 @@ onBeforeUnmount(() => {
         </p>
       </div>
       <div class="page-actions">
+        <el-button :icon="Refresh" :loading="resetGroupRateChangesLoading" :disabled="!groupRateChangedCount" @click="resetGroupRateChanges">
+          批量重置倍率变化
+          <template v-if="groupRateChangedCount">({{ groupRateChangedCount }})</template>
+        </el-button>
         <el-button type="primary" :icon="Refresh" :loading="queryAllLoading" @click="runQueryAll('manual')">立即查询全部</el-button>
         <el-button :type="monitorPaused ? 'warning' : 'default'" :icon="monitorPaused ? VideoPlay : VideoPause" @click="toggleMonitor">
           {{ monitorPaused ? "恢复监控" : "暂停监控" }}

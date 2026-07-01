@@ -1004,6 +1004,64 @@ def test_group_rate_change_status_reset_api(tmp_path, monkeypatch):
     assert first_dashboard_row(dashboard.json())["last_group_rate_changed"] is False
 
 
+def test_bulk_group_rate_change_status_reset_api_respects_dashboard_filter(tmp_path, monkeypatch):
+    test_db = Database(str(tmp_path / "app.db"), config.app_secret_key)
+    test_db.init()
+    test_db.ensure_admin("admin", "password123")
+    matching_account_id = test_db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "match-site",
+            "base_url": "https://match.example",
+            "api_key": "secret",
+        }
+    )
+    other_account_id = test_db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "other-site",
+            "base_url": "https://other.example",
+            "api_key": "secret",
+        }
+    )
+    test_db.replace_account_monitor_groups(
+        matching_account_id,
+        [
+            {"group_id": "basic", "plan_name": "Basic Plan", "effective_rate_multiplier": 0.8},
+            {"group_id": "pro", "plan_name": "Pro Plan", "effective_rate_multiplier": 1.5},
+        ],
+    )
+    test_db.replace_account_monitor_groups(
+        other_account_id,
+        [{"group_id": "other", "plan_name": "Other Plan", "effective_rate_multiplier": 2.0}],
+    )
+    test_db.update_account_group_rate_change_status(matching_account_id, True, group_id="pro")
+    test_db.update_account_group_rate_change_status(other_account_id, True, group_id="other")
+    monkeypatch.setattr("app.main.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
+
+    async def stop_scheduler():
+        return None
+
+    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.post("/api/group-rate-change-status/bulk-reset?name=match")
+        dashboard = client.get("/api/dashboard")
+
+    assert response.status_code == 200
+    assert response.json()["reset_count"] == 1
+    rows = dashboard.json()["grouped"]["sub2Api"]
+    matching_rows = [row for row in rows if row["id"] == matching_account_id]
+    other_row = next(row for row in rows if row["id"] == other_account_id)
+    assert [row["last_group_rate_changed"] for row in matching_rows] == [False, False]
+    assert other_row["last_group_rate_changed"] is True
+    assert test_db.get_account(matching_account_id)["last_group_rate_changed"] == 0
+    assert test_db.get_account(other_account_id)["last_group_rate_changed"] == 1
+
+
 def test_group_rate_history_spa_page_and_api(tmp_path, monkeypatch):
     test_db = Database(str(tmp_path / "app.db"), "test-key")
     test_db.init()

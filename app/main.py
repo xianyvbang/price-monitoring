@@ -1328,6 +1328,29 @@ async def api_dashboard(request: Request):
     }
 
 
+@app.post("/api/group-rate-change-status/bulk-reset")
+async def api_bulk_reset_group_rate_change_status(request: Request):
+    require_user(request)
+    account_filter = account_filter_from_query(request)
+    grouped = dashboard_grouped_accounts(account_filter)
+    changed_rows = [
+        row
+        for rows in grouped.values()
+        for row in rows
+        if row.get("platform") in {"newApi", "sub2Api"} and row.get("last_group_rate_changed")
+    ]
+    for row in changed_rows:
+        db.update_account_group_rate_change_status(
+            int(row["id"]),
+            False,
+            monitor_group_id=_optional_int(row.get("current_monitor_group_id")),
+            group_id=str(row.get("current_group_id") or "").strip() or None,
+        )
+    count = len(changed_rows)
+    db.add_log("info", "account", f"批量重置分组倍率变化状态 {count} 条")
+    return {"ok": True, "count": count, "reset_count": count, "resetCount": count}
+
+
 @app.get("/api/accounts/{account_id}")
 async def api_account_detail(request: Request, account_id: int):
     require_user(request)
