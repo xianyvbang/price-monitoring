@@ -64,6 +64,82 @@
     return json;
   }
 
+  // ---- 文本兜底：对整段响应文本跑正则提取，不依赖 JSON 能否解析 ----
+  // 对齐 app/services/opencode_go.py parse_server_function_key_response 的正则思路
+  // _server 响应常是 RSC/server-fn 流式分块，JSON.parse 可能失败或结构不符，
+  // 直接对文本扫描最稳。
+  const KEY_OBJ_RE = /\{([^{}]*(?:\b(?:key|apiKey|api_key|token)\b)\s*:[^{}]*)\}/g;
+  const FIELD_RE = /([A-Za-z_$][\w$]*|"[^"]+"|'[^']+')\s*:\s*("(?:\\.|[^"])*"|'(?:\\.|[^'])*'|-?\d+(?:\.\d+)?|true|false|null)/g;
+  function stripName(s) {
+    if (!s) return s;
+    if (s[0] === '"' || s[0] === "'") return s.slice(1, -1);
+    return s;
+  }
+  function parseScalar(s) {
+    if (!s) return s;
+    if (s[0] === '"' || s[0] === "'") {
+      try { return JSON.parse(s[0] === "'" ? `"${s.slice(1, -1).replace(/"/g, '\\"')}"` : s); } catch { return s.slice(1, -1); }
+    }
+    if (s === "true") return true;
+    if (s === "false") return false;
+    if (s === "null") return null;
+    return s;
+  }
+  function extractKeyFromText(text) {
+    const t = String(text || "");
+    if (!/apiKey|api_key|\bkey\b|token/.test(t)) return null;
+    const items = [];
+    let m;
+    KEY_OBJ_RE.lastIndex = 0;
+    while ((m = KEY_OBJ_RE.exec(t)) !== null) {
+      const body = m[1];
+      const item = {};
+      FIELD_RE.lastIndex = 0;
+      let fm;
+      while ((fm = FIELD_RE.exec(body)) !== null) {
+        item[stripName(fm[1])] = parseScalar(fm[2].trim());
+      }
+      for (const f of KEY_FIELDS) {
+        const v = item[f];
+        if (typeof v === "string" && v && !isMasked(v)) return v;
+      }
+    }
+    return null;
+  }
+  function extractWorkspaceFromText(text) {
+    const t = String(text || "");
+    const m = t.match(/wrk_[A-Za-z0-9]+/);
+    return m ? m[0] : null;
+  }
+
+  // 统一处理 _server 响应文本：JSON 与文本两条路都走，取到即用
+  function handleServerText(text) {
+    const key = extractKeyFromText(text);
+    const ws = extractWorkspaceFromText(text);
+    // 同时尝试 JSON 路径（结构化解析更准，比如带掩码判断）
+    if (text) {
+      try {
+        const json = JSON.parse(text);
+        const body = unwrapServerBody(json);
+        if (!key) {
+          const k2 = scanForKeys(body);
+          if (k2) {
+            storeCapture({ workspaceId: ws || undefined, apiKey: k2, capturedAt: Date.now() });
+            return;
+          }
+        }
+        const ws2 = scanForWorkspace(body);
+        if (key || ws || ws2) {
+          storeCapture({ workspaceId: ws || ws2 || undefined, apiKey: key || undefined, capturedAt: Date.now() });
+          return;
+        }
+      } catch {}
+    }
+    if (key || ws) {
+      storeCapture({ workspaceId: ws || undefined, apiKey: key || undefined, capturedAt: Date.now() });
+    }
+  }
+
   // 深度遍历，从 _server 响应（session.get 等）里解出 workspace_id
   // 与 app/services/opencode_go.py _workspace_id_from_session 字段/结构保持一致
   const WS_KEYS = ["workspaceID", "workspaceId", "workspace_id", "activeWorkspaceID", "activeWorkspaceId", "currentWorkspaceId"];
@@ -173,14 +249,7 @@
       p.then((resp) => {
         if (!resp.ok) return;
         const cloned = resp.clone();
-        cloned.json().then((json) => {
-          const body = unwrapServerBody(json);
-          const key = scanForKeys(body);
-          const ws = scanForWorkspace(body);
-          if (key || ws) {
-            storeCapture({ workspaceId: ws || undefined, apiKey: key || undefined, capturedAt: Date.now() });
-          }
-        }).catch(() => {});
+        cloned.text().then((text) => handleServerText(text)).catch(() => {});
       }).catch(() => {});
     }
     return p;
@@ -198,18 +267,7 @@
       try {
         if (!this.__grabberUrl || !String(this.__grabberUrl).includes("/_server")) return;
         if (this.status < 200 || this.status >= 300) return;
-        let json;
-        try {
-          json = JSON.parse(this.responseText);
-        } catch {
-          return;
-        }
-        const body = unwrapServerBody(json);
-        const key = scanForKeys(body);
-        const ws = scanForWorkspace(body);
-        if (key || ws) {
-          storeCapture({ workspaceId: ws || undefined, apiKey: key || undefined, capturedAt: Date.now() });
-        }
+        handleServerText(this.responseText);
       } catch {}
     });
     return _send.apply(this, args);
