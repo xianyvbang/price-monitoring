@@ -96,7 +96,7 @@
     e.preventDefault();
     e.stopPropagation();
     bg({ type: "open-options" }).then((r) => {
-      if (!r.ok) setStatus(r.message || "Failed to open options page", "bad");
+      if (!r.ok) setStatus(r.message || "无法打开选项页", "bad");
     });
   });
 
