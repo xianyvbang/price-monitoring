@@ -3,7 +3,6 @@
   "name": "OpenCode Go Grabber",
   "version": "0.1.0",
   "description": "从 opencode.ai 抓取 workspace_id / 登录态 Cookie / API key，并一键推送到本地 python-get-price app 的 OpenCode Go 账号。",
-  "default_locale": "zh_CN",
 
   "permissions": [
     "cookies",
