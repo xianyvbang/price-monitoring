@@ -768,9 +768,6 @@ onBeforeUnmount(() => {
           <el-table-column label="Google 邮箱" min-width="220" fixed>
             <template #default="{ row }"><span class="credentials-text">{{ row.email }}</span></template>
           </el-table-column>
-          <el-table-column label="恢复电子邮件" min-width="220">
-            <template #default="{ row }"><span class="credentials-text">{{ row.recovery_email || row.recoveryEmail || "-" }}</span></template>
-          </el-table-column>
           <el-table-column label="状态" width="105">
             <template #default="{ row }"><el-tag :type="statusType(row)">{{ statusText(row) }}</el-tag></template>
           </el-table-column>
@@ -839,7 +836,6 @@ onBeforeUnmount(() => {
             <div class="mobile-card-title">
               <strong>{{ row.email }}</strong>
               <div class="mobile-card-meta">
-                <span>恢复电子邮件: {{ row.recovery_email || row.recoveryEmail || "-" }}</span>
                 <span>API key: {{ row.api_key_masked || row.apiKeyMasked || "未找到" }}</span>
               </div>
             </div>

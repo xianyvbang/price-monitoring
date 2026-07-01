@@ -38,7 +38,6 @@ async function getStored() {
     sessionCookie: local.sessionCookieName || DEFAULT_SESSION_COOKIE,
     adminUser: local.adminUser || "",
     adminPassword: local.adminPassword || "",
-    recoveryEmail: local.defaultRecoveryEmail || "",
   };
 }
 

@@ -1,4 +1,4 @@
-const KEYS = ["appBase", "sessionCookieName", "adminUser", "adminPassword", "defaultRecoveryEmail"];
+const KEYS = ["appBase", "sessionCookieName", "adminUser", "adminPassword"];
 
 async function load() {
   const data = await chrome.storage.local.get(KEYS);
@@ -6,7 +6,6 @@ async function load() {
   document.getElementById("sessionCookieName").value = data.sessionCookieName || "balance_monitor_session";
   document.getElementById("adminUser").value = data.adminUser || "";
   document.getElementById("adminPassword").value = data.adminPassword || "";
-  document.getElementById("defaultRecoveryEmail").value = data.defaultRecoveryEmail || "";
 }
 
 document.getElementById("save").addEventListener("click", async () => {
