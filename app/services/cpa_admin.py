@@ -6,8 +6,12 @@ from urllib.parse import urlparse
 
 import httpx
 
+from app.security import decrypt_value
+
 OPENCODE_GO_CPA_BASE_URL = "https://opencode.ai/zen/go/v1"
 OPENCODE_GO_CPA_MODELS_URL = f"{OPENCODE_GO_CPA_BASE_URL}/models"
+CPA_AUTHORIZATION_SETTING = "cpa_authorization_enc"
+CPA_SITE_URL_SETTING = "cpa_site_url"
 
 
 class CpaAdminError(RuntimeError):
@@ -48,6 +52,23 @@ class CpaAdminClient:
             "model_count": len(models),
             "modelCount": len(models),
             "updated": updated,
+        }
+
+    async def set_openai_provider_disabled(self, email: str, disabled: bool) -> dict[str, Any]:
+        email = str(email or "").strip()
+        if not email:
+            raise CpaAdminError("OpenCode Go 账号缺少邮箱")
+        config_payload = await self._request("GET", "/config")
+        providers = _openai_compatibility_providers(config_payload)
+        saved_providers, found, changed = _set_provider_disabled(providers, email, disabled)
+        if not found:
+            raise CpaAdminError("CPA 中未找到邮箱 provider，请先导入 CPA", status_code=404)
+        if changed:
+            await self._request("PUT", "/openai-compatibility", json=saved_providers)
+        return {
+            "name": email,
+            "disabled": disabled,
+            "changed": changed,
         }
 
     async def fetch_opencode_models(self, api_key: str) -> list[str]:
@@ -110,6 +131,14 @@ def normalize_cpa_management_url(value: Any) -> str:
     return f"{text}{suffix}"
 
 
+def cpa_admin_client_from_db(db: Any, timeout_default: float = 60) -> CpaAdminClient:
+    authorization_enc = db.get_setting(CPA_AUTHORIZATION_SETTING, "")
+    authorization = decrypt_value(authorization_enc, db.secret_key) if authorization_enc else ""
+    site_url = db.get_setting(CPA_SITE_URL_SETTING, "")
+    timeout = db.get_general_settings().get("request_timeout", timeout_default)
+    return CpaAdminClient(site_url, authorization, timeout=float(timeout or timeout_default))
+
+
 def _openai_compatibility_providers(payload: Any) -> list[dict[str, Any]]:
     if not isinstance(payload, dict):
         raise CpaAdminError("CPA 配置响应格式不正确", status_code=502)
@@ -147,6 +176,27 @@ def _upsert_provider(providers: list[dict[str, Any]], provider: dict[str, Any]) 
     if not updated:
         saved.append(provider)
     return saved, updated
+
+
+def _set_provider_disabled(providers: list[dict[str, Any]], name: str, disabled: bool) -> tuple[list[dict[str, Any]], bool, bool]:
+    target_name = str(name or "").strip()
+    saved = []
+    found = False
+    changed = False
+    for item in providers:
+        if str(item.get("name") or "").strip() != target_name:
+            saved.append(item)
+            continue
+        found = True
+        current_disabled = bool(item.get("disabled", False))
+        if current_disabled == disabled:
+            saved.append(item)
+            continue
+        next_item = dict(item)
+        next_item["disabled"] = disabled
+        saved.append(next_item)
+        changed = True
+    return saved, found, changed
 
 
 def _normalize_model_ids(payload: Any) -> list[str]:

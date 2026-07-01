@@ -51,8 +51,11 @@ from app.services.opencode_go import (
     validate_opencode_go_lite_js_url,
 )
 from app.services.cpa_admin import (
+    CPA_AUTHORIZATION_SETTING,
+    CPA_SITE_URL_SETTING,
     CpaAdminClient,
     CpaAdminError,
+    cpa_admin_client_from_db,
     normalize_cpa_authorization,
     normalize_cpa_management_url,
 )
@@ -111,8 +114,6 @@ CONSUMPTION_PERIODS = [
 ]
 SUB2API_ADMIN_KEY_SETTING = "sub2api_admin_key_enc"
 SUB2API_SITE_URL_SETTING = "sub2api_site_url"
-CPA_AUTHORIZATION_SETTING = "cpa_authorization_enc"
-CPA_SITE_URL_SETTING = "cpa_site_url"
 
 
 @asynccontextmanager
@@ -527,6 +528,15 @@ def public_opencode_go_account(row: Any, include_api_key: bool = False) -> dict[
     data["lastCheckedAt"] = data.get("last_checked_at")
     data["is_enabled"] = bool(data.get("is_enabled"))
     data["isEnabled"] = data["is_enabled"]
+    cpa_provider_disabled = data.get("cpa_provider_disabled")
+    data["cpa_provider_disabled"] = None if cpa_provider_disabled is None else bool(cpa_provider_disabled)
+    data["cpaProviderDisabled"] = data["cpa_provider_disabled"]
+    data["cpa_reenable_pending"] = bool(data.get("cpa_reenable_pending"))
+    data["cpaReenablePending"] = data["cpa_reenable_pending"]
+    data["cpa_last_action_at"] = data.get("cpa_last_action_at")
+    data["cpaLastActionAt"] = data["cpa_last_action_at"]
+    data["cpa_last_action_error"] = data.get("cpa_last_action_error")
+    data["cpaLastActionError"] = data["cpa_last_action_error"]
     return data
 
 
@@ -2879,11 +2889,7 @@ def sub2api_admin_client() -> Sub2ApiAdminClient:
 
 
 def cpa_admin_client() -> CpaAdminClient:
-    authorization_enc = db.get_setting(CPA_AUTHORIZATION_SETTING, "")
-    authorization = decrypt_value(authorization_enc, db.secret_key) if authorization_enc else ""
-    site_url = db.get_setting(CPA_SITE_URL_SETTING, "")
-    timeout = db.get_general_settings().get("request_timeout", REQUEST_TIMEOUT_SECONDS)
-    return CpaAdminClient(site_url, authorization, timeout=float(timeout or REQUEST_TIMEOUT_SECONDS))
+    return cpa_admin_client_from_db(db, timeout_default=REQUEST_TIMEOUT_SECONDS)
 
 
 def _sub2api_import_group_ids(payload: Any) -> list[int]:

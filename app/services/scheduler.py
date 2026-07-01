@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import suppress
 
 from app.models import DEFAULT_BALANCE_UNIT, Database, actual_consumption_stats, monitor_group_to_dict
 from app.models import utc_now
 from app.services.alerts import handle_alert_state
 from app.services.balance import query_account, query_newapi_group, query_sub2api_group
+from app.services.cpa_admin import CpaAdminError, cpa_admin_client_from_db
 from app.services.emailer import build_group_rate_change_email, build_reminder_email, send_email
 from app.services.opencode_go import refresh_opencode_go_account
+
+OPENCODE_GO_CPA_USAGE_THRESHOLD = 99.0
 
 
 class BalanceScheduler:
@@ -325,6 +329,7 @@ async def query_opencode_go_for_account(db: Database, account_id: int, *, respec
     db.update_opencode_go_result(account_id, result)
     if result.get("is_valid"):
         db.add_log("info", "opencode-go", f"{account['name']} OpenCode Go 刷新成功")
+        await sync_opencode_go_cpa_state(db, account, result)
     else:
         db.add_log("error", "opencode-go", f"{account['name']} OpenCode Go 刷新失败: {result.get('invalid_message') or '未知错误'}")
     return result
@@ -393,3 +398,105 @@ def _monitor_group_summaries_from_result(db: Database, account_id: int, result: 
             }
         )
     return results
+
+
+async def sync_opencode_go_cpa_state(db: Database, account: dict, result: dict) -> None:
+    weekly = _usage_percent(result.get("weekly_usage") or result.get("weeklyUsage"))
+    monthly = _usage_percent(result.get("monthly_usage") or result.get("monthlyUsage"))
+    if weekly is None and monthly is None:
+        return
+    account_id = int(account["id"])
+    email = str(account["name"] or "").strip()
+    provider_disabled = _nullable_bool(account["cpa_provider_disabled"])
+    reenable_pending = bool(account["cpa_reenable_pending"])
+    weekly_full = weekly is not None and weekly >= OPENCODE_GO_CPA_USAGE_THRESHOLD
+    monthly_full = monthly is not None and monthly >= OPENCODE_GO_CPA_USAGE_THRESHOLD
+    if weekly_full or monthly_full:
+        if provider_disabled is True:
+            return
+        await _set_opencode_go_cpa_disabled(db, account_id, email, True, weekly, monthly)
+        return
+
+    weekly_recovered = weekly is not None and weekly < OPENCODE_GO_CPA_USAGE_THRESHOLD
+    monthly_recovered = monthly is not None and monthly < OPENCODE_GO_CPA_USAGE_THRESHOLD
+    if not (weekly_recovered and monthly_recovered):
+        return
+    if provider_disabled is not True:
+        return
+    previous_weekly = _usage_percent(account["last_weekly_usage"])
+    previous_monthly = _usage_percent(account["last_monthly_usage"])
+    previous_full = (
+        (previous_weekly is not None and previous_weekly >= OPENCODE_GO_CPA_USAGE_THRESHOLD)
+        or (previous_monthly is not None and previous_monthly >= OPENCODE_GO_CPA_USAGE_THRESHOLD)
+    )
+    if not (reenable_pending or previous_full):
+        return
+    await _set_opencode_go_cpa_disabled(db, account_id, email, False, weekly, monthly)
+
+
+async def _set_opencode_go_cpa_disabled(
+    db: Database,
+    account_id: int,
+    email: str,
+    disabled: bool,
+    weekly: float | None,
+    monthly: float | None,
+) -> None:
+    action = "停用" if disabled else "启用"
+    try:
+        client = cpa_admin_client_from_db(db)
+        result = await client.set_openai_provider_disabled(email, disabled)
+    except CpaAdminError as exc:
+        message = _safe_cpa_action_error(exc)
+        db.update_opencode_go_cpa_state(
+            account_id,
+            reenable_pending=(not disabled) or None,
+            error=message,
+        )
+        db.add_log("error", "opencode-go", f"{email} CPA 自动{action}失败，用量 {_usage_pair_text(weekly, monthly)}: {message}")
+        return
+    db.update_opencode_go_cpa_state(
+        account_id,
+        provider_disabled=disabled,
+        reenable_pending=False,
+        action_at=utc_now(),
+        clear_error=True,
+    )
+    suffix = "，无需远端变更" if not result.get("changed") else ""
+    db.add_log("warning" if disabled else "info", "opencode-go", f"{email} CPA 自动{action}成功，用量 {_usage_pair_text(weekly, monthly)}{suffix}")
+
+
+def _usage_percent(value: object) -> float | None:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(value, dict):
+        return None
+    raw = value.get("usage_percent", value.get("usagePercent"))
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _nullable_bool(value: object) -> bool | None:
+    if value is None:
+        return None
+    return bool(value)
+
+
+def _usage_pair_text(weekly: float | None, monthly: float | None) -> str:
+    return f"7d {_usage_value_text(weekly)}，30d {_usage_value_text(monthly)}"
+
+
+def _usage_value_text(value: float | None) -> str:
+    if value is None:
+        return "-"
+    return f"{value:g}%"
+
+
+def _safe_cpa_action_error(exc: Exception) -> str:
+    message = str(exc) or "未知错误"
+    return message[:300]

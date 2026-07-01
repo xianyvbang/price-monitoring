@@ -213,6 +213,10 @@ class Database:
                     last_raw_json TEXT,
                     last_checked_at TEXT,
                     is_enabled INTEGER NOT NULL DEFAULT 0,
+                    cpa_provider_disabled INTEGER,
+                    cpa_reenable_pending INTEGER NOT NULL DEFAULT 0,
+                    cpa_last_action_at TEXT,
+                    cpa_last_action_error TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -256,6 +260,7 @@ class Database:
             self._migrate_accounts_visible(conn)
             self._migrate_accounts_eliminated(conn)
             self._migrate_opencode_go_recovery_email(conn)
+            self._migrate_opencode_go_cpa_state(conn)
             self._migrate_group_rate_records_monitor_group(conn)
             conn.execute(
                 """
@@ -471,6 +476,19 @@ class Database:
                 """,
                 (email, utc_now(), row["id"], email, row["id"]),
             )
+
+    @staticmethod
+    def _migrate_opencode_go_cpa_state(conn: sqlite3.Connection) -> None:
+        columns = conn.execute("PRAGMA table_info(opencode_go_accounts)").fetchall()
+        column_names = {row["name"] for row in columns}
+        if "cpa_provider_disabled" not in column_names:
+            conn.execute("ALTER TABLE opencode_go_accounts ADD COLUMN cpa_provider_disabled INTEGER")
+        if "cpa_reenable_pending" not in column_names:
+            conn.execute("ALTER TABLE opencode_go_accounts ADD COLUMN cpa_reenable_pending INTEGER NOT NULL DEFAULT 0")
+        if "cpa_last_action_at" not in column_names:
+            conn.execute("ALTER TABLE opencode_go_accounts ADD COLUMN cpa_last_action_at TEXT")
+        if "cpa_last_action_error" not in column_names:
+            conn.execute("ALTER TABLE opencode_go_accounts ADD COLUMN cpa_last_action_error TEXT")
 
     @staticmethod
     def _migrate_group_rate_records_monitor_group(conn: sqlite3.Connection) -> None:
@@ -1270,6 +1288,37 @@ class Database:
                     result.get("invalid_message") or result.get("error"),
                     checked_at,
                 ),
+            )
+
+    def update_opencode_go_cpa_state(
+        self,
+        account_id: int,
+        *,
+        provider_disabled: bool | None = None,
+        reenable_pending: bool | None = None,
+        action_at: str | None = None,
+        error: str | None = None,
+        clear_error: bool = False,
+    ) -> None:
+        assignments = ["updated_at = ?"]
+        params: list[Any] = [utc_now()]
+        if provider_disabled is not None:
+            assignments.append("cpa_provider_disabled = ?")
+            params.append(1 if provider_disabled else 0)
+        if reenable_pending is not None:
+            assignments.append("cpa_reenable_pending = ?")
+            params.append(1 if reenable_pending else 0)
+        if action_at is not None:
+            assignments.append("cpa_last_action_at = ?")
+            params.append(action_at)
+        if error is not None or clear_error:
+            assignments.append("cpa_last_action_error = ?")
+            params.append(error)
+        params.append(account_id)
+        with self.connect() as conn:
+            conn.execute(
+                f"UPDATE opencode_go_accounts SET {', '.join(assignments)} WHERE id = ?",
+                tuple(params),
             )
 
     def list_opencode_go_history(self, account_id: int, limit: int = 100) -> list[sqlite3.Row]:

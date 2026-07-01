@@ -20,6 +20,8 @@ from app.services.opencode_go import (
     query_opencode_server_reference,
     refresh_opencode_go_account,
 )
+from app.services.cpa_admin import CpaAdminClient
+from app.services.scheduler import query_opencode_go_for_account
 
 
 class DummySub2ApiResponse:
@@ -679,7 +681,7 @@ def test_opencode_go_query_all_skips_disabled_accounts(tmp_path, monkeypatch):
 
     assert all_response.status_code == 200
     assert [result["account_id"] for result in all_response.json()["results"]] == [enabled_id]
-    assert calls == ["enabled", "disabled"]
+    assert calls == ["enabled@example.com", "disabled@example.com"]
     assert manual_response.status_code == 200
     assert db.list_opencode_go_history(enabled_id)
     assert db.list_opencode_go_history(disabled_id)
@@ -713,7 +715,7 @@ def test_opencode_go_bulk_import_rejects_bad_lines(tmp_path, monkeypatch):
         response = client.post("/api/opencode-go/accounts/bulk", json={"bulk_text": "broken-line"})
 
     assert response.status_code == 400
-    assert "邮箱|邮箱密码" in response.json()["message"]
+    assert "账号|密码" in response.json()["message"]
 
 
 def test_opencode_go_import_session_encrypts_and_masks_state(tmp_path, monkeypatch):
@@ -1205,6 +1207,213 @@ def test_opencode_go_import_cpa_upserts_openai_provider_with_all_models(tmp_path
     assert saved_providers[1]["name"] == "other@example.com"
     assert "sk-opencode-secret" not in logs.text
     assert "cpa-secret" not in logs.text
+
+
+@pytest.mark.asyncio
+async def test_cpa_set_provider_disabled_noop_when_already_target_state(monkeypatch):
+    DummySub2ApiClient.requests = []
+    DummySub2ApiClient.responses = [
+        DummySub2ApiResponse(
+            {
+                "openai-compatibility": [
+                    {"name": "ready@example.com", "disabled": True},
+                    {"name": "other@example.com", "disabled": False},
+                ]
+            }
+        ),
+    ]
+    monkeypatch.setattr("app.services.cpa_admin.httpx.AsyncClient", DummySub2ApiClient)
+
+    client = CpaAdminClient("https://cpa.example", "cpa-secret")
+    result = await client.set_openai_provider_disabled("ready@example.com", True)
+
+    assert result == {"name": "ready@example.com", "disabled": True, "changed": False}
+    assert len(DummySub2ApiClient.requests) == 1
+    assert DummySub2ApiClient.requests[0]["method"] == "GET"
+    assert DummySub2ApiClient.requests[0]["url"] == "https://cpa.example/v0/management/config"
+
+
+@pytest.mark.asyncio
+async def test_opencode_go_refresh_auto_disables_cpa_on_weekly_limit_and_stops_repeating(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    configure_cpa(db)
+    account_id = db.upsert_opencode_go_account(
+        {
+            "email": "auto-disable@example.com",
+            "password": "secret-password",
+            "is_enabled": True,
+        }
+    )
+
+    async def fake_refresh(*args, **kwargs):
+        return {
+            "is_valid": True,
+            "workspace_id": "ws_1",
+            "weekly_usage": {"usagePercent": 99, "resetInSec": 120},
+            "monthly_usage": {"usagePercent": 50, "resetInSec": 180},
+        }
+
+    DummySub2ApiClient.requests = []
+    DummySub2ApiClient.responses = [
+        DummySub2ApiResponse({"openai-compatibility": [{"name": "auto-disable@example.com", "disabled": False}]}),
+        DummySub2ApiResponse({"ok": True}),
+    ]
+    monkeypatch.setattr("app.services.scheduler.refresh_opencode_go_account", fake_refresh)
+    monkeypatch.setattr("app.services.cpa_admin.httpx.AsyncClient", DummySub2ApiClient)
+
+    first = await query_opencode_go_for_account(db, account_id)
+    after_first = db.get_opencode_go_account(account_id)
+    first_requests = list(DummySub2ApiClient.requests)
+    DummySub2ApiClient.requests = []
+    second = await query_opencode_go_for_account(db, account_id)
+
+    assert first["is_valid"] is True
+    assert second["is_valid"] is True
+    assert after_first["cpa_provider_disabled"] == 1
+    assert after_first["cpa_reenable_pending"] == 0
+    assert [request["method"] for request in first_requests] == ["GET", "PUT"]
+    assert first_requests[1]["json"][0]["disabled"] is True
+    assert DummySub2ApiClient.requests == []
+    assert any("CPA 自动停用成功" in log["message"] for log in db.list_logs(category="opencode-go"))
+
+
+@pytest.mark.asyncio
+async def test_opencode_go_refresh_auto_enables_cpa_after_recovery_and_retries_failure(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    configure_cpa(db)
+    account_id = db.upsert_opencode_go_account(
+        {
+            "email": "auto-enable@example.com",
+            "password": "secret-password",
+            "is_enabled": True,
+        }
+    )
+    db.update_opencode_go_result(
+        account_id,
+        {
+            "is_valid": True,
+            "weekly_usage": {"usagePercent": 99, "resetInSec": 120},
+            "monthly_usage": {"usagePercent": 80, "resetInSec": 180},
+        },
+    )
+    db.update_opencode_go_cpa_state(account_id, provider_disabled=True, clear_error=True)
+
+    async def fake_refresh(*args, **kwargs):
+        return {
+            "is_valid": True,
+            "workspace_id": "ws_1",
+            "weekly_usage": {"usagePercent": 20, "resetInSec": 120},
+            "monthly_usage": {"usagePercent": 80, "resetInSec": 180},
+        }
+
+    DummySub2ApiClient.requests = []
+    DummySub2ApiClient.responses = [
+        DummySub2ApiResponse({"openai-compatibility": [{"name": "auto-enable@example.com", "disabled": True}]}),
+        DummySub2ApiResponse({"message": "save failed"}, status_code=500),
+        DummySub2ApiResponse({"openai-compatibility": [{"name": "auto-enable@example.com", "disabled": True}]}),
+        DummySub2ApiResponse({"ok": True}),
+    ]
+    monkeypatch.setattr("app.services.scheduler.refresh_opencode_go_account", fake_refresh)
+    monkeypatch.setattr("app.services.cpa_admin.httpx.AsyncClient", DummySub2ApiClient)
+
+    await query_opencode_go_for_account(db, account_id)
+    after_failure = db.get_opencode_go_account(account_id)
+    await query_opencode_go_for_account(db, account_id)
+    after_success = db.get_opencode_go_account(account_id)
+    requests_after_success = list(DummySub2ApiClient.requests)
+    DummySub2ApiClient.requests = []
+    await query_opencode_go_for_account(db, account_id)
+
+    assert after_failure["cpa_provider_disabled"] == 1
+    assert after_failure["cpa_reenable_pending"] == 1
+    assert "save failed" in after_failure["cpa_last_action_error"]
+    assert after_success["cpa_provider_disabled"] == 0
+    assert after_success["cpa_reenable_pending"] == 0
+    assert after_success["cpa_last_action_error"] is None
+    assert [request["method"] for request in requests_after_success] == ["GET", "PUT", "GET", "PUT"]
+    assert requests_after_success[-1]["json"][0]["disabled"] is False
+    assert DummySub2ApiClient.requests == []
+    logs = db.list_logs(category="opencode-go")
+    assert any("CPA 自动启用失败" in log["message"] for log in logs)
+    assert any("CPA 自动启用成功" in log["message"] for log in logs)
+
+
+@pytest.mark.asyncio
+async def test_opencode_go_refresh_does_not_enable_cpa_while_monthly_still_limited(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    configure_cpa(db)
+    account_id = db.upsert_opencode_go_account(
+        {
+            "email": "monthly-full@example.com",
+            "password": "secret-password",
+            "is_enabled": True,
+        }
+    )
+    db.update_opencode_go_result(
+        account_id,
+        {
+            "is_valid": True,
+            "weekly_usage": {"usagePercent": 99, "resetInSec": 120},
+            "monthly_usage": {"usagePercent": 99, "resetInSec": 180},
+        },
+    )
+    db.update_opencode_go_cpa_state(account_id, provider_disabled=True, clear_error=True)
+
+    async def fake_refresh(*args, **kwargs):
+        return {
+            "is_valid": True,
+            "workspace_id": "ws_1",
+            "weekly_usage": {"usagePercent": 20, "resetInSec": 120},
+            "monthly_usage": {"usagePercent": 99, "resetInSec": 180},
+        }
+
+    DummySub2ApiClient.requests = []
+    DummySub2ApiClient.responses = []
+    monkeypatch.setattr("app.services.scheduler.refresh_opencode_go_account", fake_refresh)
+    monkeypatch.setattr("app.services.cpa_admin.httpx.AsyncClient", DummySub2ApiClient)
+
+    await query_opencode_go_for_account(db, account_id)
+
+    account = db.get_opencode_go_account(account_id)
+    assert account["cpa_provider_disabled"] == 1
+    assert account["cpa_reenable_pending"] == 0
+    assert DummySub2ApiClient.requests == []
+
+
+@pytest.mark.asyncio
+async def test_opencode_go_refresh_cpa_missing_provider_logs_and_keeps_refresh_success(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    configure_cpa(db)
+    account_id = db.upsert_opencode_go_account(
+        {
+            "email": "missing-provider@example.com",
+            "password": "secret-password",
+            "is_enabled": True,
+        }
+    )
+
+    async def fake_refresh(*args, **kwargs):
+        return {
+            "is_valid": True,
+            "workspace_id": "ws_1",
+            "weekly_usage": {"usagePercent": 100, "resetInSec": 120},
+            "monthly_usage": {"usagePercent": 20, "resetInSec": 180},
+        }
+
+    DummySub2ApiClient.requests = []
+    DummySub2ApiClient.responses = [DummySub2ApiResponse({"openai-compatibility": []})]
+    monkeypatch.setattr("app.services.scheduler.refresh_opencode_go_account", fake_refresh)
+    monkeypatch.setattr("app.services.cpa_admin.httpx.AsyncClient", DummySub2ApiClient)
+
+    result = await query_opencode_go_for_account(db, account_id)
+    account = db.get_opencode_go_account(account_id)
+
+    assert result["is_valid"] is True
+    assert account["last_status"] == "valid"
+    assert account["cpa_provider_disabled"] is None
+    assert "CPA 中未找到邮箱 provider" in account["cpa_last_action_error"]
+    assert [request["method"] for request in DummySub2ApiClient.requests] == ["GET"]
+    assert any("CPA 自动停用失败" in log["message"] for log in db.list_logs(category="opencode-go"))
 
 
 def test_opencode_go_bulk_import_cpa_imports_selected_accounts(tmp_path, monkeypatch):
