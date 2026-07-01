@@ -1,0 +1,59 @@
+{
+  "manifest_version": 3,
+  "name": "OpenCode Go Grabber",
+  "version": "0.1.0",
+  "description": "从 opencode.ai 抓取 workspace_id / 登录态 Cookie / API key，并一键推送到本地 python-get-price app 的 OpenCode Go 账号。",
+  "default_locale": "zh_CN",
+
+  "permissions": [
+    "cookies",
+    "webRequest",
+    "storage",
+    "clipboardWrite",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://opencode.ai/*",
+    "__APP_ORIGIN_MATCH__"
+  ],
+
+  "background": {
+    "service_worker": "background.js"
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["https://opencode.ai/*"],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "all_frames": false
+    },
+    {
+      "matches": ["__APP_ORIGIN_MATCH__"],
+      "js": ["app_bridge.js"],
+      "run_at": "document_start",
+      "all_frames": false
+    }
+  ],
+
+  "externally_connectable": {
+    "matches": ["__APP_ORIGIN_MATCH__"]
+  },
+
+  "action": {
+    "default_title": "OpenCode Go Grabber",
+    "default_popup": "popup.html"
+  },
+
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

@@ -1,10 +1,11 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { CopyDocument, Delete, Edit, Link, Plus, Refresh, Setting, Timer, Upload } from "@element-plus/icons-vue";
+import { CopyDocument, Delete, Download, Edit, Link, Plus, Refresh, Setting, Timer, Upload } from "@element-plus/icons-vue";
 import { api } from "../api";
 import { useViewport } from "../composables/useViewport";
 import { boolValue, formatTime } from "../utils";
+import { grabFromExtension as extGrab, isGrabberReady } from "../utils/grabber";
 
 const loading = ref(false);
 const refreshingAll = ref(false);
@@ -36,6 +37,8 @@ const opencodeSettings = ref({
 const settingsForm = reactive({ lite_subscription_js_url: "", key_list_js_url: "" });
 const sessionDialogVisible = ref(false);
 const importingSession = ref(false);
+const grabberReady = ref(isGrabberReady());
+const grabbingFromExt = ref(false);
 const sessionAccount = ref(null);
 const sessionPassword = ref("");
 const sessionPasswordLoading = ref(false);
@@ -306,6 +309,60 @@ async function submitSessionImport() {
 
 function openLocalOpencodeLogin() {
   window.open("https://opencode.ai/zen", "_blank", "noopener,noreferrer");
+}
+
+// 下载定制后的浏览器扩展（同源，自动带会话 cookie）。zip 内 manifest 已按当前部署域名烘焙好。
+async function downloadExtension() {
+  try {
+    const resp = await fetch("/api/opencode-go-grabber/extension.zip", { credentials: "same-origin" });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => "");
+      ElMessage.error(`下载失败 (${resp.status})${text ? "：" + text : ""}`);
+      return;
+    }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "opencode-go-grabber.zip";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    ElMessage.success("已下载扩展，请解压后在 chrome://extensions 加载");
+  } catch (e) {
+    ElMessage.error(e?.message || "下载失败");
+  }
+}
+
+// 从浏览器扩展抓取 workspace_id + 登录态 Cookie，并填入 sessionForm（或 createForm）
+async function grabFromExtension(target = "session") {
+  grabberReady.value = isGrabberReady();
+  grabbingFromExt.value = true;
+  try {
+    const res = await extGrab(5000);
+    if (!res.ok) {
+      ElMessage.warning(res.message || "扩展未就绪，请确认已安装并启用 OpenCode Go Grabber 扩展");
+      return false;
+    }
+    if (target === "session") {
+      if (res.workspaceId) sessionForm.workspace_id = res.workspaceId;
+      if (res.cookieHeader) {
+        sessionForm.storage_state = res.cookieHeader;
+        ElMessage.success(res.hasAuth
+          ? `已从扩展抓取（workspace: ${res.workspaceId || "未识别"}，含 auth）`
+          : "已抓取 Cookie，但未检测到 auth，请先在 opencode.ai 登录");
+      } else {
+        ElMessage.warning("未抓到 Cookie，请先在 opencode.ai 触发一次请求");
+      }
+    } else {
+      if (res.workspaceId) form.workspace_id = res.workspaceId;
+      ElMessage.success(res.workspaceId ? `已填入 workspace: ${res.workspaceId}` : "未识别到 workspace");
+    }
+    return !!res.cookieHeader;
+  } finally {
+    grabbingFromExt.value = false;
+  }
 }
 
 function upsertLocal(account) {
@@ -667,6 +724,7 @@ onBeforeUnmount(() => {
       </div>
       <div class="page-actions">
         <el-button :icon="Setting" @click="openSettingsDialog">配置用量 JS</el-button>
+        <el-button :icon="Download" @click="downloadExtension">下载浏览器插件</el-button>
         <el-button type="primary" :icon="Plus" @click="openCreate">添加账号</el-button>
         <el-button :icon="Upload" @click="openBulkImport">批量导入</el-button>
         <el-button :icon="Refresh" :loading="refreshingAll" @click="refreshAll">刷新全部</el-button>
@@ -836,7 +894,11 @@ onBeforeUnmount(() => {
           <el-input v-model="form.recovery_email" autocomplete="email" />
         </el-form-item>
         <el-form-item label="Workspace ID">
-          <el-input v-model="form.workspace_id" placeholder="可留空，登录后自动识别" />
+          <el-input v-model="form.workspace_id" placeholder="可留空，登录后自动识别">
+            <template #append>
+              <el-button :icon="Download" :loading="grabbingFromExt" @click="grabFromExtension('create')">从插件抓取</el-button>
+            </template>
+          </el-input>
         </el-form-item>
         <el-form-item label="自动刷新">
           <el-switch v-model="form.is_enabled" />
@@ -961,7 +1023,8 @@ onBeforeUnmount(() => {
         </el-form-item>
         <div class="manual-session-panel">
           <el-button type="primary" :icon="Link" @click="openLocalOpencodeLogin">打开 OpenCode Zen</el-button>
-          <span>会在你当前设备的默认浏览器打开 OpenCode Zen 页面；登录后复制登录态再粘贴到下方。</span>
+          <el-button type="success" :icon="Download" :loading="grabbingFromExt" @click="grabFromExtension('session')">从浏览器插件抓取</el-button>
+          <span>已安装插件时可一键填入 workspace 与 auth Cookie；否则打开 OpenCode Zen 登录后复制登录态再粘贴到下方。</span>
         </div>
         <el-form-item label="Workspace ID（必填）">
           <el-input v-model="sessionForm.workspace_id" placeholder="wrk_01KW01D1MG4VHNMJWA2KSH83CQ" />

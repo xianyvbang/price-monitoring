@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>OpenCode Go Grabber</title>
+    <style>
+      body { font-family: system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; margin: 12px; width: 360px; color: #222; font-size: 13px; }
+      h1 { font-size: 15px; margin: 0 0 10px; }
+      .section { border-top: 1px solid #eee; padding-top: 8px; margin-top: 8px; }
+      .row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+      .row label { width: 78px; color: #555; font-weight: 600; }
+      .row .val { flex: 1; font-family: ui-monospace, Consolas, monospace; color: #111; word-break: break-all; }
+      .ok { color: #16a34a; }
+      .bad { color: #dc2626; }
+      input[type="text"], input[type="password"] { width: 100%; padding: 6px 8px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; font-size: 13px; }
+      .field { margin: 6px 0; }
+      .field label { display: block; color: #555; font-weight: 600; margin-bottom: 2px; }
+      button.push { width: 100%; padding: 9px; margin-top: 10px; font-size: 14px; border: none; background: #2563eb; color: #fff; border-radius: 4px; cursor: pointer; }
+      button.push:hover { background: #1d4ed8; }
+      button.push:disabled { background: #93a3ef; cursor: not-allowed; }
+      button.small { padding: 3px 8px; font-size: 12px; border: 1px solid #ccc; background: #fff; border-radius: 3px; cursor: pointer; }
+      #status { margin-top: 8px; min-height: 18px; font-size: 12px; }
+      .muted { color: #888; font-size: 11px; }
+      a { color: #2563eb; }
+    </style>
+  </head>
+  <body>
+    <h1>OpenCode Go Grabber</h1>
+
+    <div class="row">
+      <label>Workspace</label>
+      <span class="val" id="workspaceId">—</span>
+    </div>
+    <div class="row">
+      <label>Cookie</label>
+      <span class="val" id="cookieState">读取中…</span>
+    </div>
+    <div class="row">
+      <label>API Key</label>
+      <span class="val" id="apiKey">—</span>
+      <button class="small" id="copyKey">复制</button>
+    </div>
+
+    <div class="section">
+      <div class="field">
+        <label>Google 邮箱 *</label>
+        <input id="email" type="text" placeholder="user@gmail.com" />
+      </div>
+      <div class="field">
+        <label>Google 密码 *</label>
+        <input id="password" type="password" />
+      </div>
+      <div class="field">
+        <label>恢复邮箱</label>
+        <input id="recoveryEmail" type="text" />
+      </div>
+      <div class="row">
+        <label><input type="checkbox" id="enabled" /> 启用自动刷新</label>
+      </div>
+    </div>
+
+    <button class="push" id="push">推送到 App</button>
+    <div id="status"></div>
+    <div class="muted">需先在 <a id="optionsLink" href="#">选项页</a> 配置 app 地址与账号。</div>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

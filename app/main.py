@@ -8,7 +8,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeTimedSerializer
@@ -32,6 +32,7 @@ from app.security import decrypt_value, encrypt_value
 from app.security import verify_password
 from app.services.balance import login_sub2api_tokens, query_newapi_group_options, query_sub2api_group_options
 from app.services.emailer import send_email
+from app.services.extension_pack import build_extension_zip
 from app.services.opencode_go import (
     KEY_LIST_DEFAULT_JS_URL,
     KEY_LIST_GET_REFERENCE_ID,
@@ -1672,6 +1673,26 @@ async def api_opencode_go_password(request: Request, account_id: int):
         raise HTTPException(status_code=404, detail="尚未保存 Google 密码")
     db.add_log("info", "opencode-go", f"API 读取 OpenCode Go 密码用于复制: {account['name']}")
     return {"password": password}
+
+
+@app.get("/api/opencode-go-grabber/extension.zip")
+async def api_download_opencode_go_grabber(request: Request):
+    """下载定制后的 OpenCode Go Grabber 浏览器扩展 zip。
+
+    manifest 中的 content_scripts.matches / externally_connectable.matches / host_permissions
+    会按当前部署域名（request.base_url）烘焙好，选项页默认 app 地址也一并填入。
+    """
+    user = require_user(request)
+    try:
+        body, filename = build_extension_zip(request.base_url)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    db.add_log("info", "opencode-go", f"{user} 下载 OpenCode Go 抓取扩展")
+    return Response(
+        content=body,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/api/logs")

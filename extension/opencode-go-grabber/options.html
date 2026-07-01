@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>OpenCode Go Grabber · 选项</title>
+    <style>
+      body { font-family: system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; margin: 24px; color: #222; max-width: 560px; }
+      h1 { font-size: 18px; margin-bottom: 16px; }
+      label { display: block; margin: 12px 0 4px; font-size: 13px; font-weight: 600; }
+      input { width: 100%; padding: 7px 9px; font-size: 13px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
+      .hint { color: #888; font-size: 12px; margin-top: 4px; }
+      button { margin-top: 18px; padding: 8px 18px; font-size: 13px; border: none; background: #2563eb; color: #fff; border-radius: 4px; cursor: pointer; }
+      button:hover { background: #1d4ed8; }
+      #status { margin-top: 12px; font-size: 13px; color: #16a34a; min-height: 18px; }
+    </style>
+  </head>
+  <body>
+    <h1>OpenCode Go Grabber · 选项</h1>
+
+    <label for="appBase">App Base URL</label>
+    <input id="appBase" type="text" placeholder="http://localhost:8000" />
+    <div class="hint">本地运行的 python-get-price app 地址。推送 OpenCode Go 账号时调用此处的 API。</div>
+
+    <label for="sessionCookieName">会话 Cookie 名称</label>
+    <input id="sessionCookieName" type="text" placeholder="balance_monitor_session" />
+    <div class="hint">对应 app 的 <code>SESSION_COOKIE</code> 环境变量。默认 <code>balance_monitor_session</code>。</div>
+
+    <label for="adminUser">管理员账号</label>
+    <input id="adminUser" type="text" placeholder="admin" />
+    <div class="hint">用于在 app 会话失效时兜底重新登录（POST /login）。明文保存在扩展本地存储中。</div>
+
+    <label for="adminPassword">管理员密码</label>
+    <input id="adminPassword" type="password" />
+
+    <label for="defaultRecoveryEmail">默认恢复邮箱（可选）</label>
+    <input id="defaultRecoveryEmail" type="text" placeholder="recovery@example.com" />
+    <div class="hint">新建账号时若弹窗未单独填写，则回填此默认值。</div>
+
+    <button id="save">保存</button>
+    <div id="status"></div>
+
+    <script src="options.js"></script>
+  </body>
+</html>
