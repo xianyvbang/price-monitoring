@@ -865,7 +865,7 @@ class Database:
                 (platform, data["name"]),
             ).fetchone()
             account_id = int(row["id"])
-        if _should_replace_monitor_groups(data):
+        if _should_replace_monitor_groups(data, allow_key_id_fallback=True):
             self.replace_account_monitor_groups(account_id, _groups_from_account_data(data))
         return account_id
 
@@ -1745,10 +1745,10 @@ def _groups_from_account_data(data: dict[str, Any]) -> list[dict[str, Any]]:
     return _normalize_monitor_groups([data.get("key_id")])
 
 
-def _should_replace_monitor_groups(data: dict[str, Any]) -> bool:
+def _should_replace_monitor_groups(data: dict[str, Any], allow_key_id_fallback: bool = False) -> bool:
     if "monitor_groups" in data or "monitor_group_ids" in data:
         return True
-    return data.get("key_id") not in {None, ""}
+    return allow_key_id_fallback and data.get("key_id") not in {None, ""}
 
 
 def _normalize_monitor_groups(groups: Any) -> list[dict[str, Any]]:

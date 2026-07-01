@@ -946,14 +946,10 @@ def public_edit_account(account_id: int | None) -> dict[str, Any] | None:
     data = public_account(row)
     if row["platform"] == "sub2Api":
         data["key_id"] = decrypt_value(row["key_id_enc"], config.app_secret_key) or ""
-        if data.get("selected_group_id"):
-            data["key_id"] = data["selected_group_id"]
         data["email"] = decrypt_value(row["email_enc"], config.app_secret_key) or ""
         data["login_extra_params"] = decrypt_value(row["login_extra_params_enc"], config.app_secret_key) or ""
     if row["platform"] == "newApi":
         data["key_id"] = decrypt_value(row["key_id_enc"], config.app_secret_key) or ""
-        if data.get("selected_group_id"):
-            data["key_id"] = data["selected_group_id"]
         data["user_id"] = decrypt_value(row["user_id_enc"], config.app_secret_key) or ""
     return data
 
@@ -1876,7 +1872,10 @@ def _is_sub2api_visibility_only_save(account_data: dict[str, Any], current_accou
         return False
     if str(account_data.get("key_id") or "").strip() != str(decrypt_value(current_account["key_id_enc"], config.app_secret_key) or "").strip():
         return False
-    if _split_group_ids(account_data.get("monitor_group_ids")) != [group["group_id"] for group in db.list_monitor_groups(int(current_account["id"]))]:
+    if (
+        "monitor_group_ids" in account_data
+        and _split_group_ids(account_data.get("monitor_group_ids")) != _monitor_group_ids(int(current_account["id"]))
+    ):
         return False
     current_login_extra_params = decrypt_value(current_account["login_extra_params_enc"], config.app_secret_key) or ""
     if str(account_data.get("login_extra_params") or "").strip() != current_login_extra_params.strip():

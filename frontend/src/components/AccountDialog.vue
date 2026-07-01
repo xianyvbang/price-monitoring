@@ -3,7 +3,7 @@ import { nextTick, reactive, ref } from "vue";
 import { ElMessage } from "element-plus";
 import { CopyDocument } from "@element-plus/icons-vue";
 import { api } from "../api";
-import { clone, normalizeAccountForm, selectedGroupIds } from "../utils";
+import { clone, normalizeAccountForm } from "../utils";
 
 const emit = defineEmits(["saved", "pick-groups"]);
 
@@ -47,7 +47,7 @@ function payload() {
   if (data.platform === "sub2Api") {
     data.key_id = data.key_id || "";
   }
-  data.monitor_group_ids = selectedGroupIds({ selected_group_ids: data.monitor_group_ids?.length ? data.monitor_group_ids : data.key_id });
+  delete data.monitor_group_ids;
   if (!data.api_key) delete data.api_key;
   if (!data.password) delete data.password;
   if (!data.access_token) delete data.access_token;

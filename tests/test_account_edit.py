@@ -151,6 +151,73 @@ def test_api_update_returns_account_for_local_row_refresh(tmp_path, monkeypatch)
     assert payload["account"]["has_password"] is True
 
 
+def test_api_update_sub2api_keeps_group_id_separate_from_monitor_groups(tmp_path, monkeypatch):
+    test_db = Database(str(tmp_path / "app.db"), config.app_secret_key)
+    test_db.init()
+    test_db.ensure_admin("admin", "password123")
+    account_id = test_db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "sub-with-monitor-groups",
+            "base_url": "https://sub.example",
+            "key_id": "basic",
+            "api_key": "sk-old",
+            "email": "saved@example.com",
+            "password": "saved-password",
+        }
+    )
+    test_db.replace_account_monitor_groups(
+        account_id,
+        [{"group_id": "pro", "plan_name": "Pro Plan", "effective_rate_multiplier": 1.5}],
+    )
+    test_db.update_account(
+        account_id,
+        {
+            "platform": "sub2Api",
+            "name": "sub-with-monitor-groups",
+            "base_url": "https://sub.example",
+            "key_id": "basic",
+        },
+    )
+    monkeypatch.setattr("app.main.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
+
+    async def stop_scheduler():
+        return None
+
+    async def fail_login(*args, **kwargs):
+        raise AssertionError("editing with a saved groupId should not trigger sub2Api login")
+
+    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+    monkeypatch.setattr("app.main.login_sub2api_tokens", fail_login)
+
+    with TestClient(app) as client:
+        client.post("/login", data={"username": "admin", "password": "password123"})
+        detail = client.get(f"/api/accounts/{account_id}")
+        response = client.put(
+            f"/api/accounts/{account_id}",
+            json={
+                "platform": "sub2Api",
+                "name": "sub-with-monitor-groups",
+                "base_url": "https://sub.example",
+                "key_id": detail.json()["account"]["key_id"],
+                "api_key": "",
+                "email": "",
+                "password": "",
+            },
+        )
+
+    assert detail.status_code == 200
+    assert detail.json()["account"]["key_id"] == "basic"
+    assert detail.json()["account"]["selected_group_id"] == "pro"
+    assert response.status_code == 200
+    assert response.json()["account"]["key_id"] == "basic"
+    assert response.json()["account"]["selected_group_id"] == "pro"
+    assert decrypt_value(test_db.get_account(account_id)["key_id_enc"], config.app_secret_key) == "basic"
+    assert [group["group_id"] for group in response.json()["account"]["monitor_groups"]] == ["pro"]
+
+
 def test_account_form_only_fetches_groups_after_save_when_visible(tmp_path, monkeypatch):
     test_db = Database(str(tmp_path / "app.db"), config.app_secret_key)
     test_db.init()
