@@ -83,12 +83,11 @@
     s.className = kind || "";
   }
 
-  // ---- toggle ----
-  $("fab").addEventListener("click", () => $("panel").classList.toggle("open"));
-  // 点面板外关闭
-  document.addEventListener("click", (e) => {
-    if (!host.contains(e.target)) $("panel").classList.remove("open");
-  }, true);
+  // ---- toggle（只手动开关，不点外面自动关）----
+  $("fab").addEventListener("click", (e) => {
+    e.stopPropagation();
+    $("panel").classList.toggle("open");
+  });
 
   // ---- 取值 ----
   function bg(msg) {
@@ -96,12 +95,9 @@
   }
 
   async function refresh() {
-    // workspace: 优先 content.js 写的 storage，兜底问 background
-    let workspaceId = "";
-    try {
-      const sess = await chrome.storage.session.get(["capture"]);
-      workspaceId = (sess.capture && sess.capture.workspaceId) || "";
-    } catch {}
+    // workspace: 走 background 的 get-workspace（与 popup 同通道，已验证能取到）
+    const ws = await bg({ type: "get-workspace" });
+    const workspaceId = ws.workspaceId || "";
     $("workspaceId").textContent = workspaceId || "（未识别，稍候自动更新）";
 
     // cookie / api_key 从 background 快照
@@ -120,13 +116,10 @@
     return { workspaceId, cookieHeader: snap.cookieHeader || "" };
   }
 
-  // storage 变化时（content.js 抓到新 workspace/key）自动刷新
-  chrome.storage.session.onChanged.addListener((changes) => {
-    if (changes.capture || changes.opencodeCookie) refresh();
-  });
-  // 首次 + 定期兜底刷新（cookie 由 background webRequest 更新，未必触发 storage.onChanged）
+  // 定期兜底刷新（workspace/cookie 都可能由 background/content.js 更新，storage.onChanged
+  // 在 content script 上下文监听不可靠，故用轮询）
   refresh();
-  setInterval(refresh, 3000);
+  setInterval(refresh, 2000);
 
   // ---- 复制 api key ----
   $("copyKey").addEventListener("click", async () => {
