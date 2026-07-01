@@ -1020,14 +1020,59 @@ class Database:
         with self.connect() as conn:
             conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
 
-    def list_opencode_go_accounts(self, enabled_only: bool = False) -> list[sqlite3.Row]:
+    def list_opencode_go_accounts(
+        self,
+        enabled_only: bool = False,
+        limit: int | None = None,
+        offset: int = 0,
+        sort_by: str = "name",
+        sort_order: str = "asc",
+    ) -> list[sqlite3.Row]:
         query = "SELECT * FROM opencode_go_accounts"
+        params: list[Any] = []
+        if enabled_only:
+            query += " WHERE is_enabled = 1"
+        sort_columns = {
+            "name": "name",
+            "created_at": "created_at",
+            "updated_at": "updated_at",
+            "last_checked_at": "last_checked_at",
+        }
+        column = sort_columns.get(str(sort_by or "").strip(), "name")
+        direction = "DESC" if str(sort_order or "").strip().lower() == "desc" else "ASC"
+        if column == "created_at":
+            query += f" ORDER BY created_at {direction}, id {direction}"
+        elif column == "last_checked_at":
+            query += f" ORDER BY last_checked_at {direction}, id {direction}"
+        else:
+            query += f" ORDER BY {column} {direction}, id {direction}"
+        if limit is not None:
+            query += " LIMIT ? OFFSET ?"
+            params.extend([max(1, int(limit)), max(0, int(offset))])
+        with self.connect() as conn:
+            return conn.execute(query, tuple(params)).fetchall()
+
+    def count_opencode_go_accounts(self, enabled_only: bool = False) -> int:
+        query = "SELECT COUNT(*) AS count FROM opencode_go_accounts"
         params: tuple[Any, ...] = ()
         if enabled_only:
             query += " WHERE is_enabled = 1"
-        query += " ORDER BY name ASC, id ASC"
         with self.connect() as conn:
-            return conn.execute(query, params).fetchall()
+            row = conn.execute(query, params).fetchone()
+            return int(row["count"] if row else 0)
+
+    def latest_successful_opencode_go_checked_at(self) -> str | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT last_checked_at
+                FROM opencode_go_accounts
+                WHERE last_status = 'valid' AND last_checked_at IS NOT NULL
+                ORDER BY last_checked_at DESC, id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            return str(row["last_checked_at"]) if row and row["last_checked_at"] else None
 
     def get_opencode_go_account(self, account_id: int) -> Optional[sqlite3.Row]:
         with self.connect() as conn:
@@ -1682,25 +1727,50 @@ class Database:
             cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat(timespec="seconds")
             conn.execute("DELETE FROM app_logs WHERE created_at < ?", (cutoff,))
 
-    def list_logs(self, limit: int | None = None, offset: int = 0) -> list[sqlite3.Row]:
+    def list_logs(
+        self,
+        limit: int | None = None,
+        offset: int = 0,
+        category: str | None = None,
+        message_query: str | None = None,
+    ) -> list[sqlite3.Row]:
         self.cleanup_logs()
+        conditions = []
+        params: list[Any] = []
+        if category:
+            conditions.append("category = ?")
+            params.append(category)
+        if message_query:
+            conditions.append("message LIKE ?")
+            params.append(f"%{message_query}%")
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
         with self.connect() as conn:
             if limit is None:
-                return conn.execute("SELECT * FROM app_logs ORDER BY created_at DESC, id DESC").fetchall()
+                return conn.execute(f"SELECT * FROM app_logs{where} ORDER BY created_at DESC, id DESC", tuple(params)).fetchall()
             return conn.execute(
-                """
+                f"""
                 SELECT *
                 FROM app_logs
+                {where}
                 ORDER BY created_at DESC, id DESC
                 LIMIT ? OFFSET ?
                 """,
-                (max(0, int(limit)), max(0, int(offset))),
+                (*params, max(0, int(limit)), max(0, int(offset))),
             ).fetchall()
 
-    def count_logs(self) -> int:
+    def count_logs(self, category: str | None = None, message_query: str | None = None) -> int:
         self.cleanup_logs()
+        conditions = []
+        params: list[Any] = []
+        if category:
+            conditions.append("category = ?")
+            params.append(category)
+        if message_query:
+            conditions.append("message LIKE ?")
+            params.append(f"%{message_query}%")
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
         with self.connect() as conn:
-            row = conn.execute("SELECT COUNT(*) AS total FROM app_logs").fetchone()
+            row = conn.execute(f"SELECT COUNT(*) AS total FROM app_logs{where}", tuple(params)).fetchone()
             return int(row["total"] if row else 0)
 
     def clear_logs(self) -> None:

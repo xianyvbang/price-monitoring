@@ -138,6 +138,38 @@ def test_sub2api_settings_api_encrypts_admin_key(tmp_path, monkeypatch):
     assert decrypt_value(encrypted, "test-key") == "adm-secret-key"
 
 
+def test_cpa_settings_api_encrypts_authorization(tmp_path, monkeypatch):
+    test_db = Database(str(tmp_path / "app.db"), "test-key")
+    test_db.init()
+    test_db.ensure_admin("admin", "password123")
+    monkeypatch.setattr("app.main.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
+
+    async def stop_scheduler():
+        return None
+
+    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+
+    with TestClient(app) as client:
+        login(client)
+        saved = client.post(
+            "/api/settings/cpa",
+            json={"authorization": "Bearer cpa-secret-token", "site_url": "https://cpa.example/"},
+        )
+        loaded = client.get("/api/settings")
+
+    assert saved.status_code == 200
+    assert saved.json()["cpa"]["site_url"] == "https://cpa.example/v0/management"
+    assert saved.json()["cpa"]["has_authorization"] is True
+    assert "cpa-secret-token" not in saved.text
+    assert loaded.json()["cpa"]["site_url"] == "https://cpa.example/v0/management"
+    assert "cpa-secret-token" not in loaded.text
+    encrypted = test_db.get_setting("cpa_authorization_enc")
+    assert encrypted != "cpa-secret-token"
+    assert decrypt_value(encrypted, "test-key") == "cpa-secret-token"
+
+
 def test_newapi_group_picker_data_and_api_routes(tmp_path, monkeypatch):
     test_db = Database(str(tmp_path / "app.db"), config.app_secret_key)
     test_db.init()

@@ -171,6 +171,20 @@ a {
   margin: 0;
 }
 
+.panel-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.table-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 14px;
+}
+
 .platform-table {
   border: 1px solid var(--line-strong);
   box-shadow: 0 14px 32px rgba(15, 23, 42, 0.05);
@@ -924,6 +938,16 @@ a {
     align-items: flex-start;
     flex-direction: column;
     gap: 8px;
+  }
+
+  .panel-actions,
+  .table-footer {
+    justify-content: flex-start;
+    width: 100%;
+  }
+
+  .table-footer .el-pagination {
+    justify-content: flex-start;
   }
 
   .panel-card .el-card__body {

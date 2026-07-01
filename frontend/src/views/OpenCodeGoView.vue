@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { CopyDocument, Delete, Download, Edit, Link, Plus, Refresh, Setting, Timer, Upload } from "@element-plus/icons-vue";
+import { CopyDocument, Delete, Document, Download, Edit, Link, Plus, Refresh, Setting, Timer, Upload } from "@element-plus/icons-vue";
 import { api } from "../api";
 import { useViewport } from "../composables/useViewport";
 import { boolValue, formatTime } from "../utils";
@@ -10,6 +10,8 @@ import { grabFromExtension as extGrab, isGrabberReady } from "../utils/grabber";
 const loading = ref(false);
 const refreshingAll = ref(false);
 const accounts = ref([]);
+const pagination = reactive({ page: 1, page_size: 20, total: 0, total_pages: 1 });
+const selectedAccountIds = ref([]);
 const summary = ref({ account_count: 0, last_success_at: null });
 const refreshRemaining = ref(300);
 const refreshTimer = ref(null);
@@ -48,18 +50,27 @@ const historyVisible = ref(false);
 const historyLoading = ref(false);
 const historyAccount = ref(null);
 const historyRecords = ref([]);
+const importLogsVisible = ref(false);
+const importLogsLoading = ref(false);
+const importLogs = ref([]);
+const importLogsPagination = reactive({ page: 1, page_size: 50, total: 0, total_pages: 1 });
 const sub2ApiImportVisible = ref(false);
 const sub2ApiImportLoading = ref(false);
 const sub2ApiImporting = ref(false);
 const sub2ApiImportAccount = ref(null);
 const sub2ApiGroups = ref([]);
 const sub2ApiSelectedGroupIds = ref([]);
+const cpaImportingId = ref(null);
+const cpaBulkImporting = ref(false);
 const formRef = ref(null);
 const form = reactive(defaultForm());
 const { isMobile } = useViewport();
 
 const accountCount = computed(() => summary.value.account_count ?? summary.value.accountCount ?? accounts.value.length);
 const lastSuccessAt = computed(() => summary.value.last_success_at ?? summary.value.lastSuccessAt);
+const selectedAccounts = computed(() => accounts.value.filter((account) => selectedAccountIds.value.includes(account.id)));
+const selectedImportableAccounts = computed(() => selectedAccounts.value.filter(hasApiKey));
+const selectedImportCount = computed(() => selectedImportableAccounts.value.length);
 const bulkPreviewCount = computed(() => bulkText.value.split(/\r?\n/).filter((line) => line.trim()).length);
 const liteSubscriptionJsUrl = computed(() => opencodeSettings.value.lite_subscription_js_url || opencodeSettings.value.liteSubscriptionJsUrl || "");
 const liteSubscriptionServerId = computed(() => opencodeSettings.value.lite_subscription_server_id || opencodeSettings.value.liteSubscriptionServerId || "");
@@ -96,9 +107,20 @@ const rules = {
 async function loadAccounts() {
   loading.value = true;
   try {
-    const payload = await api.opencodeGoAccounts();
+    const payload = await api.opencodeGoAccounts({
+      page: pagination.page,
+      page_size: pagination.page_size,
+      sort_by: "created_at",
+      sort_order: "desc"
+    });
     accounts.value = (payload.accounts || []).map(normalizeAccountUsage);
+    const page = payload.pagination || {};
+    pagination.page = page.page || pagination.page;
+    pagination.page_size = page.page_size || page.pageSize || pagination.page_size;
+    pagination.total = page.total ?? accounts.value.length;
+    pagination.total_pages = page.total_pages || page.totalPages || 1;
     summary.value = payload.summary || {};
+    selectedAccountIds.value = [];
   } catch (error) {
     ElMessage.error(error.message || "加载 OpenCode Go 账号失败");
   } finally {
@@ -198,9 +220,9 @@ async function submitAccount() {
     if (!payload.password) {
       delete payload.password;
     }
-    const response = dialogMode.value === "create" ? await api.createOpencodeGoAccount(payload) : await api.updateOpencodeGoAccount(form.id, payload);
-    upsertLocal(response.account);
+    await (dialogMode.value === "create" ? api.createOpencodeGoAccount(payload) : api.updateOpencodeGoAccount(form.id, payload));
     dialogVisible.value = false;
+    await loadAccounts();
     ElMessage.success(dialogMode.value === "create" ? "OpenCode Go 账号已保存" : "OpenCode Go 账号已更新");
   } catch (error) {
     ElMessage.error(error.message || "保存失败");
@@ -214,6 +236,7 @@ async function submitBulkImport() {
   try {
     const response = await api.bulkOpencodeGoAccounts({ bulk_text: bulkText.value });
     bulkDialogVisible.value = false;
+    pagination.page = 1;
     await loadAccounts();
     ElMessage.success(`已导入或更新 ${response.count || 0} 个 OpenCode Go 账号`);
   } catch (error) {
@@ -377,15 +400,28 @@ function upsertLocal(account) {
   } else {
     accounts.value.unshift(account);
   }
-  summary.value = { ...summary.value, account_count: accounts.value.length, accountCount: accounts.value.length };
 }
 
 async function deleteAccount(account) {
   await ElMessageBox.confirm(`确定删除 ${account.email} 吗？`, "删除 OpenCode Go 账号", { type: "warning" });
   await api.deleteOpencodeGoAccount(account.id);
-  accounts.value = accounts.value.filter((item) => item.id !== account.id);
-  summary.value = { ...summary.value, account_count: accounts.value.length, accountCount: accounts.value.length };
+  await loadAccounts();
   ElMessage.success("账号已删除");
+}
+
+function handleSelectionChange(rows) {
+  selectedAccountIds.value = rows.filter(hasApiKey).map((row) => row.id);
+}
+
+function handlePageChange(page) {
+  pagination.page = page;
+  loadAccounts();
+}
+
+function handlePageSizeChange(pageSize) {
+  pagination.page_size = pageSize;
+  pagination.page = 1;
+  loadAccounts();
 }
 
 async function toggleEnabled(account) {
@@ -490,6 +526,53 @@ async function submitSub2ApiImport() {
   }
 }
 
+async function importToCpa(account) {
+  try {
+    await ElMessageBox.confirm(`确定将 ${account.email} 导入 CPA 的 OpenAI 提供商吗？`, "导入 CPA", { type: "warning" });
+  } catch {
+    return;
+  }
+  cpaImportingId.value = account.id;
+  try {
+    const payload = await api.importOpencodeGoToCpa(account.id);
+    const modelCount = payload.model_count ?? payload.modelCount ?? (payload.models || []).length;
+    ElMessage.success(`已导入 CPA，模型 ${modelCount} 个`);
+  } catch (error) {
+    ElMessage.error(error.message || "导入 CPA 失败");
+  } finally {
+    cpaImportingId.value = null;
+  }
+}
+
+async function bulkImportToCpa() {
+  const targets = selectedImportableAccounts.value;
+  if (!targets.length) {
+    ElMessage.error("请选择至少一个已获取 API key 的账号");
+    return;
+  }
+  try {
+    await ElMessageBox.confirm(`确定将已选 ${targets.length} 个账号批量导入 CPA 的 OpenAI 提供商吗？`, "批量导入 CPA", { type: "warning" });
+  } catch {
+    return;
+  }
+  cpaBulkImporting.value = true;
+  try {
+    const payload = await api.bulkImportOpencodeGoToCpa({ account_ids: targets.map((account) => account.id) });
+    const count = payload.count || 0;
+    const failedCount = payload.failed_count ?? payload.failedCount ?? (payload.failed || []).length;
+    selectedAccountIds.value = [];
+    if (failedCount > 0) {
+      ElMessage.warning(`已导入 CPA ${count} 个，失败 ${failedCount} 个`);
+    } else {
+      ElMessage.success(`已批量导入 CPA ${count} 个账号`);
+    }
+  } catch (error) {
+    ElMessage.error(error.message || "批量导入 CPA 失败");
+  } finally {
+    cpaBulkImporting.value = false;
+  }
+}
+
 async function copyApiKey(account) {
   try {
     const payload = await api.opencodeGoApiKey(account.id);
@@ -578,6 +661,26 @@ async function openHistory(account) {
   }
 }
 
+async function openImportLogs(page = 1) {
+  importLogsVisible.value = true;
+  importLogsLoading.value = true;
+  try {
+    const payload = await api.opencodeGoImportLogs({ page, page_size: importLogsPagination.page_size });
+    importLogs.value = payload.logs || [];
+    Object.assign(importLogsPagination, payload.pagination || {});
+  } catch (error) {
+    ElMessage.error(error.message || "加载导入日志失败");
+  } finally {
+    importLogsLoading.value = false;
+  }
+}
+
+function importLogLevelType(level) {
+  if (level === "error") return "danger";
+  if (level === "warning") return "warning";
+  return "info";
+}
+
 function statusType(account) {
   if (account.last_status === "valid" || account.last_status === "logged_in") return "success";
   if (account.last_status === "invalid") return "danger";
@@ -640,6 +743,14 @@ function usageCell(account, key) {
 
 function historyUsage(record, key) {
   return usageWindow(record, key);
+}
+
+function hasApiKey(account) {
+  return boolValue(account?.has_api_key ?? account?.hasApiKey);
+}
+
+function canSelectForCpa(row) {
+  return hasApiKey(row) && !cpaBulkImporting.value;
 }
 
 function normalizeAccountUsage(account) {
@@ -725,6 +836,7 @@ onBeforeUnmount(() => {
       <div class="page-actions">
         <el-button :icon="Setting" @click="openSettingsDialog">配置用量 JS</el-button>
         <el-button :icon="Download" @click="downloadExtension">下载浏览器插件</el-button>
+        <el-button :icon="Document" @click="openImportLogs()">导入日志</el-button>
         <el-button type="primary" :icon="Plus" @click="openCreate">添加账号</el-button>
         <el-button :icon="Upload" @click="openBulkImport">批量导入</el-button>
         <el-button :icon="Refresh" :loading="refreshingAll" @click="refreshAll">刷新全部</el-button>
@@ -761,10 +873,15 @@ onBeforeUnmount(() => {
     <div class="panel table-card">
       <div class="panel-head">
         <h2>Go 用量</h2>
-        <el-tag>{{ accounts.length }} 个账号</el-tag>
+        <div class="panel-actions">
+          <el-button size="small" :icon="Upload" :loading="cpaBulkImporting" :disabled="!selectedImportCount" @click="bulkImportToCpa">批量导入 CPA</el-button>
+          <el-tag>{{ selectedImportCount }} 已选</el-tag>
+          <el-tag>{{ pagination.total }} 个账号</el-tag>
+        </div>
       </div>
       <template v-if="!isMobile">
-        <el-table :data="accounts" border stripe row-key="id" style="width: 100%">
+        <el-table :data="accounts" border stripe row-key="id" style="width: 100%" @selection-change="handleSelectionChange">
+          <el-table-column type="selection" width="48" :selectable="canSelectForCpa" fixed />
           <el-table-column label="Google 邮箱" min-width="220" fixed>
             <template #default="{ row }"><span class="credentials-text">{{ row.email }}</span></template>
           </el-table-column>
@@ -812,17 +929,21 @@ onBeforeUnmount(() => {
           <el-table-column label="最近刷新" width="165">
             <template #default="{ row }">{{ formatTime(row.last_checked_at) }}</template>
           </el-table-column>
+          <el-table-column label="导入时间" width="165">
+            <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
+          </el-table-column>
           <el-table-column label="自动刷新" width="105">
             <template #default="{ row }"><el-switch :model-value="boolValue(row.is_enabled)" @change="toggleEnabled(row)" /></template>
           </el-table-column>
-          <el-table-column label="操作" min-width="380" fixed="right">
+          <el-table-column label="操作" min-width="440" fixed="right">
             <template #default="{ row }">
               <div class="table-actions">
                 <el-button size="small" :icon="Edit" @click="openEdit(row)">编辑</el-button>
                 <el-button size="small" :icon="Upload" @click="openSessionImport(row)">导入登录态</el-button>
-                <el-button size="small" :icon="Upload" :disabled="!row.has_api_key && !row.hasApiKey" @click="openSub2ApiImport(row)">导入 Sub2API</el-button>
+                <el-button size="small" :icon="Upload" :disabled="!hasApiKey(row)" @click="openSub2ApiImport(row)">导入 Sub2API</el-button>
+                <el-button size="small" :icon="Upload" :loading="cpaImportingId === row.id" :disabled="!hasApiKey(row) || cpaBulkImporting" @click="importToCpa(row)">导入 CPA</el-button>
                 <el-button size="small" :icon="Refresh" :loading="row._refreshing" @click="refreshAccount(row)">刷新</el-button>
-                <el-button size="small" :icon="CopyDocument" :disabled="!row.has_api_key && !row.hasApiKey" @click="copyApiKey(row)">复制 Key</el-button>
+                <el-button size="small" :icon="CopyDocument" :disabled="!hasApiKey(row)" @click="copyApiKey(row)">复制 Key</el-button>
                 <el-button size="small" :icon="Timer" @click="openHistory(row)">历史</el-button>
                 <el-button size="small" type="danger" :icon="Delete" @click="deleteAccount(row)">删除</el-button>
               </div>
@@ -833,10 +954,12 @@ onBeforeUnmount(() => {
       <div v-else class="mobile-stack">
         <article v-for="row in accounts" :key="row.id" class="mobile-card">
           <div class="mobile-card-head">
+            <el-checkbox v-model="selectedAccountIds" :value="row.id" :disabled="!hasApiKey(row) || cpaBulkImporting" />
             <div class="mobile-card-title">
               <strong>{{ row.email }}</strong>
               <div class="mobile-card-meta">
                 <span>API key: {{ row.api_key_masked || row.apiKeyMasked || "未找到" }}</span>
+                <span>导入时间: {{ formatTime(row.created_at) }}</span>
               </div>
             </div>
             <el-tag :type="statusType(row)">{{ statusText(row) }}</el-tag>
@@ -858,6 +981,10 @@ onBeforeUnmount(() => {
               <span>最近刷新</span>
               <strong>{{ formatTime(row.last_checked_at) }}</strong>
             </div>
+            <div class="mobile-field">
+              <span>导入时间</span>
+              <strong>{{ formatTime(row.created_at) }}</strong>
+            </div>
           </div>
           <div class="mobile-switches">
             <div class="mobile-switch-row">
@@ -868,13 +995,26 @@ onBeforeUnmount(() => {
           <div class="mobile-actions">
             <el-button size="small" :icon="Edit" @click="openEdit(row)">编辑</el-button>
             <el-button size="small" :icon="Upload" @click="openSessionImport(row)">导入登录态</el-button>
-            <el-button size="small" :icon="Upload" :disabled="!row.has_api_key && !row.hasApiKey" @click="openSub2ApiImport(row)">导入 Sub2API</el-button>
+            <el-button size="small" :icon="Upload" :disabled="!hasApiKey(row)" @click="openSub2ApiImport(row)">导入 Sub2API</el-button>
+            <el-button size="small" :icon="Upload" :loading="cpaImportingId === row.id" :disabled="!hasApiKey(row) || cpaBulkImporting" @click="importToCpa(row)">导入 CPA</el-button>
             <el-button size="small" :icon="Refresh" :loading="row._refreshing" @click="refreshAccount(row)">刷新</el-button>
-            <el-button size="small" :icon="CopyDocument" :disabled="!row.has_api_key && !row.hasApiKey" @click="copyApiKey(row)">复制 Key</el-button>
+            <el-button size="small" :icon="CopyDocument" :disabled="!hasApiKey(row)" @click="copyApiKey(row)">复制 Key</el-button>
             <el-button size="small" :icon="Timer" @click="openHistory(row)">历史</el-button>
             <el-button size="small" type="danger" :icon="Delete" @click="deleteAccount(row)">删除</el-button>
           </div>
         </article>
+      </div>
+      <div class="table-footer">
+        <el-pagination
+          background
+          layout="total, sizes, prev, pager, next, jumper"
+          :current-page="pagination.page"
+          :page-size="pagination.page_size"
+          :page-sizes="[20, 50, 100, 200]"
+          :total="pagination.total"
+          @current-change="handlePageChange"
+          @size-change="handlePageSizeChange"
+        />
       </div>
     </div>
 
@@ -1078,6 +1218,52 @@ onBeforeUnmount(() => {
       <template #footer>
         <div class="dialog-footer">
           <el-button @click="historyVisible = false">关闭</el-button>
+        </div>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="importLogsVisible" title="OpenCode Go 导入日志" width="960px">
+      <template v-if="!isMobile">
+        <el-table v-loading="importLogsLoading" :data="importLogs" border stripe row-key="id" style="width: 100%">
+          <el-table-column label="时间" width="180">
+            <template #default="{ row }">{{ row.created_at_formatted || formatTime(row.created_at) }}</template>
+          </el-table-column>
+          <el-table-column label="级别" width="100">
+            <template #default="{ row }"><el-tag :type="importLogLevelType(row.level)">{{ row.level }}</el-tag></template>
+          </el-table-column>
+          <el-table-column label="内容" min-width="520">
+            <template #default="{ row }"><span class="note-text">{{ row.message }}</span></template>
+          </el-table-column>
+        </el-table>
+      </template>
+      <div v-else v-loading="importLogsLoading" class="mobile-stack">
+        <article v-for="row in importLogs" :key="row.id" class="mobile-card">
+          <div class="mobile-card-head">
+            <div class="mobile-card-title">
+              <strong>{{ row.created_at_formatted || formatTime(row.created_at) }}</strong>
+            </div>
+            <el-tag :type="importLogLevelType(row.level)">{{ row.level }}</el-tag>
+          </div>
+          <div class="mobile-field">
+            <span>内容</span>
+            <strong class="note-text">{{ row.message }}</strong>
+          </div>
+        </article>
+      </div>
+      <div class="table-footer">
+        <el-pagination
+          background
+          layout="prev, pager, next, total"
+          :current-page="importLogsPagination.page"
+          :page-size="importLogsPagination.page_size"
+          :total="importLogsPagination.total"
+          @current-change="openImportLogs"
+        />
+      </div>
+      <template #footer>
+        <div class="dialog-footer">
+          <el-button :icon="Refresh" :loading="importLogsLoading" @click="openImportLogs(importLogsPagination.page)">刷新</el-button>
+          <el-button @click="importLogsVisible = false">关闭</el-button>
         </div>
       </template>
     </el-dialog>

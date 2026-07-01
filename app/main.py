@@ -50,6 +50,12 @@ from app.services.opencode_go import (
     validate_opencode_go_key_list_js_url,
     validate_opencode_go_lite_js_url,
 )
+from app.services.cpa_admin import (
+    CpaAdminClient,
+    CpaAdminError,
+    normalize_cpa_authorization,
+    normalize_cpa_management_url,
+)
 from app.services.scheduler import (
     BalanceScheduler,
     query_all_accounts,
@@ -92,6 +98,8 @@ SENSITIVE_FIELD_NAMES = {
 LOG_VALUE_LIMIT = 2000
 LOG_PAGE_SIZE = 50
 LOG_MAX_PAGE_SIZE = 200
+OPENCODE_GO_PAGE_SIZE = 20
+OPENCODE_GO_MAX_PAGE_SIZE = 200
 CONSUMPTION_PERIODS = [
     {"key": "today", "label": "今日实际消耗总金额", "count_label": "个 Base URL 有今日记录"},
     {"key": "yesterday", "label": "昨日实际消耗总金额", "count_label": "个 Base URL 有昨日记录"},
@@ -103,6 +111,8 @@ CONSUMPTION_PERIODS = [
 ]
 SUB2API_ADMIN_KEY_SETTING = "sub2api_admin_key_enc"
 SUB2API_SITE_URL_SETTING = "sub2api_site_url"
+CPA_AUTHORIZATION_SETTING = "cpa_authorization_enc"
+CPA_SITE_URL_SETTING = "cpa_site_url"
 
 
 @asynccontextmanager
@@ -282,13 +292,21 @@ def public_log(row: Any) -> dict[str, Any]:
     return data
 
 
-def log_page_payload(page: int, page_size: int) -> dict[str, Any]:
+def log_page_payload(page: int, page_size: int, category: str | None = None, message_query: str | None = None) -> dict[str, Any]:
     page = max(1, page)
     page_size = min(max(1, page_size), LOG_MAX_PAGE_SIZE)
-    total = db.count_logs()
+    total = db.count_logs(category=category, message_query=message_query)
     total_pages = max(1, (total + page_size - 1) // page_size)
     page = min(page, total_pages)
-    logs = [public_log(row) for row in db.list_logs(limit=page_size, offset=(page - 1) * page_size)]
+    logs = [
+        public_log(row)
+        for row in db.list_logs(
+            limit=page_size,
+            offset=(page - 1) * page_size,
+            category=category,
+            message_query=message_query,
+        )
+    ]
     return {
         "logs": logs,
         "pagination": {
@@ -500,8 +518,13 @@ def public_opencode_go_account(row: Any, include_api_key: bool = False) -> dict[
     data["weekly_usage"] = public_usage_window(data.pop("last_weekly_usage", None))
     data["monthly_usage"] = public_usage_window(data.pop("last_monthly_usage", None))
     data.pop("last_raw_json", None)
+    data["created_at_formatted"] = format_china_time(data.get("created_at"))
+    data["createdAtFormatted"] = data["created_at_formatted"]
+    data["createdAt"] = data.get("created_at")
+    data["updatedAt"] = data.get("updated_at")
     data["last_checked_at_formatted"] = format_china_time(data.get("last_checked_at"))
     data["lastCheckedAtFormatted"] = data["last_checked_at_formatted"]
+    data["lastCheckedAt"] = data.get("last_checked_at")
     data["is_enabled"] = bool(data.get("is_enabled"))
     data["isEnabled"] = data["is_enabled"]
     return data
@@ -1374,13 +1397,48 @@ async def api_delete_account(request: Request, account_id: int):
 @app.get("/api/opencode-go/accounts")
 async def api_opencode_go_accounts(request: Request):
     require_user(request)
-    accounts = [public_opencode_go_account(row) for row in db.list_opencode_go_accounts()]
-    last_success = next((account.get("last_checked_at") for account in accounts if account.get("last_status") == "valid"), None)
+    page = _positive_query_int(request.query_params.get("page"), 1)
+    page_size = min(_positive_query_int(request.query_params.get("page_size") or request.query_params.get("pageSize"), OPENCODE_GO_PAGE_SIZE), OPENCODE_GO_MAX_PAGE_SIZE)
+    sort_by = str(request.query_params.get("sort_by") or request.query_params.get("sortBy") or "created_at").strip()
+    sort_order = str(request.query_params.get("sort_order") or request.query_params.get("sortOrder") or "desc").strip().lower()
+    if sort_by not in {"name", "created_at", "updated_at", "last_checked_at"}:
+        sort_by = "created_at"
+    if sort_order not in {"asc", "desc"}:
+        sort_order = "desc"
+    total = db.count_opencode_go_accounts()
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = min(page, total_pages)
+    accounts = [
+        public_opencode_go_account(row)
+        for row in db.list_opencode_go_accounts(
+            limit=page_size,
+            offset=(page - 1) * page_size,
+            sort_by=sort_by,
+            sort_order=sort_order,
+        )
+    ]
+    last_success = db.latest_successful_opencode_go_checked_at()
     return {
         "accounts": accounts,
+        "pagination": {
+            "page": page,
+            "page_size": page_size,
+            "pageSize": page_size,
+            "total": total,
+            "total_pages": total_pages,
+            "totalPages": total_pages,
+            "has_previous": page > 1,
+            "hasPrevious": page > 1,
+            "has_next": page < total_pages,
+            "hasNext": page < total_pages,
+            "sort_by": sort_by,
+            "sortBy": sort_by,
+            "sort_order": sort_order,
+            "sortOrder": sort_order,
+        },
         "summary": {
-            "account_count": len(accounts),
-            "accountCount": len(accounts),
+            "account_count": total,
+            "accountCount": total,
             "last_success_at": last_success,
             "lastSuccessAt": last_success,
         },
@@ -1578,6 +1636,66 @@ async def api_import_opencode_go_to_sub2api(request: Request, account_id: int):
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=exc.status_code)
     db.add_log("info", "opencode-go", f"{account['name']} 已导入 Sub2API: {result['name']}")
     return {"ok": True, **result}
+
+
+@app.post("/api/opencode-go/accounts/{account_id}/import-cpa")
+async def api_import_opencode_go_to_cpa(request: Request, account_id: int):
+    require_user(request)
+    account = db.get_opencode_go_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="OpenCode Go 账号不存在")
+    try:
+        result = await _import_opencode_go_account_to_cpa(account, cpa_admin_client())
+    except CpaAdminError as exc:
+        db.add_log("error", "opencode-go", f"{account['name']} 导入 CPA 失败: {exc}")
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=exc.status_code)
+    db.add_log("info", "opencode-go", f"{account['name']} 已导入 CPA: {result['name']}，模型 {result['model_count']} 个")
+    return {"ok": True, **result}
+
+
+@app.post("/api/opencode-go/accounts/import-cpa")
+async def api_bulk_import_opencode_go_to_cpa(request: Request):
+    require_user(request)
+    payload = await request.json()
+    try:
+        account_ids = _opencode_go_account_ids_payload(payload)
+        client = cpa_admin_client()
+    except (ValueError, CpaAdminError) as exc:
+        status_code = exc.status_code if isinstance(exc, CpaAdminError) else 400
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=status_code)
+
+    imported = []
+    failed = []
+    for account_id in account_ids:
+        account = db.get_opencode_go_account(account_id)
+        if not account:
+            failed.append({"id": account_id, "message": "OpenCode Go 账号不存在"})
+            continue
+        email = decrypt_value(account["email_enc"], db.secret_key) if account["email_enc"] else ""
+        try:
+            result = await _import_opencode_go_account_to_cpa(account, client)
+        except CpaAdminError as exc:
+            failed.append({"id": account_id, "email": email, "message": str(exc)})
+            db.add_log("error", "opencode-go", f"{account['name']} 批量导入 CPA 失败: {exc}")
+            continue
+        imported.append(result)
+        db.add_log("info", "opencode-go", f"{account['name']} 已批量导入 CPA: {result['name']}，模型 {result['model_count']} 个")
+    return {
+        "ok": True,
+        "count": len(imported),
+        "failed_count": len(failed),
+        "failedCount": len(failed),
+        "imported": imported,
+        "failed": failed,
+    }
+
+
+@app.get("/api/opencode-go/import-logs")
+async def api_opencode_go_import_logs(request: Request):
+    require_user(request)
+    page = _positive_query_int(request.query_params.get("page"), 1)
+    page_size = _positive_query_int(request.query_params.get("page_size") or request.query_params.get("pageSize"), LOG_PAGE_SIZE)
+    return log_page_payload(page, page_size, category="opencode-go", message_query="导入")
 
 
 @app.post("/api/opencode-go/accounts/{account_id}/login")
@@ -2127,6 +2245,7 @@ async def api_settings(request: Request):
         "settings": db.get_general_settings(),
         "smtp": public_smtp_settings(),
         "sub2api": public_sub2api_settings(),
+        "cpa": public_cpa_settings(),
         "reminders": public_reminders(),
     }
 
@@ -2227,6 +2346,24 @@ async def api_sub2api_settings(request: Request):
     db.set_setting(SUB2API_SITE_URL_SETTING, site_url)
     db.add_log("info", "settings", "API 更新 Sub2API 配置")
     return {"ok": True, "sub2api": public_sub2api_settings()}
+
+
+@app.post("/api/settings/cpa")
+async def api_cpa_settings(request: Request):
+    require_user(request)
+    payload = await request.json()
+    try:
+        authorization = normalize_cpa_authorization(
+            payload.get("authorization", payload.get("Authorization", payload.get("token", "")))
+        )
+        site_url = normalize_cpa_management_url(payload.get("site_url", payload.get("siteUrl", "")))
+    except CpaAdminError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=exc.status_code)
+    if authorization:
+        db.set_setting(CPA_AUTHORIZATION_SETTING, encrypt_value(authorization, db.secret_key) or "")
+    db.set_setting(CPA_SITE_URL_SETTING, site_url)
+    db.add_log("info", "settings", "API 更新 CPA 配置")
+    return {"ok": True, "cpa": public_cpa_settings()}
 
 
 @app.post("/api/settings/smtp/test")
@@ -2718,12 +2855,35 @@ def public_sub2api_settings() -> dict[str, Any]:
     }
 
 
+def public_cpa_settings() -> dict[str, Any]:
+    authorization_enc = db.get_setting(CPA_AUTHORIZATION_SETTING, "")
+    authorization = decrypt_value(authorization_enc, db.secret_key) if authorization_enc else ""
+    site_url = db.get_setting(CPA_SITE_URL_SETTING, "")
+    masked = mask_api_key(authorization) if authorization else ""
+    return {
+        "site_url": site_url,
+        "siteUrl": site_url,
+        "has_authorization": bool(authorization),
+        "hasAuthorization": bool(authorization),
+        "authorization_masked": masked,
+        "authorizationMasked": masked,
+    }
+
+
 def sub2api_admin_client() -> Sub2ApiAdminClient:
     admin_key_enc = db.get_setting(SUB2API_ADMIN_KEY_SETTING, "")
     admin_key = decrypt_value(admin_key_enc, db.secret_key) if admin_key_enc else ""
     site_url = db.get_setting(SUB2API_SITE_URL_SETTING, "")
     timeout = db.get_general_settings().get("request_timeout", REQUEST_TIMEOUT_SECONDS)
     return Sub2ApiAdminClient(site_url, admin_key, timeout=float(timeout or REQUEST_TIMEOUT_SECONDS))
+
+
+def cpa_admin_client() -> CpaAdminClient:
+    authorization_enc = db.get_setting(CPA_AUTHORIZATION_SETTING, "")
+    authorization = decrypt_value(authorization_enc, db.secret_key) if authorization_enc else ""
+    site_url = db.get_setting(CPA_SITE_URL_SETTING, "")
+    timeout = db.get_general_settings().get("request_timeout", REQUEST_TIMEOUT_SECONDS)
+    return CpaAdminClient(site_url, authorization, timeout=float(timeout or REQUEST_TIMEOUT_SECONDS))
 
 
 def _sub2api_import_group_ids(payload: Any) -> list[int]:
@@ -2750,6 +2910,38 @@ def _sub2api_import_group_ids(payload: Any) -> list[int]:
     if not group_ids:
         raise ValueError("请选择至少一个 Sub2API 分组")
     return group_ids
+
+
+def _opencode_go_account_ids_payload(payload: Any) -> list[int]:
+    if not isinstance(payload, dict):
+        raise ValueError("请求内容格式不正确")
+    raw = payload.get("account_ids", payload.get("accountIds", payload.get("ids", [])))
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list):
+        raise ValueError("账号 ID 必须是数组")
+    account_ids: list[int] = []
+    seen = set()
+    for item in raw:
+        try:
+            account_id = int(item)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("账号 ID 格式不正确") from exc
+        if account_id <= 0:
+            raise ValueError("账号 ID 格式不正确")
+        if account_id in seen:
+            continue
+        seen.add(account_id)
+        account_ids.append(account_id)
+    if not account_ids:
+        raise ValueError("请选择至少一个 OpenCode Go 账号")
+    return account_ids
+
+
+async def _import_opencode_go_account_to_cpa(account: Any, client: CpaAdminClient) -> dict[str, Any]:
+    email = decrypt_value(account["email_enc"], db.secret_key) if account["email_enc"] else ""
+    api_key = decrypt_value(account["api_key_enc"], db.secret_key) if account["api_key_enc"] else ""
+    return await client.import_opencode_go_account(email, api_key)
 
 
 def public_reminders() -> list[dict[str, Any]]:

@@ -174,6 +174,11 @@ def configure_sub2api(test_db: Database) -> None:
     test_db.set_setting("sub2api_admin_key_enc", encrypt_value("admin-secret", test_db.secret_key) or "")
 
 
+def configure_cpa(test_db: Database) -> None:
+    test_db.set_setting("cpa_site_url", "https://cpa.example/v0/management")
+    test_db.set_setting("cpa_authorization_enc", encrypt_value("cpa-secret", test_db.secret_key) or "")
+
+
 def test_opencode_go_account_encrypts_secrets(tmp_path):
     db = Database(str(tmp_path / "app.db"), "test-key")
     db.init()
@@ -496,6 +501,26 @@ def test_opencode_go_api_requires_login(tmp_path, monkeypatch):
 
     assert response.status_code == 401
     assert password_response.status_code == 401
+
+
+def test_opencode_go_import_logs_filters_import_messages(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    db.add_log("info", "opencode-go", "first@example.com 已导入 CPA: first@example.com，模型 2 个")
+    db.add_log("error", "opencode-go", "second@example.com 批量导入 CPA 失败: 请求 CPA 失败")
+    db.add_log("info", "opencode-go", "API 更新 OpenCode Go 账号: other@example.com")
+    db.add_log("info", "account", "API 批量导入 sub2Api 账号 1 个")
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.get("/api/opencode-go/import-logs")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["pagination"]["total"] == 2
+    assert [log["category"] for log in payload["logs"]] == ["opencode-go", "opencode-go"]
+    assert all("导入" in log["message"] for log in payload["logs"])
+    assert "API 更新 OpenCode Go 账号" not in response.text
+    assert "sub2Api" not in response.text
 
 
 def test_opencode_go_api_crud_and_masks_secrets(tmp_path, monkeypatch):
@@ -1016,3 +1041,231 @@ def test_opencode_go_import_sub2api_requires_groups(tmp_path, monkeypatch):
 
     assert response.status_code == 400
     assert "请选择至少一个" in response.json()["message"]
+
+
+def test_opencode_go_import_cpa_requires_config(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    account_id = db.upsert_opencode_go_account(
+        {
+            "name": "go-main",
+            "email": "user@example.com",
+            "password": "secret-password",
+            "api_key": "sk-opencode-secret",
+        }
+    )
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.post(f"/api/opencode-go/accounts/{account_id}/import-cpa")
+
+    assert response.status_code == 400
+    assert "CPA 站点地址" in response.json()["message"]
+
+
+def test_opencode_go_import_cpa_requires_api_key(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    configure_cpa(db)
+    account_id = db.upsert_opencode_go_account(
+        {
+            "name": "go-main",
+            "email": "user@example.com",
+            "password": "secret-password",
+        }
+    )
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.post(f"/api/opencode-go/accounts/{account_id}/import-cpa")
+
+    assert response.status_code == 400
+    assert "尚未获取 API key" in response.json()["message"]
+
+
+def test_opencode_go_import_cpa_requires_existing_account(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    configure_cpa(db)
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.post("/api/opencode-go/accounts/999/import-cpa")
+
+    assert response.status_code == 404
+    assert "OpenCode Go 账号不存在" in response.json()["detail"]
+
+
+def test_opencode_go_accounts_are_paginated_by_created_at_desc(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    account_ids = []
+    for index in range(25):
+        account_id = db.upsert_opencode_go_account(
+            {
+                "name": f"user{index:02d}@example.com",
+                "email": f"user{index:02d}@example.com",
+                "password": "secret-password",
+            }
+        )
+        account_ids.append(account_id)
+    with db.connect() as conn:
+        for index, account_id in enumerate(account_ids):
+            conn.execute(
+                "UPDATE opencode_go_accounts SET created_at = ?, updated_at = ? WHERE id = ?",
+                (f"2026-01-{index + 1:02d}T00:00:00+00:00", f"2026-01-{index + 1:02d}T00:00:00+00:00", account_id),
+            )
+
+    with TestClient(app) as client:
+        login(client)
+        first_page = client.get("/api/opencode-go/accounts")
+        second_page = client.get("/api/opencode-go/accounts", params={"page": 2})
+
+    assert first_page.status_code == 200
+    assert first_page.json()["pagination"]["page_size"] == 20
+    assert first_page.json()["pagination"]["total"] == 25
+    assert len(first_page.json()["accounts"]) == 20
+    assert [account["email"] for account in first_page.json()["accounts"][:2]] == [
+        "user24@example.com",
+        "user23@example.com",
+    ]
+    assert first_page.json()["accounts"][0]["created_at"] == "2026-01-25T00:00:00+00:00"
+    assert len(second_page.json()["accounts"]) == 5
+    assert second_page.json()["accounts"][0]["email"] == "user04@example.com"
+
+
+def test_opencode_go_import_cpa_upserts_openai_provider_with_all_models(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    configure_cpa(db)
+    account_id = db.upsert_opencode_go_account(
+        {
+            "name": "go-main",
+            "email": "user@example.com",
+            "password": "secret-password",
+            "api_key": "sk-opencode-secret",
+        }
+    )
+    DummySub2ApiClient.requests = []
+    DummySub2ApiClient.responses = [
+        DummySub2ApiResponse({"status_code": 200, "body": {"data": [{"id": "gpt-5"}, {"id": "gpt-5-mini"}, {"id": "gpt-5"}]}}),
+        DummySub2ApiResponse(
+            {
+                "openai-compatibility": [
+                    {
+                        "name": "user@example.com",
+                        "disabled": True,
+                        "headers": {"X-Keep": "1"},
+                        "models": [{"name": "old-model"}],
+                    },
+                    {"name": "other@example.com", "base-url": "https://other.example/v1"},
+                ]
+            }
+        ),
+        DummySub2ApiResponse({"ok": True}),
+    ]
+    monkeypatch.setattr("app.services.cpa_admin.httpx.AsyncClient", DummySub2ApiClient)
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.post(f"/api/opencode-go/accounts/{account_id}/import-cpa")
+        logs = client.get("/api/logs")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["name"] == "user@example.com"
+    assert payload["base_url"] == "https://opencode.ai/zen/go/v1"
+    assert payload["models"] == ["gpt-5", "gpt-5-mini"]
+    assert payload["model_count"] == 2
+    assert "sk-opencode-secret" not in response.text
+    assert "cpa-secret" not in response.text
+
+    model_request = DummySub2ApiClient.requests[0]
+    assert model_request["method"] == "POST"
+    assert model_request["url"] == "https://cpa.example/v0/management/api-call"
+    assert model_request["headers"]["Authorization"] == "Bearer cpa-secret"
+    assert model_request["json"] == {
+        "method": "GET",
+        "url": "https://opencode.ai/zen/go/v1/models",
+        "header": {"Authorization": "Bearer sk-opencode-secret"},
+    }
+
+    config_request = DummySub2ApiClient.requests[1]
+    assert config_request["method"] == "GET"
+    assert config_request["url"] == "https://cpa.example/v0/management/config"
+
+    save_request = DummySub2ApiClient.requests[2]
+    assert save_request["method"] == "PUT"
+    assert save_request["url"] == "https://cpa.example/v0/management/openai-compatibility"
+    saved_providers = save_request["json"]
+    assert len(saved_providers) == 2
+    assert saved_providers[0] == {
+        "name": "user@example.com",
+        "disabled": True,
+        "headers": {"X-Keep": "1"},
+        "base-url": "https://opencode.ai/zen/go/v1",
+        "api-key-entries": [{"api-key": "sk-opencode-secret"}],
+        "models": [{"name": "gpt-5"}, {"name": "gpt-5-mini"}],
+    }
+    assert saved_providers[1]["name"] == "other@example.com"
+    assert "sk-opencode-secret" not in logs.text
+    assert "cpa-secret" not in logs.text
+
+
+def test_opencode_go_bulk_import_cpa_imports_selected_accounts(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    configure_cpa(db)
+    first_id = db.upsert_opencode_go_account(
+        {
+            "name": "first@example.com",
+            "email": "first@example.com",
+            "password": "secret-password",
+            "api_key": "sk-first-secret",
+        }
+    )
+    missing_key_id = db.upsert_opencode_go_account(
+        {
+            "name": "missing@example.com",
+            "email": "missing@example.com",
+            "password": "secret-password",
+        }
+    )
+    second_id = db.upsert_opencode_go_account(
+        {
+            "name": "second@example.com",
+            "email": "second@example.com",
+            "password": "secret-password",
+            "api_key": "sk-second-secret",
+        }
+    )
+    DummySub2ApiClient.requests = []
+    DummySub2ApiClient.responses = [
+        DummySub2ApiResponse({"status_code": 200, "body": {"data": [{"id": "gpt-5"}]}}),
+        DummySub2ApiResponse({"openai-compatibility": []}),
+        DummySub2ApiResponse({"ok": True}),
+        DummySub2ApiResponse({"status_code": 200, "body": {"data": [{"id": "gpt-5-mini"}]}}),
+        DummySub2ApiResponse({"openai-compatibility": []}),
+        DummySub2ApiResponse({"ok": True}),
+    ]
+    monkeypatch.setattr("app.services.cpa_admin.httpx.AsyncClient", DummySub2ApiClient)
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.post(
+            "/api/opencode-go/accounts/import-cpa",
+            json={"account_ids": [first_id, missing_key_id, second_id, first_id]},
+        )
+        logs = client.get("/api/logs")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 2
+    assert payload["failed_count"] == 1
+    assert [item["name"] for item in payload["imported"]] == ["first@example.com", "second@example.com"]
+    assert payload["failed"][0]["id"] == missing_key_id
+    assert "尚未获取 API key" in payload["failed"][0]["message"]
+    model_requests = [request for request in DummySub2ApiClient.requests if request["url"].endswith("/api-call")]
+    assert len(model_requests) == 2
+    assert model_requests[0]["json"]["header"]["Authorization"] == "Bearer sk-first-secret"
+    assert model_requests[1]["json"]["header"]["Authorization"] == "Bearer sk-second-secret"
+    assert "sk-first-secret" not in response.text
+    assert "sk-second-secret" not in response.text
+    assert "cpa-secret" not in response.text
+    assert "sk-first-secret" not in logs.text
+    assert "sk-second-secret" not in logs.text
+    assert "cpa-secret" not in logs.text
