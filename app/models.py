@@ -200,6 +200,7 @@ class Database:
                     name TEXT NOT NULL UNIQUE,
                     email_enc TEXT NOT NULL,
                     password_enc TEXT,
+                    recovery_email_enc TEXT,
                     storage_state_enc TEXT,
                     workspace_id TEXT,
                     api_key_enc TEXT,
@@ -254,6 +255,7 @@ class Database:
             self._migrate_accounts_group_rate_changed(conn)
             self._migrate_accounts_visible(conn)
             self._migrate_accounts_eliminated(conn)
+            self._migrate_opencode_go_recovery_email(conn)
             self._migrate_group_rate_records_monitor_group(conn)
             conn.execute(
                 """
@@ -441,6 +443,34 @@ class Database:
         column_names = {row["name"] for row in columns}
         if "is_eliminated" not in column_names:
             conn.execute("ALTER TABLE accounts ADD COLUMN is_eliminated INTEGER NOT NULL DEFAULT 0")
+
+    def _migrate_opencode_go_recovery_email(self, conn: sqlite3.Connection) -> None:
+        columns = conn.execute("PRAGMA table_info(opencode_go_accounts)").fetchall()
+        column_names = {row["name"] for row in columns}
+        if "recovery_email_enc" not in column_names:
+            conn.execute("ALTER TABLE opencode_go_accounts ADD COLUMN recovery_email_enc TEXT")
+        rows = conn.execute("SELECT id, name, email_enc FROM opencode_go_accounts ORDER BY id").fetchall()
+        seen_emails: set[str] = set()
+        for row in rows:
+            try:
+                email = str(decrypt_value(row["email_enc"], self.secret_key) or "").strip()
+            except Exception:
+                continue
+            if not email or email in seen_emails or email == row["name"]:
+                continue
+            seen_emails.add(email)
+            conn.execute(
+                """
+                UPDATE opencode_go_accounts
+                SET name = ?, updated_at = ?
+                WHERE id = ?
+                  AND NOT EXISTS (
+                    SELECT 1 FROM opencode_go_accounts AS existing
+                    WHERE existing.name = ? AND existing.id != ?
+                  )
+                """,
+                (email, utc_now(), row["id"], email, row["id"]),
+            )
 
     @staticmethod
     def _migrate_group_rate_records_monitor_group(conn: sqlite3.Connection) -> None:
@@ -1005,12 +1035,11 @@ class Database:
 
     def upsert_opencode_go_account(self, data: dict[str, Any]) -> int:
         now = utc_now()
-        name = str(data.get("name") or "").strip()
         email = str(data.get("email") or "").strip()
-        if not name:
-            raise ValueError("名称不能为空")
         if not email:
             raise ValueError("Google 邮箱不能为空")
+        name = email
+        recovery_email_enc = encrypt_value(str(data.get("recovery_email") or data.get("recoveryEmail") or "").strip(), self.secret_key)
         password_enc = encrypt_value(data.get("password"), self.secret_key)
         storage_state_enc = encrypt_value(_json_dumps(data.get("storage_state")), self.secret_key) if data.get("storage_state") else None
         api_key = str(data.get("api_key") or "").strip()
@@ -1021,13 +1050,14 @@ class Database:
             conn.execute(
                 """
                 INSERT INTO opencode_go_accounts (
-                    name, email_enc, password_enc, storage_state_enc, workspace_id,
+                    name, email_enc, password_enc, recovery_email_enc, storage_state_enc, workspace_id,
                     api_key_enc, api_key_masked, is_enabled, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(name) DO UPDATE SET
                     email_enc = excluded.email_enc,
                     password_enc = COALESCE(excluded.password_enc, opencode_go_accounts.password_enc),
+                    recovery_email_enc = excluded.recovery_email_enc,
                     storage_state_enc = COALESCE(excluded.storage_state_enc, opencode_go_accounts.storage_state_enc),
                     workspace_id = COALESCE(excluded.workspace_id, opencode_go_accounts.workspace_id),
                     api_key_enc = COALESCE(excluded.api_key_enc, opencode_go_accounts.api_key_enc),
@@ -1039,6 +1069,7 @@ class Database:
                     name,
                     encrypt_value(email, self.secret_key),
                     password_enc,
+                    recovery_email_enc,
                     storage_state_enc,
                     data.get("workspace_id") or data.get("workspaceId"),
                     api_key_enc,
@@ -1055,12 +1086,11 @@ class Database:
         current = self.get_opencode_go_account(account_id)
         if not current:
             raise ValueError("OpenCode Go 账号不存在")
-        name = str(data.get("name", current["name"]) or "").strip()
         email = str(data.get("email") or decrypt_value(current["email_enc"], self.secret_key) or "").strip()
-        if not name:
-            raise ValueError("名称不能为空")
         if not email:
             raise ValueError("Google 邮箱不能为空")
+        name = email
+        recovery_email_enc = encrypt_value(str(data.get("recovery_email") or data.get("recoveryEmail") or "").strip(), self.secret_key)
         password_enc = encrypt_value(data.get("password"), self.secret_key)
         storage_state_enc = None
         if "storage_state" in data:
@@ -1075,6 +1105,7 @@ class Database:
                 UPDATE opencode_go_accounts
                 SET name = ?, email_enc = ?,
                     password_enc = COALESCE(?, password_enc),
+                    recovery_email_enc = ?,
                     storage_state_enc = CASE WHEN ? THEN ? ELSE storage_state_enc END,
                     workspace_id = COALESCE(?, workspace_id),
                     api_key_enc = COALESCE(?, api_key_enc),
@@ -1087,6 +1118,7 @@ class Database:
                     name,
                     encrypt_value(email, self.secret_key),
                     password_enc,
+                    recovery_email_enc,
                     1 if "storage_state" in data else 0,
                     storage_state_enc,
                     data.get("workspace_id") or data.get("workspaceId"),

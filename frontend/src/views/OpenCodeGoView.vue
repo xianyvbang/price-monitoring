@@ -75,7 +75,6 @@ const sub2ApiImportName = computed(() => {
 });
 
 const rules = {
-  name: [{ required: true, message: "请输入名称", trigger: "blur" }],
   email: [{ required: true, message: "请输入 Google 邮箱", trigger: "blur" }],
   password: [
     {
@@ -126,9 +125,9 @@ function normalizedQueryInterval(value) {
 function defaultForm() {
   return {
     id: "",
-    name: "",
     email: "",
     password: "",
+    recovery_email: "",
     workspace_id: "",
     is_enabled: false
   };
@@ -177,9 +176,9 @@ function openEdit(account) {
   dialogMode.value = "edit";
   Object.assign(form, {
     id: account.id,
-    name: account.name || "",
     email: account.email || "",
     password: "",
+    recovery_email: account.recovery_email || account.recoveryEmail || "",
     workspace_id: account.workspace_id || account.workspaceId || "",
     is_enabled: boolValue(account.is_enabled)
   });
@@ -325,7 +324,7 @@ function upsertLocal(account) {
 }
 
 async function deleteAccount(account) {
-  await ElMessageBox.confirm(`确定删除 ${account.name} 吗？`, "删除 OpenCode Go 账号", { type: "warning" });
+  await ElMessageBox.confirm(`确定删除 ${account.email} 吗？`, "删除 OpenCode Go 账号", { type: "warning" });
   await api.deleteOpencodeGoAccount(account.id);
   accounts.value = accounts.value.filter((item) => item.id !== account.id);
   summary.value = { ...summary.value, account_count: accounts.value.length, accountCount: accounts.value.length };
@@ -708,11 +707,11 @@ onBeforeUnmount(() => {
       </div>
       <template v-if="!isMobile">
         <el-table :data="accounts" border stripe row-key="id" style="width: 100%">
-          <el-table-column label="名称" min-width="150" fixed>
-            <template #default="{ row }"><strong>{{ row.name }}</strong></template>
-          </el-table-column>
-          <el-table-column label="Google 邮箱" min-width="220">
+          <el-table-column label="Google 邮箱" min-width="220" fixed>
             <template #default="{ row }"><span class="credentials-text">{{ row.email }}</span></template>
+          </el-table-column>
+          <el-table-column label="恢复电子邮件" min-width="220">
+            <template #default="{ row }"><span class="credentials-text">{{ row.recovery_email || row.recoveryEmail || "-" }}</span></template>
           </el-table-column>
           <el-table-column label="状态" width="105">
             <template #default="{ row }"><el-tag :type="statusType(row)">{{ statusText(row) }}</el-tag></template>
@@ -780,9 +779,9 @@ onBeforeUnmount(() => {
         <article v-for="row in accounts" :key="row.id" class="mobile-card">
           <div class="mobile-card-head">
             <div class="mobile-card-title">
-              <strong>{{ row.name }}</strong>
+              <strong>{{ row.email }}</strong>
               <div class="mobile-card-meta">
-                <span>{{ row.email }}</span>
+                <span>恢复电子邮件: {{ row.recovery_email || row.recoveryEmail || "-" }}</span>
                 <span>API key: {{ row.api_key_masked || row.apiKeyMasked || "未找到" }}</span>
               </div>
             </div>
@@ -827,14 +826,14 @@ onBeforeUnmount(() => {
 
     <el-dialog v-model="dialogVisible" :title="dialogMode === 'create' ? '添加 OpenCode Go 账号' : '编辑 OpenCode Go 账号'" width="560px">
       <el-form ref="formRef" :model="form" :rules="rules" label-position="top" @submit.prevent="submitAccount">
-        <el-form-item label="名称" prop="name">
-          <el-input v-model="form.name" placeholder="例如 opencode-main" />
-        </el-form-item>
         <el-form-item label="Google 邮箱" prop="email">
           <el-input v-model="form.email" autocomplete="username" />
         </el-form-item>
         <el-form-item label="Google 密码" prop="password">
           <el-input v-model="form.password" type="password" show-password autocomplete="current-password" :placeholder="dialogMode === 'edit' ? '留空表示不修改' : ''" />
+        </el-form-item>
+        <el-form-item label="恢复电子邮件">
+          <el-input v-model="form.recovery_email" autocomplete="email" />
         </el-form-item>
         <el-form-item label="Workspace ID">
           <el-input v-model="form.workspace_id" placeholder="可留空，登录后自动识别" />
@@ -859,13 +858,13 @@ onBeforeUnmount(() => {
             type="textarea"
             :rows="12"
             resize="vertical"
-            placeholder="user1@example.com|password1&#10;user2@example.com|password2"
+            placeholder="user1@example.com|password1&#10;user2@example.com|password2|recover@example.com"
             autocomplete="off"
           />
         </el-form-item>
         <div class="import-helper">
-          <span>格式：邮箱|邮箱密码，一行一条</span>
-          <span>名称会自动使用邮箱，空行会跳过，重复名称会更新原账号</span>
+          <span>格式：账号|密码 或 账号|密码|恢复电子邮件，一行一条</span>
+          <span>账号会作为 Google 邮箱使用，空行会跳过，重复账号会更新原账号</span>
           <span>待导入 {{ bulkPreviewCount }} 行</span>
         </div>
       </el-form>
@@ -879,7 +878,7 @@ onBeforeUnmount(() => {
 
     <el-dialog v-model="sub2ApiImportVisible" title="导入 Sub2API" width="680px">
       <el-form label-position="top" @submit.prevent="submitSub2ApiImport">
-        <el-form-item label="导入账号名称">
+        <el-form-item label="导入账号">
           <el-input :model-value="sub2ApiImportName" readonly />
         </el-form-item>
         <el-form-item label="Sub2API 分组">
@@ -993,7 +992,7 @@ onBeforeUnmount(() => {
     </el-dialog>
 
     <el-dialog v-model="historyVisible" title="OpenCode Go 历史" width="900px">
-      <p class="muted">{{ historyAccount?.name }} · {{ historyAccount?.email }}</p>
+      <p class="muted">{{ historyAccount?.email }}</p>
       <el-table v-loading="historyLoading" :data="historyRecords" border stripe>
         <el-table-column label="时间" width="165">
           <template #default="{ row }">{{ formatTime(row.checked_at) }}</template>

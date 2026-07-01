@@ -475,11 +475,15 @@ def public_opencode_go_account(row: Any, include_api_key: bool = False) -> dict[
     data = row_to_dict(row)
     email_enc = data.pop("email_enc", None)
     password_enc = data.pop("password_enc", None)
+    recovery_email_enc = data.pop("recovery_email_enc", None)
     storage_state_enc = data.pop("storage_state_enc", None)
     api_key_enc = data.pop("api_key_enc", None)
     email = decrypt_value(email_enc, db.secret_key) if email_enc else ""
+    recovery_email = decrypt_value(recovery_email_enc, db.secret_key) if recovery_email_enc else ""
     api_key = decrypt_value(api_key_enc, db.secret_key) if include_api_key and api_key_enc else None
     data["email"] = email
+    data["recovery_email"] = recovery_email
+    data["recoveryEmail"] = recovery_email
     data["has_password"] = bool(password_enc)
     data["hasPassword"] = data["has_password"]
     data["has_session"] = bool(storage_state_enc)
@@ -2296,18 +2300,15 @@ def _account_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
 def _opencode_go_account_payload(payload: dict[str, Any], require_password: bool = False) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("请求内容格式不正确")
-    name = str(payload.get("name") or "").strip()
     email = str(payload.get("email") or "").strip()
     password = str(payload.get("password") or "").strip()
-    if not name:
-        raise ValueError("名称不能为空")
     if not email:
         raise ValueError("Google 邮箱不能为空")
     if require_password and not password:
         raise ValueError("Google 密码不能为空")
     data = {
-        "name": name,
         "email": email,
+        "recovery_email": str(payload.get("recovery_email") or payload.get("recoveryEmail") or "").strip(),
         "is_enabled": _to_bool(payload.get("is_enabled", payload.get("isEnabled", payload.get("enabled", False)))),
     }
     if password:
@@ -2329,22 +2330,25 @@ def import_bulk_opencode_go_accounts(bulk_text: str) -> dict[str, Any]:
         raw_line = line.strip()
         if not raw_line:
             continue
-        if "|" not in raw_line:
-            errors.append(f"第 {line_number} 行格式错误，请使用 邮箱|邮箱密码")
+        parts = [part.strip() for part in raw_line.split("|")]
+        if len(parts) not in {2, 3}:
+            errors.append(f"第 {line_number} 行格式错误，请使用 账号|密码 或 账号|密码|恢复电子邮件")
             continue
-        email, password = [part.strip() for part in raw_line.split("|", 1)]
+        email = parts[0]
+        password = parts[1]
+        recovery_email = parts[2] if len(parts) == 3 else ""
         if not email:
-            errors.append(f"第 {line_number} 行缺少邮箱")
+            errors.append(f"第 {line_number} 行缺少账号")
             continue
         if not password:
-            errors.append(f"第 {line_number} 行缺少邮箱密码")
+            errors.append(f"第 {line_number} 行缺少密码")
             continue
         normalized_email = email.lower()
         if normalized_email in seen_emails:
-            errors.append(f"第 {line_number} 行邮箱重复: {email}")
+            errors.append(f"第 {line_number} 行账号重复: {email}")
             continue
         seen_emails.add(normalized_email)
-        accounts.append({"name": email, "email": email, "password": password, "is_enabled": False})
+        accounts.append({"email": email, "password": password, "recovery_email": recovery_email, "is_enabled": False})
     if errors:
         raise ValueError("；".join(errors[:5]) + ("；..." if len(errors) > 5 else ""))
     if not accounts:
