@@ -64,6 +64,50 @@
     return json;
   }
 
+  // 深度遍历，从 _server 响应（session.get 等）里解出 workspace_id
+  // 与 app/services/opencode_go.py _workspace_id_from_session 字段/结构保持一致
+  const WS_KEYS = ["workspaceID", "workspaceId", "workspace_id", "activeWorkspaceID", "activeWorkspaceId", "currentWorkspaceId"];
+  const WS_OBJ_KEYS = ["workspace", "activeWorkspace", "currentWorkspace"];
+
+  function looksLikeWorkspaceId(v) {
+    return typeof v === "string" && /^wrk_[A-Za-z0-9]+$/.test(v);
+  }
+
+  function scanForWorkspace(data, depth = 0) {
+    if (depth > 10 || data == null) return null;
+    if (Array.isArray(data)) {
+      for (const item of data) {
+        const w = scanForWorkspace(item, depth + 1);
+        if (w) return w;
+      }
+      return null;
+    }
+    if (typeof data === "object") {
+      for (const k of WS_KEYS) {
+        const v = data[k];
+        if (looksLikeWorkspaceId(v)) return v;
+      }
+      for (const k of WS_OBJ_KEYS) {
+        const obj = data[k];
+        if (obj && typeof obj === "object") {
+          const v = obj.id || obj.workspaceID || obj.workspaceId;
+          if (looksLikeWorkspaceId(v)) return v;
+        }
+      }
+      const list = data.workspaces;
+      if (Array.isArray(list)) {
+        for (const w of list) {
+          if (w && typeof w === "object" && looksLikeWorkspaceId(w.id)) return w.id;
+        }
+      }
+      for (const v of Object.values(data)) {
+        const w = scanForWorkspace(v, depth + 1);
+        if (w) return w;
+      }
+    }
+    return null;
+  }
+
   function parseWorkspaceId(pathname) {
     // /workspace/wrk_xxx 或 /workspace/wrk_xxx/keys
     const m = String(pathname || "").match(/wrk_[A-Za-z0-9]+/);
@@ -132,8 +176,9 @@
         cloned.json().then((json) => {
           const body = unwrapServerBody(json);
           const key = scanForKeys(body);
-          if (key) {
-            storeCapture({ apiKey: key, capturedAt: Date.now() });
+          const ws = scanForWorkspace(body);
+          if (key || ws) {
+            storeCapture({ workspaceId: ws || undefined, apiKey: key || undefined, capturedAt: Date.now() });
           }
         }).catch(() => {});
       }).catch(() => {});
@@ -161,8 +206,9 @@
         }
         const body = unwrapServerBody(json);
         const key = scanForKeys(body);
-        if (key) {
-          storeCapture({ apiKey: key, capturedAt: Date.now() });
+        const ws = scanForWorkspace(body);
+        if (key || ws) {
+          storeCapture({ workspaceId: ws || undefined, apiKey: key || undefined, capturedAt: Date.now() });
         }
       } catch {}
     });
