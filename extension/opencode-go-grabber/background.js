@@ -37,13 +37,14 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
 );
 
 async function getStored() {
-  const keys = ["appBase", "sessionCookieName", "adminUser", "adminPassword", "defaultRecoveryEmail"];
+  const keys = ["appBase", "sessionCookieName", "adminUser", "adminPassword", "defaultRecoveryEmail", "pushTimeoutMs"];
   const local = await chrome.storage.local.get(keys);
   return {
     appBase: (local.appBase || DEFAULT_APP_BASE).replace(/\/$/, ""),
     sessionCookie: local.sessionCookieName || DEFAULT_SESSION_COOKIE,
     adminUser: local.adminUser || "",
     adminPassword: local.adminPassword || "",
+    pushTimeoutMs: local.pushTimeoutMs || DEFAULT_PUSH_TIMEOUT_MS,
   };
 }
 
@@ -70,18 +71,37 @@ function cookieHasAuth(cookieHeader) {
   return /(^|;\s*)auth=([^;]+)/.test(cookieHeader || "");
 }
 
-// 调 app 接口：自动带会话 cookie；遇 401 用 admin 凭据兜底登录后重试一次
+// 推送到 app 的单次请求超时（毫秒），默认 20 秒。可在 options 页通过
+// pushTimeoutMs 覆盖（单位毫秒）。
+const DEFAULT_PUSH_TIMEOUT_MS = 20000;
+
+// 调 app 接口：自动带会话 cookie；遇 401 用 admin 凭据兜底登录后重试一次。
+// 每次请求挂 AbortController，超过 pushTimeoutMs（默认 20s）即中止并返回超时错误。
 async function appFetch(cfg, path, init = {}) {
   const url = cfg.appBase + path;
-  const doFetch = () =>
-    chrome.cookies.get({ url: cfg.appBase, name: cfg.sessionCookie }).then((ck) => {
+  const timeoutMs = cfg.pushTimeoutMs || DEFAULT_PUSH_TIMEOUT_MS;
+  const doFetch = () => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    return chrome.cookies.get({ url: cfg.appBase, name: cfg.sessionCookie }).then((ck) => {
       const headers = Object.assign({}, init.headers || {});
       if (ck && ck.value) headers["Cookie"] = `${cfg.sessionCookie}=${ck.value}`;
       if (init.body && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
-      return fetch(url, Object.assign({}, init, { headers }));
+      return fetch(url, Object.assign({}, init, { headers, signal: ctrl.signal })).finally(() =>
+        clearTimeout(timer)
+      );
     });
+  };
 
-  let resp = await doFetch();
+  let resp;
+  try {
+    resp = await doFetch();
+  } catch (e) {
+    if (e && e.name === "AbortError") {
+      return { ok: false, status: 0, _timeout: true, json: async () => ({ message: `请求超时（${timeoutMs / 1000}s）` }) };
+    }
+    throw e;
+  }
   if (resp.status === 401 && cfg.adminUser && cfg.adminPassword) {
     const ok = await loginToApp(cfg);
     if (ok) resp = await doFetch();
@@ -271,12 +291,29 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true;
   }
   if (msg.type === "push") {
-    pushToApp(msg.payload).then(sendResponse);
+    // 防止突发异常抛出后 sendResponse 不被调用 → 调用方永远 pending（卡在「推送中」）。
+    pushToApp(msg.payload).then(
+      (r) => { try { sendResponse(r); } catch {} },
+      (e) => { try { sendResponse({ ok: false, message: (e && e.message) || "推送异常" }); } catch {} }
+    );
     return true;
   }
   if (msg.type === "grab-from-page") {
     grabFromPage().then(sendResponse);
     return true;
+  }
+  if (msg.type === "clear-capture") {
+    // 清空已抓到的 capture 缓存：内存副本 + session storage，供面板「清空值」按钮调用。
+    latestCapture = null;
+    try {
+      chrome.storage.session.remove(["capture"]);
+      // opencodeCookie 也一并清掉，让 cookie 状态回到「未捕获」
+      chrome.storage.session.remove(["opencodeCookie", "opencodeCookieAt"]);
+    } catch {}
+    latestCookieHeader = "";
+    latestCookieAt = 0;
+    sendResponse({ ok: true });
+    return false;
   }
   return false;
 });

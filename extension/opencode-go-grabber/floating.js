@@ -71,6 +71,8 @@
       <textarea id="accountLine" rows="2" placeholder="谷歌邮箱|谷歌密码|恢复邮箱"></textarea>
       <div class="chk"><input type="checkbox" id="enabled" /><label for="enabled">启用自动刷新</label></div>
       <button class="push" id="push">推送到 App</button>
+      <button class="push" id="navClick" style="background:#64748b;margin-top:6px;">模拟点击 workspace nav</button>
+      <button class="push" id="clearBtn" style="background:#dc2626;margin-top:6px;">清空已抓取值</button>
       <div id="status"></div>
       <div class="muted">需先在 <a id="optionsLink">选项页</a> 配置 app 地址与账号。</div>
     </div>
@@ -148,7 +150,79 @@
     return { email: segs[0] || "", password: segs[1] || "", recoveryEmail: segs[2] || "" };
   }
 
+// ---- 模拟点击 workspace nav 下指定 a 标签 ----
+  // 只点中文名称为「go」或「API 密钥」的两个链接。
+  // 不用真路由跳转（会重载页面、打断自身）。改派发完整真实鼠标事件序列
+  // （pointerdown→mousedown→pointerup→mouseup→click），让 React 的 onClick 被触发，
+  // 客户端路由自行导航、加载对应数据（发出 /_server 请求，便于抓取 api_key）。
+  // 仍不生效时兜底用 history.pushState 通知路由。
+  const NAV_TARGETS = ["go", "API 密钥", "API密钥", "API Keys", "API keys"];
+  function navLinkText(a) {
+    return (a.textContent || "").trim();
+  }
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  function realClick(a) {
+    const opts = { bubbles: true, cancelable: true, view: window, button: 0, isTrusted: false };
+    try {
+      a.dispatchEvent(new PointerEvent("pointerdown", opts));
+      a.dispatchEvent(new MouseEvent("mousedown", opts));
+      a.dispatchEvent(new PointerEvent("pointerup", opts));
+      a.dispatchEvent(new MouseEvent("mouseup", opts));
+      a.dispatchEvent(new MouseEvent("click", opts));
+      return true;
+    } catch {
+      try { a.click(); return true; } catch { return false; }
+    }
+  }
+
+  $("navClick").addEventListener("click", async () => {
+    const nav = document.querySelector('div[data-component="workspace-nav-items"]');
+    if (!nav) { setStatus("未找到 workspace-nav-items", "bad"); return; }
+    const links = Array.from(nav.querySelectorAll("a")).filter((a) =>
+      NAV_TARGETS.includes(navLinkText(a))
+    );
+    if (!links.length) { setStatus("未找到 go / API 密钥 链接", "bad"); return; }
+    $("navClick").disabled = true;
+
+    const done = [];
+    for (const a of links) {
+      const text = navLinkText(a);
+      setStatus(`模拟点击：${text}…`);
+      const ok = realClick(a);
+      if (ok) done.push(text);
+      // 给客户端路由 + _server 请求留出时间
+      await sleep(1200);
+    }
+
+    $("navClick").disabled = false;
+    setStatus(`完成，已点击 ${done.length} 个：${done.join("、") || "无"}`, "ok");
+  });
+
   // ---- 推送 ----
+  // 推送涉及 app 端建号+导入+刷新三步，可能较慢；这里加 60s 兜底超时，避免 SW 休眠
+  // 导致 channel 关闭、按钮卡在「推送中…」拿不到回调。
+  function bgWithTimeout(msg, timeoutMs = 60000) {
+    return new Promise((resolve) => {
+      let done = false;
+      const timer = setTimeout(() => {
+        if (done) return;
+        done = true;
+        resolve({ ok: false, message: "推送超时（60s），请稍后在 app 端确认结果" });
+      }, timeoutMs);
+      chrome.runtime.sendMessage(msg, (r) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        if (chrome.runtime.lastError) {
+          resolve({ ok: false, message: (chrome.runtime.lastError.message || "扩展通信中断") });
+          return;
+        }
+        resolve(r || {});
+      });
+    });
+  }
+
   $("push").addEventListener("click", async () => {
     const acct = parseAccountLine($("accountLine").value);
     const { workspaceId, cookieHeader } = await refresh();
@@ -166,13 +240,28 @@
     }
     setStatus("推送中…");
     $("push").disabled = true;
-    const r = await bg({ type: "push", payload });
+    const r = await bgWithTimeout({ type: "push", payload });
     $("push").disabled = false;
     if (r.ok) {
       const masked = r.maskedKey || (r.account && (r.account.api_key_masked || r.account.apiKeyMasked)) || "";
       setStatus(`成功，账号 ID=${r.accountId}${masked ? "，key：" + masked : ""}`, "ok");
     } else {
       setStatus(r.message || "推送失败", "bad");
+    }
+  });
+
+  // ---- 清空已抓取的 workspace / cookie / api_key ----
+  $("clearBtn").addEventListener("click", async () => {
+    const r = await bg({ type: "clear-capture" });
+    if (r.ok) {
+      $("apiKey").textContent = "尚未抓到";
+      $("apiKey").dataset.raw = "";
+      $("workspaceId").textContent = "（已清空，稍候自动更新）";
+      $("cookieState").textContent = "已清空";
+      $("cookieState").className = "val";
+      setStatus("已清空抓取值", "ok");
+    } else {
+      setStatus("清空失败", "bad");
     }
   });
 })();
