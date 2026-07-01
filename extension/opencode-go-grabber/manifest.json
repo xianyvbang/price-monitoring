@@ -29,6 +29,13 @@
       "all_frames": false
     },
     {
+      "matches": ["https://opencode.ai/*"],
+      "js": ["content_main.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": false
+    },
+    {
       "matches": ["https://opencode.ai/workspace/*"],
       "js": ["floating.js"],
       "run_at": "document_idle",

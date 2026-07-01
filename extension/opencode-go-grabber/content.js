@@ -240,38 +240,17 @@
     setInterval(fire, 1000);
   }
 
-  // ---- fetch 猴补丁 ----
-  const _fetch = window.fetch;
-  window.fetch = function (...args) {
-    const p = _fetch.apply(this, args);
-    const url = typeof args[0] === "string" ? args[0] : args[0] && args[0].url;
-    if (url && url.includes("/_server")) {
-      p.then((resp) => {
-        if (!resp.ok) return;
-        const cloned = resp.clone();
-        cloned.text().then((text) => handleServerText(text)).catch(() => {});
-      }).catch(() => {});
+  // ---- 接收 MAIN world（content_main.js）拦到的 /_server 响应文本 ----
+  // isolated world 自己 hook fetch 拦不到页面真实调用，hook 已移到 MAIN world 脚本。
+  window.addEventListener("message", (event) => {
+    if (event.source !== window) return;
+    const d = event.data;
+    if (!d || d.source !== "opencode-go-grabber-main") return;
+    const p = d.payload || {};
+    if (p.kind === "server-text" && typeof p.text === "string") {
+      handleServerText(p.text);
     }
-    return p;
-  };
-
-  // ---- XHR 猴补丁（部分接口走 XHR） ----
-  const _open = XMLHttpRequest.prototype.open;
-  const _send = XMLHttpRequest.prototype.send;
-  XMLHttpRequest.prototype.open = function (method, url, ...rest) {
-    this.__grabberUrl = url;
-    return _open.call(this, method, url, ...rest);
-  };
-  XMLHttpRequest.prototype.send = function (...args) {
-    this.addEventListener("load", () => {
-      try {
-        if (!this.__grabberUrl || !String(this.__grabberUrl).includes("/_server")) return;
-        if (this.status < 200 || this.status >= 300) return;
-        handleServerText(this.responseText);
-      } catch {}
-    });
-    return _send.apply(this, args);
-  };
+  });
 
   // ---- 响应取值请求 ----
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
