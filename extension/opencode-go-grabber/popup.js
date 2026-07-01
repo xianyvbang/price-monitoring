@@ -11,9 +11,18 @@ function setStatus(text, kind) {
   s.className = kind || "";
 }
 
-async function loadDefaults() {
-  const data = await chrome.storage.local.get(["defaultRecoveryEmail"]);
-  if (data.defaultRecoveryEmail && !$("recoveryEmail").value) $("recoveryEmail").value = data.defaultRecoveryEmail;
+// 解析「邮箱|密码|恢复邮箱」格式（恢复邮箱可空）。分隔符支持 | 或制表符。
+// 若只粘贴了纯邮箱（无分隔符），则视为 email=该串，其余为空。
+function parseAccountLine(line) {
+  const raw = String(line || "").trim();
+  if (!raw) return { email: "", password: "", recoveryEmail: "" };
+  // 分隔符支持 | 或制表符；空段保留以判断密码显空的情况
+  const segs = raw.split(/[|\t]/).map((s) => s.trim());
+  return {
+    email: segs[0] || "",
+    password: segs[1] || "",
+    recoveryEmail: segs[2] || "",
+  };
 }
 
 async function refresh() {
@@ -53,10 +62,11 @@ document.getElementById("optionsLink").addEventListener("click", (e) => {
 });
 
 document.getElementById("push").addEventListener("click", async () => {
+  const acct = parseAccountLine($("accountLine").value);
   const payload = {
-    email: $("email").value.trim(),
-    password: $("password").value,
-    recoveryEmail: $("recoveryEmail").value.trim(),
+    email: acct.email,
+    password: acct.password,
+    recoveryEmail: acct.recoveryEmail,
     workspaceId: $("workspaceId").textContent.startsWith("（") ? "" : $("workspaceId").textContent,
     cookieHeader: (await new Promise((res) =>
       chrome.runtime.sendMessage({ type: "get-snapshot" }, (r) => res((r && r.cookieHeader) || ""))
@@ -64,7 +74,7 @@ document.getElementById("push").addEventListener("click", async () => {
     enabled: $("enabled").checked,
   };
   if (!payload.email || !payload.password) {
-    setStatus("请填写邮箱与密码", "bad");
+    setStatus("请按 邮箱|密码|恢复邮箱 粘贴（恢复邮箱可空）", "bad");
     return;
   }
   setStatus("推送中…");
@@ -82,4 +92,3 @@ document.getElementById("push").addEventListener("click", async () => {
 });
 
 refresh();
-loadDefaults();
