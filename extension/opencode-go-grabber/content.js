@@ -116,6 +116,7 @@
   function handleServerText(text) {
     const key = extractKeyFromText(text);
     const ws = extractWorkspaceFromText(text);
+    try { console.log("%c[Grabber ISO]", "color:#16a34a;font-weight:bold", "handleServerText: key=", key, "ws=", ws, "len=", (text||"").length); } catch {}
     // 同时尝试 JSON 路径（结构化解析更准，比如带掩码判断）
     if (text) {
       try {
@@ -242,12 +243,14 @@
 
   // ---- 接收 MAIN world（content_main.js）拦到的 /_server 响应文本 ----
   // isolated world 自己 hook fetch 拦不到页面真实调用，hook 已移到 MAIN world 脚本。
+  const dbgIso = (...a) => { try { console.log("%c[Grabber ISO]", "color:#16a34a;font-weight:bold", ...a); } catch {} };
   window.addEventListener("message", (event) => {
     if (event.source !== window) return;
     const d = event.data;
     if (!d || d.source !== "opencode-go-grabber-main") return;
     const p = d.payload || {};
     if (p.kind === "server-text" && typeof p.text === "string") {
+      dbgIso("got server-text", p.url, "len", p.text.length);
       handleServerText(p.text);
     }
   });

@@ -17,24 +17,37 @@
     } catch {}
   };
 
+  // 临时诊断：把 hook 进度打到页面 console，方便 F12 排查
+  const dbg = (...a) => {
+    try { console.log("%c[Grabber MAIN]", "color:#2563eb;font-weight:bold", ...a); } catch {}
+  };
+  dbg("MAIN world hook installed at", location.href);
+
   const _fetch = window.fetch;
   if (_fetch) {
     window.fetch = function (...args) {
       const p = _fetch.apply(this, args);
       try {
         const url = typeof args[0] === "string" ? args[0] : args[0] && args[0].url;
-        if (url && String(url).includes("/_server")) {
+        const u = String(url || "");
+        if (u.includes("/_server")) {
+          dbg("fetch /_server hit:", u);
           p.then((resp) => {
+            dbg("fetch /_server resp:", u, "status", resp && resp.status);
             if (!resp || !resp.ok) return;
             const cloned = resp.clone();
             cloned.text().then((text) => {
-              post({ kind: "server-text", url: String(url), text });
-            }).catch(() => {});
-          }).catch(() => {});
+              dbg("fetch /_server body len", (text || "").length, "preview:", String(text).slice(0, 120));
+              post({ kind: "server-text", url: u, text });
+            }).catch((e) => dbg("fetch text err", e));
+          }).catch((e) => dbg("fetch resp err", e));
         }
       } catch {}
       return p;
     };
+    dbg("fetch hooked");
+  } else {
+    dbg("window.fetch NOT found at install time");
   }
 
   const _open = XMLHttpRequest.prototype.open;
