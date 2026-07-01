@@ -200,22 +200,16 @@
   }
 
   function storeCapture(payload) {
-    // 存到 session storage 供 popup/background 取（不依赖激活 tab 是哪个）
+    // content script 上下文禁止 chrome.storage.session（调用即抛
+    // "Access to storage is not allowed from this context"），这里完全不碰它，
+    // 只通过消息把数据送给 background 缓存（background 再写 session storage 供 popup 读）。
     const ws = payload.workspaceId != null ? payload.workspaceId : getWorkspaceId();
+    const capturedAt = payload.capturedAt || Date.now();
     try {
-      chrome.storage.session.set({
-        capture: {
-          workspaceId: ws,
-          apiKey: payload.apiKey || "",
-          capturedAt: payload.capturedAt || 0,
-        },
-      });
-    } catch {
-      // chrome.storage.session 在部分环境不可用，退化为 message 通道
-    }
-    // 同时广播给 background，便于其维护最近值
-    try {
-      chrome.runtime.sendMessage({ type: "capture-update", payload: { workspaceId: ws, apiKey: payload.apiKey, capturedAt: payload.capturedAt } });
+      chrome.runtime.sendMessage(
+        { type: "capture-update", payload: { workspaceId: ws, apiKey: payload.apiKey || "", capturedAt } },
+        () => void chrome.runtime.lastError
+      );
     } catch {}
   }
 

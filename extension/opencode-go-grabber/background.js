@@ -11,6 +11,12 @@ const DEFAULT_APP_BASE = "http://localhost:8000";
 let latestCookieHeader = "";
 let latestCookieAt = 0;
 
+// 内存中最近一次 content.js 上报的 capture（api_key / workspace_id）。
+// 必须保留内存副本：chrome.storage.session 在 content script 上下文不可用（抛
+// "Access to storage is not allowed from this context"），content.js 的 storage 写入会失败，
+// 只能靠 capture-update 消息把数据送到 background 这里缓存。
+let latestCapture = null;
+
 chrome.webRequest.onBeforeSendHeaders.addListener(
   (details) => {
     let cookie = "";
@@ -186,14 +192,33 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     (async () => {
       const cookieHeader = await getOpencodeCookie();
       const sess = await chrome.storage.session.get(["opencodeCookieAt", "capture"]);
+      // content.js 的 storage 写入会失败（context 限制），优先用 background 缓存的内存副本
+      const capture = latestCapture || sess.capture || {};
       sendResponse({
         cookieHeader,
         hasAuth: cookieHasAuth(cookieHeader),
         cookieAt: sess.opencodeCookieAt || latestCookieAt,
-        capture: sess.capture || {},
+        capture,
       });
     })();
     return true; // async
+  }
+  if (msg.type === "capture-update") {
+    // content.js（ISO world）抓到 api_key/workspace_id 后广播过来；background 这边
+    // 缓存到内存，并尝试写入 session storage（SW 上下文允许，供 popup 同源读取）。
+    // 注意：storeCapture() 在启动和 URL 变化时会用空 payload 调用一次，只为驱动
+    // workspace 更新；这里按字段增量合并，避免空值把刚抓到的 api_key 覆盖清掉。
+    const p = msg.payload || {};
+    const merged = {
+      workspaceId: p.workspaceId != null && p.workspaceId !== "" ? p.workspaceId : (latestCapture && latestCapture.workspaceId) || "",
+      apiKey: p.apiKey != null && p.apiKey !== "" ? p.apiKey : (latestCapture && latestCapture.apiKey) || "",
+      capturedAt: p.capturedAt || (latestCapture && latestCapture.capturedAt) || 0,
+    };
+    latestCapture = merged;
+    try {
+      chrome.storage.session.set({ capture: merged });
+    } catch {}
+    return false;
   }
   if (msg.type === "get-workspace") {
     // 优先从 storage 取（content.js 在 opencode.ai 页持续写入，不依赖激活 tab 是哪个）
@@ -203,6 +228,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         const sess = await chrome.storage.session.get(["capture"]);
         workspaceId = (sess.capture && sess.capture.workspaceId) || "";
       } catch {}
+      // storage 写入失败时用 background 内存缓存（content.js 广播的 capture-update）
+      if (!workspaceId && latestCapture && latestCapture.workspaceId) {
+        workspaceId = latestCapture.workspaceId;
+      }
       if (!workspaceId) {
         // 兜底：问当前激活 tab 的 content script
         const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
