@@ -154,17 +154,24 @@ async function pushToApp({ email, password, recoveryEmail, workspaceId, cookieHe
 
 // 供 app 页面（通过 app_bridge.js 转发）调用：返回 workspace_id + cookie
 async function grabFromPage() {
-  // workspace_id：当前激活 tab 是 opencode.ai 页则取 content script 解析结果
+  // workspace_id：优先从 storage 取（content.js 在 opencode.ai 页持续写入，不依赖激活 tab 是哪个）
   let workspaceId = "";
   try {
-    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-    const tab = tabs[0];
-    if (tab && /^https:\/\/opencode\.ai\//.test(tab.url || "")) {
-      workspaceId = await new Promise((resolve) =>
-        chrome.tabs.sendMessage(tab.id, { type: "get-capture" }, (r) => resolve((r && r.workspaceId) || ""))
-      );
-    }
+    const sess = await chrome.storage.session.get(["capture"]);
+    workspaceId = (sess.capture && sess.capture.workspaceId) || "";
   } catch {}
+  // 兜底：若 storage 没有（content.js 还没注入过），再问激活 tab
+  if (!workspaceId) {
+    try {
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      const tab = tabs[0];
+      if (tab && /^https:\/\/opencode\.ai\//.test(tab.url || "")) {
+        workspaceId = await new Promise((resolve) =>
+          chrome.tabs.sendMessage(tab.id, { type: "get-capture" }, (r) => resolve((r && r.workspaceId) || ""))
+        );
+      }
+    } catch {}
+  }
   const cookieHeader = await getOpencodeCookie();
   return {
     ok: true,
@@ -190,21 +197,25 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true; // async
   }
   if (msg.type === "get-workspace") {
-    // 向当前激活 tab 的 content script 取 workspace_id
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      const tab = tabs[0];
-      if (!tab || !/^https:\/\/opencode\.ai\//.test(tab.url || "")) {
-        sendResponse({ workspaceId: "" });
-        return;
-      }
-      chrome.tabs.sendMessage(tab.id, { type: "get-capture" }, (resp) => {
-        if (chrome.runtime.lastError) {
-          sendResponse({ workspaceId: "" });
-          return;
+    // 优先从 storage 取（content.js 在 opencode.ai 页持续写入，不依赖激活 tab 是哪个）
+    (async () => {
+      let workspaceId = "";
+      try {
+        const sess = await chrome.storage.session.get(["capture"]);
+        workspaceId = (sess.capture && sess.capture.workspaceId) || "";
+      } catch {}
+      if (!workspaceId) {
+        // 兜底：问当前激活 tab 的 content script
+        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+        const tab = tabs[0];
+        if (tab && /^https:\/\/opencode\.ai\//.test(tab.url || "")) {
+          workspaceId = await new Promise((resolve) =>
+            chrome.tabs.sendMessage(tab.id, { type: "get-capture" }, (r) => resolve((r && r.workspaceId) || ""))
+          );
         }
-        sendResponse(resp || { workspaceId: "" });
-      });
-    });
+      }
+      sendResponse({ workspaceId });
+    })();
     return true;
   }
   if (msg.type === "push") {

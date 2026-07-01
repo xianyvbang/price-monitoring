@@ -79,11 +79,12 @@
   }
 
   function storeCapture(payload) {
-    // 存到 session storage 供 popup/background 取
+    // 存到 session storage 供 popup/background 取（不依赖激活 tab 是哪个）
+    const ws = payload.workspaceId != null ? payload.workspaceId : getWorkspaceId();
     try {
       chrome.storage.session.set({
         capture: {
-          workspaceId: payload.workspaceId || getWorkspaceId(),
+          workspaceId: ws,
           apiKey: payload.apiKey || "",
           capturedAt: payload.capturedAt || 0,
         },
@@ -93,8 +94,30 @@
     }
     // 同时广播给 background，便于其维护最近值
     try {
-      chrome.runtime.sendMessage({ type: "capture-update", payload });
+      chrome.runtime.sendMessage({ type: "capture-update", payload: { workspaceId: ws, apiKey: payload.apiKey, capturedAt: payload.capturedAt } });
     } catch {}
+  }
+
+  // SPA 内导航（/workspace/A → /workspace/B）不重载 content script，需要自己监听 URL 变化更新 workspace
+  function watchUrl() {
+    let last = location.pathname + location.search;
+    const fire = () => {
+      const cur = location.pathname + location.search;
+      if (cur === last) return;
+      last = cur;
+      storeCapture({});
+    };
+    // popstate + history pushState/replaceState 猴补丁 + 轮询兜底
+    window.addEventListener("popstate", fire);
+    ["pushState", "replaceState"].forEach((m) => {
+      const orig = history[m];
+      history[m] = function (...args) {
+        const r = orig.apply(this, args);
+        setTimeout(fire, 0);
+        return r;
+      };
+    });
+    setInterval(fire, 1000);
   }
 
   // ---- fetch 猴补丁 ----
@@ -160,4 +183,5 @@
 
   // 启动时上报一次 workspace_id（cookie 由 background 的 webRequest 捕）
   storeCapture({});
+  watchUrl();
 })();
