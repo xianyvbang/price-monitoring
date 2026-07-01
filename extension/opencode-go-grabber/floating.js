@@ -59,6 +59,7 @@
       #status { margin-top: 6px; min-height: 16px; font-size: 12px; }
       .muted { color: #888; font-size: 11px; margin-top: 4px; }
       .chk { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
+      a { color: #2563eb; cursor: pointer; text-decoration: underline; }
     </style>
     <button class="fab" id="fab" title="OpenCode Go Grabber">G</button>
     <div class="panel" id="panel">
@@ -71,6 +72,7 @@
       <div class="chk"><input type="checkbox" id="enabled" /><label for="enabled">启用自动刷新</label></div>
       <button class="push" id="push">推送到 App</button>
       <div id="status"></div>
+      <div class="muted">需先在 <a id="optionsLink">选项页</a> 配置 app 地址与账号。</div>
     </div>
   `;
   document.documentElement.appendChild(host);
@@ -87,6 +89,13 @@
   $("fab").addEventListener("click", (e) => {
     e.stopPropagation();
     $("panel").classList.toggle("open");
+  });
+
+  // 选项页跳转
+  $("optionsLink").addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    chrome.runtime.openOptionsPage();
   });
 
   // ---- 取值 ----
