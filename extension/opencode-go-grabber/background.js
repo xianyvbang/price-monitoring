@@ -187,7 +187,31 @@ async function grabFromPage() {
   };
 }
 
+function openExtensionOptionsPage() {
+  return new Promise((resolve) => {
+    try {
+      if (chrome.runtime.openOptionsPage) {
+        chrome.runtime.openOptionsPage(() => {
+          const err = chrome.runtime.lastError;
+          resolve(err ? { ok: false, message: err.message } : { ok: true });
+        });
+        return;
+      }
+      chrome.tabs.create({ url: chrome.runtime.getURL("options.html") }, () => {
+        const err = chrome.runtime.lastError;
+        resolve(err ? { ok: false, message: err.message } : { ok: true });
+      });
+    } catch (e) {
+      resolve({ ok: false, message: e && e.message ? e.message : String(e) });
+    }
+  });
+}
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg.type === "open-options") {
+    openExtensionOptionsPage().then(sendResponse);
+    return true;
+  }
   if (msg.type === "get-snapshot") {
     (async () => {
       const cookieHeader = await getOpencodeCookie();

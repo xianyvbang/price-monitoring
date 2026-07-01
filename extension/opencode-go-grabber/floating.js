@@ -95,7 +95,9 @@
   $("optionsLink").addEventListener("click", (e) => {
     e.preventDefault();
     e.stopPropagation();
-    chrome.runtime.openOptionsPage();
+    bg({ type: "open-options" }).then((r) => {
+      if (!r.ok) setStatus(r.message || "Failed to open options page", "bad");
+    });
   });
 
   // ---- 取值 ----
