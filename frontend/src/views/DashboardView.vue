@@ -215,6 +215,37 @@ function replaceAccountRows(account) {
   });
 }
 
+function setGroupRateChanged(row, changed) {
+  row.last_group_rate_changed = changed;
+  row.lastGroupRateChanged = changed;
+  if (row.monitor_group) {
+    row.monitor_group.last_group_rate_changed = changed;
+    row.monitor_group.lastGroupRateChanged = changed;
+  }
+  if (row.monitorGroup && row.monitorGroup !== row.monitor_group) {
+    row.monitorGroup.last_group_rate_changed = changed;
+    row.monitorGroup.lastGroupRateChanged = changed;
+  }
+}
+
+function clearGroupRateChangeForRow(sourceRow) {
+  allRowsForAccount(sourceRow.id).forEach((row) => {
+    if (sourceRow.current_monitor_group_id) {
+      if (String(row.current_monitor_group_id || "") === String(sourceRow.current_monitor_group_id)) {
+        setGroupRateChanged(row, false);
+      }
+      return;
+    }
+    setGroupRateChanged(row, false);
+  });
+}
+
+function clearVisibleGroupRateChanges() {
+  groupRateChangedRows.value.forEach((row) => {
+    setGroupRateChanged(row, false);
+  });
+}
+
 function accountCount(rows) {
   return rows.filter((row) => row.dashboard_is_first_row).length;
 }
@@ -395,15 +426,21 @@ async function toggleMonitor() {
 }
 
 async function resetGroupRate(row) {
+  if (row._resettingGroupRate) {
+    return;
+  }
+  row._resettingGroupRate = true;
   try {
     await api.setGroupRateChange(row.id, {
       changed: false,
       monitor_group_id: row.current_monitor_group_id
     });
-    await loadDashboard();
+    clearGroupRateChangeForRow(row);
     ElMessage.success("倍率变化状态已重置");
   } catch (error) {
     ElMessage.error(error.message || "重置失败");
+  } finally {
+    row._resettingGroupRate = false;
   }
 }
 
@@ -419,7 +456,7 @@ async function resetGroupRateChanges() {
   resetGroupRateChangesLoading.value = true;
   try {
     const payload = await api.resetGroupRateChanges(appliedFilter.value);
-    await loadDashboard();
+    clearVisibleGroupRateChanges();
     const count = payload.reset_count ?? payload.resetCount ?? payload.count ?? 0;
     ElMessage.success(`已重置 ${count} 条倍率变化`);
   } catch (error) {
@@ -826,7 +863,7 @@ onBeforeUnmount(() => {
             <template #default="{ row }">
               <div class="change-status-actions">
                 <el-tag :type="row.last_group_rate_changed ? 'danger' : 'info'">{{ row.last_group_rate_changed ? "变化" : "未变化" }}</el-tag>
-                <el-button v-if="row.last_group_rate_changed" size="small" link type="primary" @click="resetGroupRate(row)">重置</el-button>
+                <el-button v-if="row.last_group_rate_changed" size="small" link type="primary" :loading="row._resettingGroupRate" @click="resetGroupRate(row)">重置</el-button>
               </div>
             </template>
           </el-table-column>
@@ -985,7 +1022,7 @@ onBeforeUnmount(() => {
               <el-button v-if="row.dashboard_is_first_row" size="small" :loading="row._fetchingGroups" @click="fetchGroups(row)">
                 {{ row.platform === "newApi" ? "获取分组" : "选择分组" }}
               </el-button>
-              <el-button v-if="row.last_group_rate_changed" size="small" link type="primary" @click="resetGroupRate(row)">重置</el-button>
+              <el-button v-if="row.last_group_rate_changed" size="small" link type="primary" :loading="row._resettingGroupRate" @click="resetGroupRate(row)">重置</el-button>
             </div>
           </div>
         </article>
