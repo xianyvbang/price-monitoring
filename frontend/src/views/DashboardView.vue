@@ -4,6 +4,7 @@ import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Money, Operation, Refresh, VideoPause, VideoPlay } from "@element-plus/icons-vue";
 import { api } from "../api";
+import AccountDialog from "../components/AccountDialog.vue";
 import GroupPickerDialog from "../components/GroupPickerDialog.vue";
 import { useViewport } from "../composables/useViewport";
 import { boolValue, displayValue, formatTime } from "../utils";
@@ -32,6 +33,7 @@ const queryAllLoading = ref(false);
 const resetGroupRateChangesLoading = ref(false);
 const refreshRemaining = ref(300);
 const timer = ref(null);
+const accountDialog = ref(null);
 const groupPicker = ref(null);
 const balanceDialogVisible = ref(false);
 const balanceLoading = ref(false);
@@ -156,8 +158,11 @@ function showColumn(platform, key) {
   return columnConfig[platform]?.[key] !== false;
 }
 
-async function loadDashboard() {
-  loading.value = true;
+async function loadDashboard(options = {}) {
+  const showLoading = options.showLoading !== false;
+  if (showLoading) {
+    loading.value = true;
+  }
   try {
     const payload = await api.dashboard(filter);
     grouped.value = payload.grouped || {};
@@ -172,8 +177,14 @@ async function loadDashboard() {
     }
     ElMessage.error(error.message || "加载仪表盘失败");
   } finally {
-    loading.value = false;
+    if (showLoading) {
+      loading.value = false;
+    }
   }
+}
+
+async function refreshDashboardQuietly() {
+  await loadDashboard({ showLoading: false });
 }
 
 async function applyFilter() {
@@ -312,6 +323,21 @@ function dashboardCards(rows, platform) {
 
 function queryFailureMessage(result, fallback) {
   return result?.invalid_message || result?.invalidMessage || result?.message || fallback;
+}
+
+async function openEditAccount(row) {
+  if (row._editingAccount) {
+    return;
+  }
+  row._editingAccount = true;
+  try {
+    const payload = await api.account(row.id);
+    accountDialog.value.open(payload.account, "edit");
+  } catch (error) {
+    ElMessage.error(error.message || "获取账号失败");
+  } finally {
+    row._editingAccount = false;
+  }
 }
 
 async function runQueryAll(trigger = "manual") {
@@ -934,7 +960,7 @@ onBeforeUnmount(() => {
                 <el-button v-if="row.dashboard_is_first_row" size="small" :loading="row._fetchingGroups" @click="fetchGroups(row)">
                   {{ row.platform === "newApi" ? "获取分组" : "选择分组" }}
                 </el-button>
-                <el-button size="small" @click="router.push({ path: '/accounts', query: { edit_id: row.id } })">修改</el-button>
+                <el-button size="small" :loading="row._editingAccount" @click="openEditAccount(row)">修改</el-button>
                 <el-button size="small" :icon="Money" @click="openBalanceHistory(row)">余额趋势</el-button>
               </div>
             </template>
@@ -1011,7 +1037,7 @@ onBeforeUnmount(() => {
             <el-button size="small" tag="a" :href="row.base_url" target="_blank">打开</el-button>
             <el-button v-if="row.recharge_url" size="small" type="success" tag="a" :href="row.recharge_url" target="_blank">充值</el-button>
             <el-button size="small" :loading="row._querying" @click="queryOne(row)">查询</el-button>
-            <el-button size="small" @click="router.push({ path: '/accounts', query: { edit_id: row.id } })">修改</el-button>
+            <el-button size="small" :loading="row._editingAccount" @click="openEditAccount(row)">修改</el-button>
             <el-button size="small" :icon="Money" @click="openBalanceHistory(row)">余额趋势</el-button>
           </div>
 
@@ -1029,7 +1055,8 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <GroupPickerDialog ref="groupPicker" @saved="loadDashboard" />
+    <AccountDialog ref="accountDialog" @saved="refreshDashboardQuietly" @pick-groups="groupPicker.open($event)" />
+    <GroupPickerDialog ref="groupPicker" @saved="refreshDashboardQuietly" />
 
     <el-dialog v-model="balanceDialogVisible" title="余额趋势" width="860px" @opened="drawChart">
       <p class="muted">{{ balanceAccount?.platform }} / {{ balanceAccount?.name }} · 最近 3 天</p>
