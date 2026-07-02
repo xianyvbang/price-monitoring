@@ -1055,7 +1055,7 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <AccountDialog ref="accountDialog" @saved="refreshDashboardQuietly" @pick-groups="groupPicker.open($event)" />
+    <AccountDialog ref="accountDialog" :fetch-groups-after-save="false" @saved="refreshDashboardQuietly" @pick-groups="groupPicker.open($event)" />
     <GroupPickerDialog ref="groupPicker" @saved="refreshDashboardQuietly" />
 
     <el-dialog v-model="balanceDialogVisible" title="余额趋势" width="860px" @opened="drawChart">

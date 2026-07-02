@@ -6,6 +6,9 @@ import { api } from "../api";
 import { clone, normalizeAccountForm } from "../utils";
 
 const emit = defineEmits(["saved", "pick-groups"]);
+const props = defineProps({
+  fetchGroupsAfterSave: { type: Boolean, default: true }
+});
 
 const visible = ref(false);
 const saving = ref(false);
@@ -120,7 +123,7 @@ async function submit() {
     emit("saved", account);
     ElMessage.success("账号已保存");
     visible.value = false;
-    if (shouldFetchGroupsAfterSave(account, savedPayload, isEdit)) {
+    if (props.fetchGroupsAfterSave && shouldFetchGroupsAfterSave(account, savedPayload, isEdit)) {
       try {
         const groups = account.platform === "sub2Api" ? await api.sub2ApiGroups(account.id) : await api.newApiGroups(account.id);
         emit("pick-groups", {
