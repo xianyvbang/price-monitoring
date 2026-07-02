@@ -102,6 +102,10 @@ JSON 示例：
 
 OpenCode Go 的自动刷新沿用通用查询间隔和暂停开关。刷新时服务端使用已导入并加密保存的 OpenCode 登录态调用 OpenCode 前端 `_server` 接口。页面里的“配置 OpenCode Go JS 文件”可以分别配置用量 JS 和 API key JS：用量 JS 会解析 `queryLiteSubscription_query`，请求使用 `X-Server-Instance: server-fn:3`；API key JS 默认是 `https://opencode.ai/_build/assets/index-PbCOrg8_.js`，会解析 `listKeys_query`，请求使用 `X-Server-Instance: server-fn:2`。两个请求都会把解析到的 server id 写入 `_server?id=...` 和 `X-Server-Id`。
 
+OpenCode Go 页面提供“下载浏览器插件”按钮，可下载按当前部署域名定制的 `OpenCode Go Grabber` Chrome/Edge 扩展。下载接口会把 app 的访问域名写入扩展 manifest 的 `content_scripts.matches`、`externally_connectable.matches` 和 `host_permissions`；如果换了部署域名，需要重新下载插件，不要直接加载仓库里的 `extension/opencode-go-grabber` 源码目录。
+
+安装插件后，在 `opencode.ai` 登录并打开对应 workspace，插件会抓取当前 `workspace_id`、包含 `auth` 的登录态 Cookie，以及 `/keys` 页面返回的 API key 信息。推荐在 app 的“导入登录态”弹窗点击“从浏览器插件抓取”，插件会把 workspace 和 Cookie 自动填入表单；也可以在“添加 OpenCode Go 账号”的 Workspace ID 输入框点击“从插件抓取”。扩展弹窗里的“推送到 App”会创建或更新账号、导入登录态，并触发服务端刷新，API key 仍由 app 的刷新流程回填。
+
 导入登录态时，在 OpenCode Go 页面点击“导入登录态”，再点击“打开本地浏览器登录页”。系统会在你当前设备的默认浏览器打开 OpenCode 登录页；登录完成后，从浏览器开发者工具或 Cookie 导出工具复制 OpenCode 的登录态，粘贴到弹窗中保存。
 
 弹窗支持两种内容：
@@ -138,9 +142,11 @@ Cookie: name=value; name2=value2
 - `DELETE /api/opencode-go/accounts/{id}`
 - `POST /api/opencode-go/accounts/{id}/enabled`
 - `POST /api/opencode-go/accounts/{id}/login`
+- `POST /api/opencode-go/accounts/{id}/session`
 - `POST /api/opencode-go/accounts/{id}/refresh`
 - `POST /api/opencode-go/query-all`
 - `GET /api/opencode-go/accounts/{id}/history`
 - `GET /api/opencode-go/accounts/{id}/api-key`
+- `GET /api/opencode-go-grabber/extension.zip`
 
 所有接口都需要先通过 Web 登录获取 Cookie。
