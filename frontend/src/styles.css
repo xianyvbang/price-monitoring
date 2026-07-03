@@ -326,6 +326,52 @@ a {
   -webkit-overflow-scrolling: touch;
 }
 
+.opencode-overall-strip {
+  align-items: stretch;
+  background: #fff;
+  border: 1px solid #d9e2ec;
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) auto;
+  margin-bottom: 16px;
+  padding: 12px 14px;
+}
+
+.overall-usage-card {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.overall-usage-card div,
+.overall-usage-note {
+  align-items: baseline;
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.overall-usage-card span,
+.overall-usage-note {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.overall-usage-card strong {
+  color: var(--text);
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.overall-usage-note {
+  align-self: center;
+  justify-self: end;
+  white-space: nowrap;
+}
+
 .opencode-config-strip {
   align-items: stretch;
   background: #fff;
@@ -909,6 +955,15 @@ a {
 
   .opencode-config-strip {
     grid-template-columns: 1fr;
+  }
+
+  .opencode-overall-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .overall-usage-note {
+    justify-self: start;
+    white-space: normal;
   }
 
   .toolbar {

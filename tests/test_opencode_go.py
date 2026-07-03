@@ -21,7 +21,7 @@ from app.services.opencode_go import (
     refresh_opencode_go_account,
 )
 from app.services.cpa_admin import CpaAdminClient
-from app.services.scheduler import query_opencode_go_for_account
+from app.services.scheduler import query_all_opencode_go_accounts, query_opencode_go_for_account
 
 
 class DummySub2ApiResponse:
@@ -685,6 +685,126 @@ def test_opencode_go_query_all_skips_disabled_accounts(tmp_path, monkeypatch):
     assert manual_response.status_code == 200
     assert db.list_opencode_go_history(enabled_id)
     assert db.list_opencode_go_history(disabled_id)
+
+
+@pytest.mark.asyncio
+async def test_opencode_go_query_all_skips_weekly_limit_but_manual_refreshes(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    calls = []
+
+    async def fake_refresh(
+        account,
+        secret_key,
+        timeout,
+        log=None,
+        lite_subscription_js_url=None,
+        lite_subscription_server_id=None,
+        key_list_js_url=None,
+        key_list_server_id=None,
+    ):
+        calls.append(account["name"])
+        return {
+            "is_valid": True,
+            "workspace_id": "ws_1",
+            "rolling_usage": {"usagePercent": 11, "resetInSec": 60},
+            "weekly_usage": {"usagePercent": 22, "resetInSec": 120},
+            "monthly_usage": {"usagePercent": 33, "resetInSec": 180},
+        }
+
+    monkeypatch.setattr("app.services.scheduler.refresh_opencode_go_account", fake_refresh)
+    high_id = db.upsert_opencode_go_account({"name": "high@example.com", "email": "high@example.com", "is_enabled": True})
+    low_id = db.upsert_opencode_go_account({"name": "low@example.com", "email": "low@example.com", "is_enabled": True})
+    missing_id = db.upsert_opencode_go_account({"name": "missing@example.com", "email": "missing@example.com", "is_enabled": True})
+    invalid_id = db.upsert_opencode_go_account({"name": "invalid@example.com", "email": "invalid@example.com", "is_enabled": True})
+    db.update_opencode_go_result(
+        high_id,
+        {"is_valid": True, "rolling_usage": {"usagePercent": 90}, "weekly_usage": {"usagePercent": 99}},
+    )
+    db.update_opencode_go_result(
+        low_id,
+        {"is_valid": True, "rolling_usage": {"usagePercent": 10}, "weekly_usage": {"usagePercent": 98.9}},
+    )
+    with db.connect() as conn:
+        conn.execute("UPDATE opencode_go_accounts SET last_weekly_usage = ? WHERE id = ?", ("not-json", invalid_id))
+
+    results = await query_all_opencode_go_accounts(db)
+    manual_result = await query_opencode_go_for_account(db, high_id)
+
+    assert {result["account_id"] for result in results} == {low_id, missing_id, invalid_id}
+    assert manual_result["account_id"] == high_id
+    assert "high@example.com" not in calls[:-1]
+    assert calls[-1] == "high@example.com"
+
+
+def test_opencode_go_accounts_summary_averages_all_eligible_accounts(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    account_ids = []
+    for index in range(25):
+        email = f"summary{index:02d}@example.com"
+        account_ids.append(db.upsert_opencode_go_account({"name": email, "email": email, "password": "secret-password"}))
+
+    db.update_opencode_go_result(
+        account_ids[0],
+        {"is_valid": True, "rolling_usage": {"usagePercent": 10}, "weekly_usage": {"usagePercent": 20}},
+    )
+    db.update_opencode_go_result(
+        account_ids[1],
+        {"is_valid": True, "weekly_usage": {"usagePercent": 98.9}},
+    )
+    db.update_opencode_go_result(
+        account_ids[2],
+        {"is_valid": True, "rolling_usage": {"usagePercent": 70}, "weekly_usage": {"usagePercent": 99}},
+    )
+    db.update_opencode_go_result(
+        account_ids[3],
+        {"is_valid": True, "rolling_usage": {"usagePercent": 80}, "weekly_usage": {"usagePercent": 100}},
+    )
+    for account_id in account_ids[5:]:
+        db.update_opencode_go_result(
+            account_id,
+            {"is_valid": True, "rolling_usage": {"usagePercent": 90}, "weekly_usage": {"usagePercent": 100}},
+        )
+    with db.connect() as conn:
+        for index, account_id in enumerate(account_ids):
+            conn.execute(
+                "UPDATE opencode_go_accounts SET created_at = ?, updated_at = ? WHERE id = ?",
+                (f"2026-01-{index + 1:02d}T00:00:00+00:00", f"2026-01-{index + 1:02d}T00:00:00+00:00", account_id),
+            )
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.get("/api/opencode-go/accounts")
+
+    payload = response.json()
+    first_page_emails = [account["email"] for account in payload["accounts"]]
+    summary = payload["summary"]
+    assert response.status_code == 200
+    assert "summary00@example.com" not in first_page_emails
+    assert "summary01@example.com" not in first_page_emails
+    assert summary["eligible_account_count"] == 2
+    assert summary["eligibleAccountCount"] == 2
+    assert summary["overall_rolling_usage_percent"] == pytest.approx(5.0)
+    assert summary["overallRollingUsagePercent"] == pytest.approx(5.0)
+    assert summary["overall_weekly_usage_percent"] == pytest.approx(59.45)
+    assert summary["overallWeeklyUsagePercent"] == pytest.approx(59.45)
+
+
+def test_opencode_go_accounts_summary_returns_null_when_no_eligible_accounts(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    high_id = db.upsert_opencode_go_account({"name": "high@example.com", "email": "high@example.com"})
+    missing_id = db.upsert_opencode_go_account({"name": "missing@example.com", "email": "missing@example.com"})
+    db.update_opencode_go_result(high_id, {"is_valid": True, "weekly_usage": {"usagePercent": 99}})
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.get("/api/opencode-go/accounts")
+
+    summary = response.json()["summary"]
+    assert response.status_code == 200
+    assert summary["eligible_account_count"] == 0
+    assert summary["overall_rolling_usage_percent"] is None
+    assert summary["overall_weekly_usage_percent"] is None
+    assert db.get_opencode_go_account(missing_id)
 
 
 def test_opencode_go_bulk_import_uses_email_as_name_and_masks_password(tmp_path, monkeypatch):

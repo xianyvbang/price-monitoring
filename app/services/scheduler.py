@@ -338,10 +338,33 @@ async def query_opencode_go_for_account(db: Database, account_id: int, *, respec
 async def query_all_opencode_go_accounts(db: Database) -> list[dict]:
     results = []
     for account in db.list_opencode_go_accounts(enabled_only=True):
+        weekly_usage_percent = _opencode_go_weekly_usage_percent(account)
+        if weekly_usage_percent is not None and weekly_usage_percent >= OPENCODE_GO_CPA_USAGE_THRESHOLD:
+            db.add_log("info", "opencode-go", f"{account['name']} OpenCode Go 7d 用量已达到 {weekly_usage_percent:.1f}%，自动刷新跳过")
+            continue
         result = await query_opencode_go_for_account(db, account["id"], respect_enabled=True)
         if not result.get("skipped"):
             results.append(result)
     return results
+
+
+def _opencode_go_weekly_usage_percent(account) -> float | None:
+    value = account["last_weekly_usage"]
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(value, dict):
+        return None
+    usage_percent = value.get("usage_percent", value.get("usagePercent"))
+    if isinstance(usage_percent, bool):
+        return None
+    try:
+        number = float(usage_percent)
+    except (TypeError, ValueError):
+        return None
+    return number
 
 
 def _group_summary_from_result(result: dict) -> dict:

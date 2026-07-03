@@ -540,6 +540,39 @@ def public_opencode_go_account(row: Any, include_api_key: bool = False) -> dict[
     return data
 
 
+def opencode_go_overall_usage_summary(rows: list[Any]) -> dict[str, Any]:
+    eligible_count = 0
+    rolling_usage_sum = 0.0
+    weekly_usage_sum = 0.0
+    for row in rows:
+        data = row_to_dict(row)
+        weekly_percent = _opencode_go_usage_percent(data.get("last_weekly_usage"))
+        if weekly_percent is None or weekly_percent >= 99:
+            continue
+        rolling_percent = _opencode_go_usage_percent(data.get("last_rolling_usage")) or 0.0
+        eligible_count += 1
+        rolling_usage_sum += rolling_percent
+        weekly_usage_sum += weekly_percent
+
+    rolling_average = rolling_usage_sum / eligible_count if eligible_count else None
+    weekly_average = weekly_usage_sum / eligible_count if eligible_count else None
+    return {
+        "eligible_account_count": eligible_count,
+        "eligibleAccountCount": eligible_count,
+        "overall_rolling_usage_percent": rolling_average,
+        "overallRollingUsagePercent": rolling_average,
+        "overall_weekly_usage_percent": weekly_average,
+        "overallWeeklyUsagePercent": weekly_average,
+    }
+
+
+def _opencode_go_usage_percent(value: Any) -> float | None:
+    usage_percent = public_usage_window(value).get("usage_percent")
+    if isinstance(usage_percent, bool) or not isinstance(usage_percent, (int, float)):
+        return None
+    return float(usage_percent)
+
+
 def public_opencode_go_history(row: Any) -> dict[str, Any]:
     data = row_to_dict(row)
     data["is_valid"] = bool(data.get("is_valid"))
@@ -1428,6 +1461,7 @@ async def api_opencode_go_accounts(request: Request):
         )
     ]
     last_success = db.latest_successful_opencode_go_checked_at()
+    overall_summary = opencode_go_overall_usage_summary(db.list_opencode_go_accounts())
     return {
         "accounts": accounts,
         "pagination": {
@@ -1451,6 +1485,7 @@ async def api_opencode_go_accounts(request: Request):
             "accountCount": total,
             "last_success_at": last_success,
             "lastSuccessAt": last_success,
+            **overall_summary,
         },
     }
 

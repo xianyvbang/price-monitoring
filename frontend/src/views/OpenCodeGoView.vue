@@ -68,6 +68,9 @@ const { isMobile } = useViewport();
 
 const accountCount = computed(() => summary.value.account_count ?? summary.value.accountCount ?? accounts.value.length);
 const lastSuccessAt = computed(() => summary.value.last_success_at ?? summary.value.lastSuccessAt);
+const eligibleAccountCount = computed(() => summary.value.eligible_account_count ?? summary.value.eligibleAccountCount ?? 0);
+const overallRollingUsage = computed(() => usagePercentWindow(summary.value.overall_rolling_usage_percent ?? summary.value.overallRollingUsagePercent));
+const overallWeeklyUsage = computed(() => usagePercentWindow(summary.value.overall_weekly_usage_percent ?? summary.value.overallWeeklyUsagePercent));
 const selectedAccounts = computed(() => accounts.value.filter((account) => selectedAccountIds.value.includes(account.id)));
 const selectedImportableAccounts = computed(() => selectedAccounts.value.filter(hasApiKey));
 const selectedImportCount = computed(() => selectedImportableAccounts.value.length);
@@ -708,6 +711,14 @@ function usagePercent(window) {
   return Number.isFinite(number) ? Math.max(0, Math.min(100, number)) : 0;
 }
 
+function usagePercentWindow(value) {
+  const number = Number(value);
+  return {
+    usage_percent: Number.isFinite(number) ? number : null,
+    reset_in_sec: null
+  };
+}
+
 function usageLabel(window) {
   const value = window?.usage_percent ?? window?.usagePercent;
   return value === null || value === undefined ? "-" : `${Number(value).toFixed(1)}%`;
@@ -841,6 +852,24 @@ onBeforeUnmount(() => {
         <el-button :icon="Upload" @click="openBulkImport">批量导入</el-button>
         <el-button :icon="Refresh" :loading="refreshingAll" @click="refreshAll">刷新全部</el-button>
       </div>
+    </div>
+
+    <div class="opencode-overall-strip">
+      <div class="overall-usage-card">
+        <div>
+          <span>整体5h</span>
+          <strong>{{ usageLabel(overallRollingUsage) }}</strong>
+        </div>
+        <el-progress :percentage="usagePercent(overallRollingUsage)" :stroke-width="8" :color="usageColor(overallRollingUsage)" :show-text="false" />
+      </div>
+      <div class="overall-usage-card">
+        <div>
+          <span>整体7d</span>
+          <strong>{{ usageLabel(overallWeeklyUsage) }}</strong>
+        </div>
+        <el-progress :percentage="usagePercent(overallWeeklyUsage)" :stroke-width="8" :color="usageColor(overallWeeklyUsage)" :show-text="false" />
+      </div>
+      <div class="overall-usage-note">按 {{ eligibleAccountCount }} 个 7d&lt;99% 账号统计</div>
     </div>
 
     <div class="opencode-config-strip">
