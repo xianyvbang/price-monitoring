@@ -606,14 +606,70 @@ def monitor_group_rates(monitor_groups: list[dict[str, Any]]) -> list[dict[str, 
     return rates
 
 
+def public_dashboard_monitor_group(group: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": group.get("id"),
+        "group_id": group.get("group_id"),
+        "groupId": group.get("group_id"),
+        "plan_name": group.get("plan_name"),
+        "planName": group.get("plan_name"),
+        "name": group.get("name"),
+        "display_name": group.get("display_name"),
+        "displayName": group.get("display_name"),
+        "rate_multiplier": group.get("rate_multiplier"),
+        "rateMultiplier": group.get("rate_multiplier"),
+        "effective_rate_multiplier": group.get("effective_rate_multiplier"),
+        "effectiveRateMultiplier": group.get("effective_rate_multiplier"),
+        "last_group_rate_changed": bool(group.get("last_group_rate_changed")),
+        "lastGroupRateChanged": bool(group.get("last_group_rate_changed")),
+    }
+
+
 def public_dashboard_account(
     account: dict[str, Any],
     monitor_group: dict[str, Any] | None,
     default_threshold: float | None = None,
 ) -> dict[str, Any]:
-    row = dict(account)
-    row["monitor_group"] = monitor_group
-    row["monitorGroup"] = monitor_group
+    consumption_stats = account.get("consumption_stats") if isinstance(account.get("consumption_stats"), dict) else {}
+    actual_stats = (
+        account.get("actual_consumption_stats")
+        if isinstance(account.get("actual_consumption_stats"), dict)
+        else actual_consumption_stats(consumption_stats, account)
+    )
+    row = {
+        "id": account.get("id"),
+        "platform": account.get("platform"),
+        "name": account.get("name"),
+        "base_url": account.get("base_url"),
+        "baseUrl": account.get("base_url"),
+        "note": account.get("note"),
+        "recharge_url": account.get("recharge_url"),
+        "rechargeUrl": account.get("recharge_url"),
+        "threshold": account.get("threshold"),
+        "is_enabled": bool(account.get("is_enabled")),
+        "isEnabled": bool(account.get("is_enabled")),
+        "is_eliminated": bool(account.get("is_eliminated")),
+        "isEliminated": bool(account.get("is_eliminated")),
+        "last_status": account.get("last_status"),
+        "lastStatus": account.get("last_status"),
+        "last_remaining": account.get("last_remaining"),
+        "lastRemaining": account.get("last_remaining"),
+        "last_unit": account.get("last_unit"),
+        "lastUnit": account.get("last_unit"),
+        "last_total": account.get("last_total"),
+        "lastTotal": account.get("last_total"),
+        "last_used": account.get("last_used"),
+        "lastUsed": account.get("last_used"),
+        "last_checked_at": account.get("last_checked_at"),
+        "lastCheckedAt": account.get("last_checked_at"),
+        "today_consumption": consumption_stats.get("today"),
+        "todayConsumption": consumption_stats.get("today"),
+        "actual_today_consumption": actual_stats.get("today"),
+        "actualTodayConsumption": actual_stats.get("today"),
+    }
+    public_group = public_dashboard_monitor_group(monitor_group) if monitor_group else None
+    row["monitor_group"] = public_group
+    row["monitorGroup"] = public_group
     if monitor_group:
         row["dashboard_row_id"] = f"{account['id']}:group:{monitor_group['id']}"
         row["dashboardRowId"] = row["dashboard_row_id"]
@@ -888,22 +944,78 @@ def grouped_accounts(
     return grouped
 
 
+def public_dashboard_source_account(row: Any) -> dict[str, Any]:
+    data = row_to_dict(row)
+    data["is_enabled"] = bool(data.get("is_enabled", True))
+    data["is_visible"] = bool(data.get("is_visible", True))
+    data["is_eliminated"] = bool(data.get("is_eliminated"))
+    data["last_unit"] = str(data.get("last_unit") or DEFAULT_BALANCE_UNIT).strip() or DEFAULT_BALANCE_UNIT
+    data["recharge_paid_amount"] = float(data.get("recharge_paid_amount") or 1)
+    data["recharge_received_amount"] = float(data.get("recharge_received_amount") or 1)
+    today_consumption = db.get_today_consumption(int(data["id"]))
+    data["consumption_stats"] = {"today": today_consumption}
+    data["actual_consumption_stats"] = {"today": actual_consumption_amount(today_consumption, data)}
+    monitor_groups = [public_monitor_group(group) for group in db.list_dashboard_monitor_groups(int(data["id"]))]
+    data["monitor_groups"] = monitor_groups
+    data["group_rates"] = monitor_group_rates(monitor_groups) or group_rates_from_extra(data.get("last_extra"))
+    data["last_group_rate_changed"] = bool(
+        any(group.get("last_group_rate_changed") for group in monitor_groups)
+        or data.get("last_group_rate_changed")
+    )
+    if data["platform"] in {"newApi", "sub2Api"} and not data["group_rates"]:
+        key_id_enc = data.get("key_id_enc")
+        selected_group_id = decrypt_value(key_id_enc, config.app_secret_key) if key_id_enc else None
+        if selected_group_id:
+            data["group_rates"] = [{"plan_name": f"当前分组 {selected_group_id}", "rate_multiplier": None}]
+    return data
+
+
+def dashboard_source_accounts(
+    eliminated_last: bool = False,
+    visible_only: bool = False,
+    platform: str | None = None,
+    name_query: str | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    if platform in {"newApi", "sub2Api"}:
+        grouped = {platform: []}
+    else:
+        grouped = {"newApi": [], "sub2Api": []}
+        platform = None
+    for row in db.list_dashboard_accounts(platform=platform, name_query=name_query, visible_only=visible_only):
+        grouped[row["platform"]].append(public_dashboard_source_account(row))
+    if eliminated_last:
+        for accounts in grouped.values():
+            accounts.sort(key=lambda account: (1 if account.get("is_eliminated") else 0, str(account.get("name") or "").lower()))
+    return grouped
+
+
 def _filtered_dashboard_accounts(
     account_filter: dict[str, Any] | None = None,
     *,
     visible_only: bool,
+    lightweight: bool = False,
 ) -> tuple[dict[str, list[dict[str, Any]]], float | None]:
     account_filter = account_filter or {}
     platform_filter = account_filter.get("platform") if account_filter.get("platform") in {"newApi", "sub2Api"} else None
     low_balance_filter = account_filter.get("low_balance") if account_filter.get("low_balance") in {"low", "normal"} else None
     default_threshold = _optional_number(db.get_general_settings().get("default_threshold"))
     grouped = {platform_filter: []} if platform_filter else {"newApi": [], "sub2Api": []}
-    for platform, accounts in grouped_accounts(
-        eliminated_last=True,
-        visible_only=visible_only,
-        platform=platform_filter,
-        name_query=account_filter.get("name") or None,
-    ).items():
+    account_groups = (
+        dashboard_source_accounts(
+            eliminated_last=True,
+            visible_only=visible_only,
+            platform=platform_filter,
+            name_query=account_filter.get("name") or None,
+        )
+        if lightweight
+        else grouped_accounts(
+            eliminated_last=True,
+            visible_only=visible_only,
+            platform=platform_filter,
+            name_query=account_filter.get("name") or None,
+        )
+    )
+    for platform, accounts in account_groups.items():
         for account in accounts:
             account_is_low = is_low_balance_account(account, default_threshold)
             if low_balance_filter in {"low", "normal"} and account.get("is_eliminated"):
@@ -917,7 +1029,7 @@ def _filtered_dashboard_accounts(
 
 
 def dashboard_grouped_accounts(account_filter: dict[str, Any] | None = None) -> dict[str, list[dict[str, Any]]]:
-    grouped_accounts_map, default_threshold = _filtered_dashboard_accounts(account_filter, visible_only=True)
+    grouped_accounts_map, default_threshold = _filtered_dashboard_accounts(account_filter, visible_only=True, lightweight=True)
     grouped = {platform: [] for platform in grouped_accounts_map}
     for platform, accounts in grouped_accounts_map.items():
         for account in accounts:
@@ -1379,12 +1491,22 @@ async def api_dashboard(request: Request):
     require_user(request)
     account_filter = account_filter_from_query(request)
     grouped = dashboard_grouped_accounts(account_filter)
+    return {
+        "grouped": grouped,
+        "settings": db.get_general_settings(),
+        "account_filter": account_filter,
+        "accountFilter": account_filter,
+    }
+
+
+@app.get("/api/dashboard/consumption-summary")
+async def api_dashboard_consumption_summary(request: Request):
+    require_user(request)
+    account_filter = account_filter_from_query(request)
     consumption_grouped = consumption_grouped_accounts(account_filter)
     consumption_filter = consumption_date_range_from_query(request)
     consumption_summaries = summarize_consumption_periods(consumption_grouped, consumption_filter)
     return {
-        "grouped": grouped,
-        "settings": db.get_general_settings(),
         "consumption_summaries": consumption_summaries,
         "consumptionSummaries": consumption_summaries,
         "consumption_filter": consumption_filter,

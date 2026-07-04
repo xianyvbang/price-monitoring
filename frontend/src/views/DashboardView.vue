@@ -15,6 +15,7 @@ const loading = ref(false);
 const grouped = ref({ newApi: [], sub2Api: [] });
 const settings = ref({ query_interval: 300, request_timeout: 10, default_threshold: 5, monitor_paused: false });
 const summaries = ref([]);
+const summariesLoading = ref(false);
 const filter = reactive({
   name: String(route.query.name || ""),
   platform: String(route.query.platform || ""),
@@ -167,7 +168,6 @@ async function loadDashboard(options = {}) {
     const payload = await api.dashboard(filter);
     grouped.value = payload.grouped || {};
     settings.value = payload.settings || settings.value;
-    summaries.value = payload.consumption_summaries || [];
     appliedFilter.value = dashboardFilterParams(payload.account_filter || payload.accountFilter || filter);
     refreshRemaining.value = Math.max(300, Number(settings.value.query_interval || 300));
   } catch (error) {
@@ -183,13 +183,31 @@ async function loadDashboard(options = {}) {
   }
 }
 
+async function loadConsumptionSummaries() {
+  summariesLoading.value = true;
+  try {
+    const payload = await api.dashboardConsumptionSummary(filter);
+    summaries.value = payload.consumption_summaries || payload.consumptionSummaries || [];
+  } catch (error) {
+    if (error.status === 401) {
+      await router.replace({ name: "login", query: { redirect: route.fullPath } });
+      return;
+    }
+    ElMessage.error(error.message || "加载消费统计失败");
+  } finally {
+    summariesLoading.value = false;
+  }
+}
+
 async function refreshDashboardQuietly() {
   await loadDashboard({ showLoading: false });
+  loadConsumptionSummaries();
 }
 
 async function applyFilter() {
   await router.replace({ path: "/", query: { ...filter } });
   await loadDashboard();
+  loadConsumptionSummaries();
 }
 
 async function resetFilter() {
@@ -729,6 +747,7 @@ function drawChart() {
 
 onMounted(async () => {
   await loadDashboard();
+  loadConsumptionSummaries();
   timer.value = window.setInterval(() => {
     if (queryAllLoading.value || monitorPaused.value) {
       return;
@@ -812,7 +831,7 @@ onBeforeUnmount(() => {
       </el-form-item>
     </el-form>
 
-    <div class="stat-grid">
+    <div v-loading="summariesLoading" class="stat-grid">
       <div v-for="summary in summaries" :key="summary.key" class="stat-card">
         <span>{{ summary.label }}</span>
         <strong>

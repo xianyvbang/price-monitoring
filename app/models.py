@@ -661,6 +661,37 @@ class Database:
         with self.connect() as conn:
             return conn.execute(query, tuple(params)).fetchall()
 
+    def list_dashboard_accounts(
+        self,
+        platform: Optional[str] = None,
+        name_query: Optional[str] = None,
+        visible_only: bool = False,
+    ) -> list[sqlite3.Row]:
+        query = """
+            SELECT
+                id, platform, name, base_url, note, recharge_url,
+                recharge_paid_amount, recharge_received_amount, key_id_enc,
+                threshold, is_enabled, is_visible, is_eliminated,
+                last_status, last_remaining, last_unit, last_total, last_used,
+                last_extra, last_group_rate_changed, last_checked_at
+            FROM accounts
+        """
+        conditions = []
+        params: list[Any] = []
+        if platform:
+            conditions.append("platform = ?")
+            params.append(platform)
+        if name_query:
+            conditions.append("name LIKE ? ESCAPE '\\'")
+            params.append(_like_pattern(name_query))
+        if visible_only:
+            conditions.append("is_visible = 1")
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY platform, name"
+        with self.connect() as conn:
+            return conn.execute(query, tuple(params)).fetchall()
+
     def get_account(self, account_id: int) -> Optional[sqlite3.Row]:
         with self.connect() as conn:
             return conn.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
@@ -670,6 +701,20 @@ class Database:
             return conn.execute(
                 """
                 SELECT *
+                FROM account_monitor_groups
+                WHERE account_id = ?
+                ORDER BY sort_order ASC, id ASC
+                """,
+                (account_id,),
+            ).fetchall()
+
+    def list_dashboard_monitor_groups(self, account_id: int) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            return conn.execute(
+                """
+                SELECT
+                    id, group_id_enc, plan_name, name, effective_rate_multiplier,
+                    last_group_rate_changed, sort_order
                 FROM account_monitor_groups
                 WHERE account_id = ?
                 ORDER BY sort_order ASC, id ASC

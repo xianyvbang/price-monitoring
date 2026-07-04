@@ -550,10 +550,13 @@ def test_dashboard_api_shows_today_consumption_summary(tmp_path, monkeypatch):
     with TestClient(app) as client:
         login(client)
         dashboard = client.get("/api/dashboard")
+        consumption = client.get("/api/dashboard/consumption-summary")
 
     assert dashboard.status_code == 200
+    assert consumption.status_code == 200
     payload = dashboard.json()
-    summary_by_key = {summary["key"]: summary for summary in payload["consumption_summaries"]}
+    assert "consumption_summaries" not in payload
+    summary_by_key = {summary["key"]: summary for summary in consumption.json()["consumption_summaries"]}
     assert list(summary_by_key) == ["today", "yesterday", "last_24h", "last_7d", "last_14d", "this_month", "last_month"]
     assert summary_by_key["today"]["totals"] == [{"amount": 6.75, "unit": "USD"}]
     assert summary_by_key["today"]["account_count"] == 2
@@ -563,10 +566,8 @@ def test_dashboard_api_shows_today_consumption_summary(tmp_path, monkeypatch):
     assert source_row["actual_today_consumption"] == 5.5
     duplicate_row = next(row for row in rows if row["id"] == duplicate_base_url_account_id)
     assert duplicate_row["base_url"] == "https://SUB.example"
-    assert "yesterday" in duplicate_row["consumption_stats"]
-    assert "last_14d" in duplicate_row["consumption_stats"]
-    assert "this_month" in duplicate_row["consumption_stats"]
-    assert "last_month" in duplicate_row["consumption_stats"]
+    assert duplicate_row["today_consumption"] == 20.0
+    assert "consumption_stats" not in duplicate_row
 
 
 def test_dashboard_consumption_summary_includes_hidden_accounts(tmp_path, monkeypatch):
@@ -611,11 +612,13 @@ def test_dashboard_consumption_summary_includes_hidden_accounts(tmp_path, monkey
     with TestClient(app) as client:
         login(client)
         dashboard = client.get("/api/dashboard")
+        consumption = client.get("/api/dashboard/consumption-summary")
 
     assert dashboard.status_code == 200
+    assert consumption.status_code == 200
     payload = dashboard.json()
     assert [row["name"] for row in payload["grouped"]["sub2Api"]] == ["visible-consumption"]
-    summary_by_key = {summary["key"]: summary for summary in payload["consumption_summaries"]}
+    summary_by_key = {summary["key"]: summary for summary in consumption.json()["consumption_summaries"]}
     assert summary_by_key["today"]["totals"] == [{"amount": 10.0, "unit": "USD"}]
     assert summary_by_key["today"]["account_count"] == 2
 
@@ -657,7 +660,7 @@ def test_dashboard_api_shows_actual_consumption_from_recharge_ratio(tmp_path, mo
     row = first_dashboard_row(dashboard.json())
     assert row["today_consumption"] == 5.5
     assert row["actual_today_consumption"] == 2.75
-    assert row["actual_consumption_stats"]["today"] == 2.75
+    assert "actual_consumption_stats" not in row
 
 
 def test_dashboard_api_orders_eliminated_accounts_last(tmp_path, monkeypatch):

@@ -32,6 +32,7 @@ export const api = {
   login: (payload) => request("/login", { method: "POST", body: JSON.stringify(payload) }),
   logout: () => request("/logout", { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({}) }),
   dashboard: (params = {}) => request(`/api/dashboard${queryString(params)}`),
+  dashboardConsumptionSummary: (params = {}) => request(`/api/dashboard/consumption-summary${queryString(params)}`),
   accounts: (params = {}) => request(`/api/accounts${queryString(params)}`),
   account: (id) => request(`/api/accounts/${id}`),
   createAccount: (payload) => request("/api/accounts", { method: "POST", body: JSON.stringify(payload) }),
