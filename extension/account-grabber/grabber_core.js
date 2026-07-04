@@ -187,6 +187,14 @@
     }
   }
 
+  function keysPageUrl(baseUrl) {
+    try {
+      return new URL("/keys", String(baseUrl || "").trim()).href;
+    } catch {
+      return "";
+    }
+  }
+
   function looksLikeApiResponse(status, contentType, body) {
     const code = Number(status || 0);
     if (!code || code === 404 || code >= 500) return false;
@@ -253,6 +261,7 @@
     hasSub2ApiPath,
     hasNewApiPath,
     sameOrigin,
+    keysPageUrl,
     looksLikeApiResponse,
     detectProbeResponse,
     detectHttp,

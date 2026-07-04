@@ -250,6 +250,15 @@
     return "";
   }
 
+  function keysPageUrl(baseUrl) {
+    if (CORE.keysPageUrl) return CORE.keysPageUrl(baseUrl);
+    try {
+      return new URL("/keys", String(baseUrl || "").trim()).href;
+    } catch {
+      return "";
+    }
+  }
+
   async function probeSite() {
     if (siteProbeStarted || state.platform) return;
     siteProbeStarted = true;
@@ -433,7 +442,7 @@
         <label id="newUserLabel">newApi userId</label><input id="userId" />
         <div id="subFields">
           <label>sub2Api apiKey</label>
-          <div class="secret"><span id="apiPreview">未获取</span><button class="small" id="copyApi">复制</button></div>
+          <div class="secret"><span id="apiPreview">未获取</span><button class="small" id="copyApi">复制</button><button class="small" id="openKeys">跳转页面</button></div>
           <label>refreshToken</label>
           <div class="secret"><span id="refreshPreview">未获取</span><button class="small" id="copyRefresh">复制</button></div>
           <div class="grid">
@@ -474,6 +483,7 @@
     $("enabled").addEventListener("change", syncFromUi);
     $("copyAccess").addEventListener("click", () => copySecret(state.accessToken));
     $("copyApi").addEventListener("click", () => copySecret(state.apiKey));
+    $("openKeys").addEventListener("click", openKeysPage);
     $("copyRefresh").addEventListener("click", () => copySecret(state.refreshToken));
     $("optionsLink").addEventListener("click", async () => {
       const result = await bg({ type: "open-options" });
@@ -543,6 +553,16 @@
     if (!value) return;
     await navigator.clipboard.writeText(value);
     setStatus("已复制", "ok");
+  }
+
+  function openKeysPage() {
+    syncFromUi();
+    const url = keysPageUrl(state.baseUrl || location.origin);
+    if (!url) {
+      setStatus("Base URL 无效，无法跳转", "bad");
+      return;
+    }
+    window.location.assign(url);
   }
 
   function payload() {
