@@ -45,7 +45,7 @@
       .filter(Boolean)
       .filter((part) => !PREFIXES.has(part));
     while (parts.length > 1 && SUFFIXES.has(parts[parts.length - 1])) parts.pop();
-    return parts[0] || String(hostname || "").split(".")[0] || "account";
+    return parts[parts.length - 1] || String(hostname || "").split(".")[0] || "account";
   }
 
   function mask(value) {
