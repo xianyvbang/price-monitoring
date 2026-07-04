@@ -40,6 +40,7 @@ def test_account_grabber_zip_patches_app_origin():
     with zipfile.ZipFile(BytesIO(body)) as zf:
         manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
         options_js = zf.read("options.js").decode("utf-8")
+        background_js = zf.read("background.js").decode("utf-8")
         names = set(zf.namelist())
 
     assert manifest["name"] == "NewAPI/Sub2API Account Grabber"
@@ -47,6 +48,7 @@ def test_account_grabber_zip_patches_app_origin():
     assert any("grabber_core.js" in script for cs in manifest["content_scripts"] for script in cs["js"])
     assert "__APP_ORIGIN_MATCH__" not in json.dumps(manifest)
     assert 'data.appBase || "https://price.example.com"' in options_js
+    assert 'const DEFAULT_APP_BASE = "https://price.example.com";' in background_js
     assert "background.js" in names
     assert "content.js" in names
 
