@@ -123,6 +123,14 @@ async function loginToApp(cfg) {
   }
 }
 
+function appAuthErrorMessage(cfg, resp, data) {
+  if (!resp || resp.status !== 401) return "";
+  if (!cfg.adminUser || !cfg.adminPassword) {
+    return "App 登录已失效，且扩展选项页未配置管理员账号密码；请先登录 App，或在扩展选项页配置管理员账号密码后重试";
+  }
+  return (data && (data.detail || data.message)) || "App 自动登录失败，请检查扩展选项页里的管理员账号密码";
+}
+
 async function pushToApp({ email, password, recoveryEmail, workspaceId, cookieHeader, enabled }) {
   const cfg = await getStored();
   const errs = [];
@@ -145,6 +153,8 @@ async function pushToApp({ email, password, recoveryEmail, workspaceId, cookieHe
   });
   let data = await resp.json().catch(() => ({}));
   if (!resp.ok || !data.ok) {
+    const authMessage = appAuthErrorMessage(cfg, resp, data);
+    if (authMessage) return { ok: false, message: authMessage };
     return { ok: false, message: (data && data.message) || `创建账号失败 (${resp.status})` };
   }
   const accountId = data.id;
@@ -157,6 +167,8 @@ async function pushToApp({ email, password, recoveryEmail, workspaceId, cookieHe
   data = await resp.json().catch(() => ({}));
   if (!resp.ok || !data.ok) {
     // api_key 刷新前若已有则会保留；导入失败直接返回
+    const authMessage = appAuthErrorMessage(cfg, resp, data);
+    if (authMessage) return { ok: false, message: authMessage, accountId };
     return { ok: false, message: (data && data.message) || "导入登录态失败", accountId };
   }
 
@@ -165,6 +177,8 @@ async function pushToApp({ email, password, recoveryEmail, workspaceId, cookieHe
   data = await resp.json().catch(() => ({}));
   if (!resp.ok || !data.ok) {
     // refresh 失败仅作为提示，账号与登录态已就位
+    const authMessage = appAuthErrorMessage(cfg, resp, data);
+    if (authMessage) return { ok: false, message: authMessage, accountId };
     const msg = data && (data.message || (data.result && data.result.invalid_message));
     return { ok: false, message: `已建号并导入登录态，但刷新失败：${msg || resp.status}`, accountId };
   }
