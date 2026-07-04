@@ -4,6 +4,7 @@
   const PREFIXES = new Set(["www", "api", "app", "admin", "panel", "console", "newapi", "sub2api"]);
   const SUFFIXES = new Set(["com", "net", "org", "io", "ai", "cc", "cn", "top", "xyz", "site", "app", "dev", "cloud", "co", "uk"]);
   const KEY_FIELDS = ["key", "api_key", "apiKey", "token"];
+  const DIRECT_KEY_FIELDS = ["key", "api_key", "apiKey"];
   const ACCESS_FIELDS = ["access_token", "accessToken", "auth_token", "authToken", "token"];
   const REFRESH_FIELDS = ["refresh_token", "refreshToken"];
   const USER_ID_FIELDS = ["user_id", "userId", "userid", "id"];
@@ -121,7 +122,7 @@
     }
     let found = "";
     walk(payload, (obj) => {
-      if (!found) found = pickField(obj, KEY_FIELDS);
+      if (!found) found = pickField(obj, DIRECT_KEY_FIELDS);
     });
     return found;
   }

@@ -147,6 +147,8 @@ assert.strictEqual(core.bearerFromHeaders({ Authorization: "Bearer header-token"
 const subPayload = { data: { items: [{ key: "sk-first" }, { key: "sk-second" }] } };
 assert.strictEqual(core.detectHttp("https://sub.example/api/v1/keys?page=1", { Authorization: "Bearer sub-at" }, JSON.stringify(subPayload)), "sub2Api");
 assert.strictEqual(core.extractApiKey(subPayload), "sk-first");
+assert.strictEqual(core.extractApiKey({ data: { items: [{ token: "sk-token-field" }] } }), "sk-token-field");
+assert.strictEqual(core.extractApiKey({ data: { token: "login-access-token" } }), "");
 
 const tokens = { data: { access_token: "sub-at", refresh_token: "sub-rt" } };
 assert.strictEqual(core.extractAccessToken(tokens), "sub-at");
