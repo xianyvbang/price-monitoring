@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "NewAPI/Sub2API Account Grabber",
+  "version": "0.1.0",
+  "description": "在 newApi / sub2Api 类网站侧边悬浮，抓取已登录凭据并导入余额监控账号。",
+  "permissions": [
+    "cookies",
+    "storage",
+    "clipboardWrite"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*",
+    "__APP_ORIGIN_MATCH__"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["grabber_core.js", "content.js"],
+      "run_at": "document_start",
+      "all_frames": false
+    },
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content_main.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": false
+    }
+  ],
+  "action": {
+    "default_title": "NewAPI/Sub2API Account Grabber",
+    "default_popup": "popup.html"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  }
+}

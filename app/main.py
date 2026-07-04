@@ -32,7 +32,7 @@ from app.security import decrypt_value, encrypt_value
 from app.security import verify_password
 from app.services.balance import login_sub2api_tokens, query_newapi_group_options, query_sub2api_group_options
 from app.services.emailer import send_email
-from app.services.extension_pack import build_extension_zip
+from app.services.extension_pack import build_account_grabber_extension_zip, build_extension_zip
 from app.services.opencode_go import (
     KEY_LIST_DEFAULT_JS_URL,
     KEY_LIST_GET_REFERENCE_ID,
@@ -1874,6 +1874,22 @@ async def api_download_opencode_go_grabber(request: Request):
     except FileNotFoundError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     db.add_log("info", "opencode-go", f"{user} 下载 OpenCode Go 抓取扩展")
+    return Response(
+        content=body,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/api/account-grabber/extension.zip")
+async def api_download_account_grabber(request: Request):
+    """下载定制后的 NewAPI/Sub2API 账号导入浏览器扩展 zip。"""
+    user = require_user(request)
+    try:
+        body, filename = build_account_grabber_extension_zip(request.base_url)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    db.add_log("info", "account", f"{user} 下载 NewAPI/Sub2API 账号导入扩展")
     return Response(
         content=body,
         media_type="application/zip",

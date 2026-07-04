@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>Account Grabber · 选项</title>
+    <style>
+      body { font-family: system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; margin: 24px; color: #222; max-width: 560px; }
+      h1 { font-size: 18px; margin-bottom: 16px; }
+      label { display: block; margin: 12px 0 4px; font-size: 13px; font-weight: 600; }
+      input { width: 100%; padding: 7px 9px; font-size: 13px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
+      .hint { color: #666; font-size: 12px; margin-top: 4px; line-height: 1.5; }
+      .row { display: flex; gap: 8px; margin-top: 18px; }
+      button { padding: 8px 18px; font-size: 13px; border: none; background: #0f766e; color: #fff; border-radius: 4px; cursor: pointer; }
+      button:hover { background: #115e59; }
+      button.secondary { background: #64748b; }
+      button.secondary:hover { background: #475569; }
+      #status { margin-top: 12px; font-size: 13px; color: #15803d; min-height: 18px; }
+      #status.err { color: #dc2626; }
+    </style>
+  </head>
+  <body>
+    <h1>Account Grabber · 选项</h1>
+
+    <label for="appBase">App Base URL</label>
+    <input id="appBase" type="text" placeholder="http://localhost:8000" />
+    <div class="hint">余额监控 app 地址。扩展推送 newApi/sub2Api 账号时调用此处的 API。</div>
+
+    <label for="sessionCookieName">会话 Cookie 名称</label>
+    <input id="sessionCookieName" type="text" placeholder="balance_monitor_session" />
+
+    <label for="adminUser">管理员账号</label>
+    <input id="adminUser" type="text" placeholder="admin" />
+    <div class="hint">用于 app 会话失效时自动重新登录。账号密码会明文保存在扩展本地存储中。</div>
+
+    <label for="adminPassword">管理员密码</label>
+    <input id="adminPassword" type="password" />
+
+    <button id="save">保存</button>
+    <div id="status"></div>
+
+    <div class="row">
+      <button id="export" class="secondary">导出配置</button>
+      <button id="import-btn" class="secondary">导入配置...</button>
+      <input id="import-file" type="file" accept="application/json,.json" hidden />
+    </div>
+    <div class="hint" style="margin-top:10px">导出文件包含明文管理员密码，请妥善保存。</div>
+
+    <script src="options.js"></script>
+  </body>
+</html>
