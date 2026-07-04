@@ -175,7 +175,7 @@
 
   function hasNewApiPath(value) {
     const text = String(value || "");
-    return text.includes("/api/user/self") || text.includes("/api/user/security");
+    return text.includes("/api/user/self") || text.includes("/api/user/security") || text.includes("/api/user/token");
   }
 
   function sameOrigin(url, pageOrigin) {
@@ -195,9 +195,9 @@
     }
   }
 
-  function newApiSecurityPageUrl(baseUrl) {
+  function newApiTokenApiUrl(baseUrl) {
     try {
-      return new URL("/user/security", String(baseUrl || "").trim()).href;
+      return new URL("/api/user/token", String(baseUrl || "").trim()).href;
     } catch {
       return "";
     }
@@ -235,7 +235,7 @@
     const siteHint = hasExplicitPlatformHint(pageHostname || "");
     if (!sameOrigin(text, pageOrigin)) return "";
     if (hasNewApiPath(text) || newApiUserFromHeaders(headers)) {
-      if (text.includes("/api/user/security")) return "newApi";
+      if (text.includes("/api/user/security") || text.includes("/api/user/token")) return "newApi";
       if (newApiUserFromHeaders(headers) || bearerFromHeaders(headers) || extractUserId(data) || extractAccessToken(data)) return "newApi";
       return "";
     }
@@ -270,7 +270,7 @@
     hasNewApiPath,
     sameOrigin,
     keysPageUrl,
-    newApiSecurityPageUrl,
+    newApiTokenApiUrl,
     looksLikeApiResponse,
     detectProbeResponse,
     detectHttp,

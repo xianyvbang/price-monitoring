@@ -228,7 +228,7 @@
   function hasNewApiPath(value) {
     if (CORE.hasNewApiPath) return CORE.hasNewApiPath(value);
     const text = String(value || "");
-    return text.includes("/api/user/self") || text.includes("/api/user/security");
+    return text.includes("/api/user/self") || text.includes("/api/user/security") || text.includes("/api/user/token");
   }
 
   function sameOriginUrl(value) {
@@ -261,10 +261,10 @@
     }
   }
 
-  function newApiSecurityPageUrl(baseUrl) {
-    if (CORE.newApiSecurityPageUrl) return CORE.newApiSecurityPageUrl(baseUrl);
+  function newApiTokenApiUrl(baseUrl) {
+    if (CORE.newApiTokenApiUrl) return CORE.newApiTokenApiUrl(baseUrl);
     try {
-      return new URL("/user/security", String(baseUrl || "").trim()).href;
+      return new URL("/api/user/token", String(baseUrl || "").trim()).href;
     } catch {
       return "";
     }
@@ -364,13 +364,14 @@
     const explicitSiteHint = hasExplicitPlatformHint(location.hostname);
 
     if (sameOrigin && hasNewApiPath(url)) {
-      if (url.includes("/api/user/security") || bearer || headerUser || extractUserId(data) || extractAccessToken(data)) {
+      const generatedAccess = extractGeneratedAccessToken(data);
+      if (url.includes("/api/user/security") || url.includes("/api/user/token") || bearer || headerUser || extractUserId(data) || extractAccessToken(data) || generatedAccess) {
         state.platform = "newApi";
       }
       if (bearer) state.accessToken = bearer;
       if (headerUser) state.userId = headerUser;
       state.userId ||= extractUserId(data);
-      state.accessToken ||= extractAccessToken(data);
+      state.accessToken = generatedAccess || extractAccessToken(data) || state.accessToken;
     } else if (sameOrigin && (url.includes("/api/v1/auth/login") || url.includes("/api/v1/auth/refresh"))) {
       const access = extractAccessToken(data);
       const refresh = extractRefreshToken(data);
@@ -506,7 +507,7 @@
     $("visible").addEventListener("change", syncFromUi);
     $("enabled").addEventListener("change", syncFromUi);
     $("copyAccess").addEventListener("click", () => copySecret(effectiveAccessToken()));
-    $("openNewApiSecurity").addEventListener("click", openNewApiSecurityPage);
+    $("openNewApiSecurity").addEventListener("click", generateNewApiAccessToken);
     $("copyApi").addEventListener("click", () => copySecret(state.apiKey));
     $("openKeys").addEventListener("click", openKeysPage);
     $("copyRefresh").addEventListener("click", () => copySecret(state.refreshToken));
@@ -600,14 +601,53 @@
     window.location.assign(url);
   }
 
-  function openNewApiSecurityPage() {
+  async function generateNewApiAccessToken() {
     syncFromUi();
-    const url = newApiSecurityPageUrl(state.baseUrl || location.origin);
-    if (!url) {
-      setStatus("Base URL 无效，无法跳转", "bad");
+    const userId = String(state.userId || "").trim();
+    if (!userId) {
+      setStatus("缺少 newApi userId，无法生成系统访问令牌", "bad");
       return;
     }
-    window.location.assign(url);
+    const url = newApiTokenApiUrl(state.baseUrl || location.origin);
+    if (!url) {
+      setStatus("Base URL 无效，无法生成", "bad");
+      return;
+    }
+    if (!sameOriginUrl(url)) {
+      setStatus("请在对应 Base URL 的 NewAPI 页面生成令牌", "bad");
+      return;
+    }
+    const button = $("openNewApiSecurity");
+    button.disabled = true;
+    setStatus("正在生成系统访问令牌...");
+    try {
+      const response = await fetch(url, {
+        method: "GET",
+        credentials: "include",
+        cache: "no-store",
+        headers: {
+          Accept: "application/json",
+          "New-Api-User": userId,
+        },
+      });
+      const text = await response.clone().text().catch(() => "");
+      const data = safeJson(text);
+      const token = extractGeneratedAccessToken(data);
+      if (!response.ok || !token) {
+        const message = data && typeof data === "object" ? data.message || data.detail || data.error : "";
+        setStatus(message || `生成失败 (${response.status})`, "bad");
+        return;
+      }
+      state.platform = "newApi";
+      state.accessToken = token;
+      state.accessTokenMode = "auto";
+      render();
+      setStatus("系统访问令牌已生成并填入", "ok");
+    } catch (e) {
+      setStatus((e && e.message) || "生成系统访问令牌失败", "bad");
+    } finally {
+      button.disabled = false;
+    }
   }
 
   function payload() {

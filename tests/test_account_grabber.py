@@ -226,8 +226,8 @@ assert.strictEqual(core.inferName("console.sub2api.2chat.cc"), "2chat");
 assert.strictEqual(core.inferName("ccb.180txt.cn"), "180txt");
 assert.strictEqual(core.keysPageUrl("https://sub.example/admin"), "https://sub.example/keys");
 assert.strictEqual(core.keysPageUrl("https://sub.example/"), "https://sub.example/keys");
-assert.strictEqual(core.newApiSecurityPageUrl("https://new.example/dashboard"), "https://new.example/user/security");
-assert.strictEqual(core.newApiSecurityPageUrl("https://new.example/"), "https://new.example/user/security");
+assert.strictEqual(core.newApiTokenApiUrl("https://new.example/dashboard"), "https://new.example/api/user/token");
+assert.strictEqual(core.newApiTokenApiUrl("https://new.example/"), "https://new.example/api/user/token");
 
 const newPayload = { success: true, data: { id: 42, accessToken: "new-access" } };
 assert.strictEqual(core.detectHttp("https://new.example/api/user/self", { Authorization: "Bearer header-token", "New-Api-User": "42" }, JSON.stringify(newPayload)), "newApi");
@@ -236,6 +236,7 @@ assert.strictEqual(core.bearerFromHeaders({ Authorization: "Bearer header-token"
 const generatedTokenPayload = { success: true, data: "newapi-generated-access-token-123456" };
 assert.strictEqual(core.extractGeneratedAccessToken(generatedTokenPayload), "newapi-generated-access-token-123456");
 assert.strictEqual(core.detectHttp("https://new.example/api/user/security/access-token", {}, JSON.stringify(generatedTokenPayload)), "newApi");
+assert.strictEqual(core.detectHttp("https://new.example/api/user/token", { "New-Api-User": "42" }, JSON.stringify(generatedTokenPayload)), "newApi");
 
 const subPayload = { data: { items: [{ key: "sk-first" }, { key: "sk-second" }] } };
 assert.strictEqual(core.detectHttp("https://sub.example/api/v1/keys?page=1", { Authorization: "Bearer sub-at" }, JSON.stringify(subPayload)), "sub2Api");
