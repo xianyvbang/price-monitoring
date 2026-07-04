@@ -26,7 +26,9 @@
     threshold: 5,
     isVisible: true,
     isEnabled: true,
+    accessTokenMode: "auto",
     accessToken: "",
+    manualAccessToken: "",
     refreshToken: "",
     userId: "",
     apiKey: "",
@@ -259,6 +261,21 @@
     }
   }
 
+  function newApiSecurityPageUrl(baseUrl) {
+    if (CORE.newApiSecurityPageUrl) return CORE.newApiSecurityPageUrl(baseUrl);
+    try {
+      return new URL("/user/security", String(baseUrl || "").trim()).href;
+    } catch {
+      return "";
+    }
+  }
+
+  function effectiveAccessToken() {
+    return state.platform === "newApi" && state.accessTokenMode === "input"
+      ? state.manualAccessToken
+      : state.accessToken;
+  }
+
   async function probeSite() {
     if (siteProbeStarted || state.platform) return;
     siteProbeStarted = true;
@@ -410,7 +427,9 @@
         .grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
         .row { display:flex; gap:8px; align-items:center; }
         .row input { width:auto; }
-        .secret { display:flex; gap:6px; align-items:center; padding:5px 0; color:#475569; word-break:break-all; font-family:ui-monospace, Consolas, monospace; }
+        .secret { display:flex; flex-wrap:wrap; gap:6px; align-items:center; padding:5px 0; color:#475569; word-break:break-all; font-family:ui-monospace, Consolas, monospace; }
+        .secret span { flex:1 1 120px; min-width:0; }
+        .secret button { flex:0 0 auto; }
         button.small { padding:4px 8px; border:1px solid #cbd5e1; background:#fff; border-radius:4px; cursor:pointer; }
         button.push { width:100%; margin-top:10px; padding:8px; border:0; border-radius:4px; background:#0f766e; color:#fff; cursor:pointer; font-size:13px; }
         button.secondary { background:#64748b; }
@@ -437,8 +456,13 @@
           <div><label>充值金额</label><input id="paid" type="number" min="0.000001" step="0.000001" /></div>
           <div><label>实际得到</label><input id="received" type="number" min="0.000001" step="0.000001" /></div>
         </div>
+        <div id="accessModeWrap">
+          <label>accessToken 类型</label>
+          <select id="accessTokenMode"><option value="auto">自动获取</option><option value="input">手动输入</option></select>
+        </div>
         <label>accessToken</label>
-        <div class="secret"><span id="accessPreview">未获取</span><button class="small" id="copyAccess">复制</button></div>
+        <div class="secret" id="accessAutoRow"><span id="accessPreview">未获取</span><button class="small" id="copyAccess">复制</button><button class="small" id="openNewApiSecurity">生成系统访问令牌</button></div>
+        <div id="accessManualRow"><input id="manualAccessToken" type="password" autocomplete="off" /></div>
         <label id="newUserLabel">newApi userId</label><input id="userId" />
         <div id="subFields">
           <label>sub2Api apiKey</label>
@@ -475,13 +499,14 @@
       visible = !visible;
       $("panel").classList.toggle("open", visible);
     });
-    for (const id of ["platform", "name", "threshold", "baseUrl", "note", "paid", "received", "userId", "email", "password"]) {
+    for (const id of ["platform", "accessTokenMode", "name", "threshold", "baseUrl", "note", "paid", "received", "manualAccessToken", "userId", "email", "password"]) {
       $(id).addEventListener("input", syncFromUi);
       $(id).addEventListener("change", syncFromUi);
     }
     $("visible").addEventListener("change", syncFromUi);
     $("enabled").addEventListener("change", syncFromUi);
-    $("copyAccess").addEventListener("click", () => copySecret(state.accessToken));
+    $("copyAccess").addEventListener("click", () => copySecret(effectiveAccessToken()));
+    $("openNewApiSecurity").addEventListener("click", openNewApiSecurityPage);
     $("copyApi").addEventListener("click", () => copySecret(state.apiKey));
     $("openKeys").addEventListener("click", openKeysPage);
     $("copyRefresh").addEventListener("click", () => copySecret(state.refreshToken));
@@ -491,6 +516,7 @@
     });
     $("clear").addEventListener("click", () => {
       state.accessToken = "";
+      state.manualAccessToken = "";
       state.refreshToken = "";
       state.apiKey = "";
       state.userId = "";
@@ -502,12 +528,14 @@
 
   function syncFromUi() {
     state.platform = $("platform").value;
+    state.accessTokenMode = $("accessTokenMode").value === "input" ? "input" : "auto";
     state.name = $("name").value.trim();
     state.baseUrl = $("baseUrl").value.trim();
     state.note = $("note").value.trim();
     state.rechargePaidAmount = $("paid").value || 1;
     state.rechargeReceivedAmount = $("received").value || 1;
     state.threshold = $("threshold").value === "" ? 5 : $("threshold").value;
+    state.manualAccessToken = $("manualAccessToken").value.trim();
     state.userId = $("userId").value.trim();
     state.email = $("email").value.trim();
     state.password = $("password").value;
@@ -519,18 +547,20 @@
   function render() {
     if (!root) return;
     $("platform").value = state.platform || "newApi";
+    $("accessTokenMode").value = state.accessTokenMode;
     $("name").value = state.name;
     $("baseUrl").value = state.baseUrl;
     $("note").value = state.note;
     $("paid").value = state.rechargePaidAmount;
     $("received").value = state.rechargeReceivedAmount;
     $("threshold").value = state.threshold;
+    $("manualAccessToken").value = state.manualAccessToken;
     $("userId").value = state.userId;
     $("email").value = state.email;
     $("password").value = state.password;
     $("visible").checked = !!state.isVisible;
     $("enabled").checked = !!state.isEnabled;
-    $("accessPreview").textContent = mask(state.accessToken);
+    $("accessPreview").textContent = mask(effectiveAccessToken());
     $("apiPreview").textContent = mask(state.apiKey);
     $("refreshPreview").textContent = mask(state.refreshToken);
     renderPlatformFields();
@@ -538,7 +568,12 @@
 
   function renderPlatformFields() {
     const platform = $("platform").value;
+    const accessMode = $("accessTokenMode").value;
     $("subFields").style.display = platform === "sub2Api" ? "block" : "none";
+    $("accessModeWrap").style.display = platform === "newApi" ? "block" : "none";
+    $("accessAutoRow").style.display = platform === "newApi" && accessMode === "input" ? "none" : "flex";
+    $("accessManualRow").style.display = platform === "newApi" && accessMode === "input" ? "block" : "none";
+    $("openNewApiSecurity").style.display = platform === "newApi" && accessMode === "auto" ? "inline-block" : "none";
     $("newUserLabel").style.display = platform === "newApi" ? "block" : "none";
     $("userId").style.display = platform === "newApi" ? "block" : "none";
   }
@@ -565,6 +600,16 @@
     window.location.assign(url);
   }
 
+  function openNewApiSecurityPage() {
+    syncFromUi();
+    const url = newApiSecurityPageUrl(state.baseUrl || location.origin);
+    if (!url) {
+      setStatus("Base URL 无效，无法跳转", "bad");
+      return;
+    }
+    window.location.assign(url);
+  }
+
   function payload() {
     return {
       platform: state.platform || $("platform").value,
@@ -576,7 +621,7 @@
       threshold: state.threshold === "" ? 5 : Number(state.threshold),
       is_visible: !!state.isVisible,
       is_enabled: !!state.isEnabled,
-      access_token: state.accessToken,
+      access_token: effectiveAccessToken(),
       refresh_token: state.refreshToken,
       user_id: state.userId,
       api_key: state.apiKey,

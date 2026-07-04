@@ -195,6 +195,14 @@
     }
   }
 
+  function newApiSecurityPageUrl(baseUrl) {
+    try {
+      return new URL("/user/security", String(baseUrl || "").trim()).href;
+    } catch {
+      return "";
+    }
+  }
+
   function looksLikeApiResponse(status, contentType, body) {
     const code = Number(status || 0);
     if (!code || code === 404 || code >= 500) return false;
@@ -262,6 +270,7 @@
     hasNewApiPath,
     sameOrigin,
     keysPageUrl,
+    newApiSecurityPageUrl,
     looksLikeApiResponse,
     detectProbeResponse,
     detectHttp,

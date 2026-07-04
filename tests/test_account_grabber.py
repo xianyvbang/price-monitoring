@@ -226,6 +226,8 @@ assert.strictEqual(core.inferName("console.sub2api.2chat.cc"), "2chat");
 assert.strictEqual(core.inferName("ccb.180txt.cn"), "180txt");
 assert.strictEqual(core.keysPageUrl("https://sub.example/admin"), "https://sub.example/keys");
 assert.strictEqual(core.keysPageUrl("https://sub.example/"), "https://sub.example/keys");
+assert.strictEqual(core.newApiSecurityPageUrl("https://new.example/dashboard"), "https://new.example/user/security");
+assert.strictEqual(core.newApiSecurityPageUrl("https://new.example/"), "https://new.example/user/security");
 
 const newPayload = { success: true, data: { id: 42, accessToken: "new-access" } };
 assert.strictEqual(core.detectHttp("https://new.example/api/user/self", { Authorization: "Bearer header-token", "New-Api-User": "42" }, JSON.stringify(newPayload)), "newApi");
