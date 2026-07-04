@@ -13,6 +13,7 @@ const route = useRoute();
 const router = useRouter();
 const loading = ref(false);
 const grouped = ref({ newApi: [], sub2Api: [] });
+const settings = ref({ default_threshold: 5 });
 const accountDialog = ref(null);
 const groupPicker = ref(null);
 const bulkDialogVisible = ref(false);
@@ -30,7 +31,9 @@ const { isMobile } = useViewport();
 async function loadAccounts() {
   loading.value = true;
   try {
-    grouped.value = await api.accounts(filter);
+    const [accountsPayload, settingsPayload] = await Promise.all([api.accounts(filter), api.settings()]);
+    grouped.value = accountsPayload;
+    settings.value = settingsPayload.settings || settings.value;
   } catch (error) {
     if (error.status === 401) {
       await router.replace({ name: "login", query: { redirect: route.fullPath } });
@@ -186,6 +189,10 @@ function mobileAccounts(platform) {
   return rows(platform);
 }
 
+function thresholdText(row) {
+  return displayValue(row.threshold, settings.value.default_threshold);
+}
+
 onMounted(async () => {
   await loadAccounts();
   if (route.query.edit_id) {
@@ -257,7 +264,7 @@ onMounted(async () => {
             <template #default="{ row }"><span class="credentials-text">{{ accountCredentialsText(row) }}</span></template>
           </el-table-column>
           <el-table-column label="阈值" width="90">
-            <template #default="{ row }">{{ displayValue(row.threshold) }}</template>
+            <template #default="{ row }">{{ thresholdText(row) }}</template>
           </el-table-column>
           <el-table-column label="仪表盘显示" width="120">
             <template #default="{ row }">
@@ -304,7 +311,7 @@ onMounted(async () => {
             </div>
             <div class="mobile-metric">
               <span>阈值</span>
-              <strong>{{ displayValue(row.threshold) }}</strong>
+              <strong>{{ thresholdText(row) }}</strong>
             </div>
           </div>
 
@@ -346,7 +353,7 @@ onMounted(async () => {
       </div>
     </div>
 
-    <AccountDialog ref="accountDialog" @saved="upsertLocal" @pick-groups="groupPicker.open($event)" />
+    <AccountDialog ref="accountDialog" :default-threshold="settings.default_threshold" @saved="upsertLocal" @pick-groups="groupPicker.open($event)" />
     <GroupPickerDialog ref="groupPicker" @saved="upsertLocal" />
 
     <el-dialog v-model="bulkDialogVisible" title="批量导入" width="720px">

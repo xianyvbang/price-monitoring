@@ -842,7 +842,7 @@ onBeforeUnmount(() => {
                 <el-button link type="primary" @click="resetColumnVisibility(platform)">默认</el-button>
               </div>
               <el-checkbox-group :model-value="columnControlValues(platform)" class="column-visibility-list" @update:model-value="(values) => setPlatformColumnVisibility(platform, values)">
-                <el-checkbox v-for="option in columnControlOptions(platform)" :key="option.value" :label="option.value">
+                <el-checkbox v-for="option in columnControlOptions(platform)" :key="option.value" :value="option.value">
                   {{ option.label }}
                 </el-checkbox>
               </el-checkbox-group>
@@ -1055,7 +1055,13 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <AccountDialog ref="accountDialog" :fetch-groups-after-save="false" @saved="refreshDashboardQuietly" @pick-groups="groupPicker.open($event)" />
+    <AccountDialog
+      ref="accountDialog"
+      :fetch-groups-after-save="false"
+      :default-threshold="settings.default_threshold"
+      @saved="refreshDashboardQuietly"
+      @pick-groups="groupPicker.open($event)"
+    />
     <GroupPickerDialog ref="groupPicker" @saved="refreshDashboardQuietly" />
 
     <el-dialog v-model="balanceDialogVisible" title="余额趋势" width="860px" @opened="drawChart">

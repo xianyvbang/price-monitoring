@@ -1,5 +1,5 @@
 <script setup>
-import { nextTick, reactive, ref } from "vue";
+import { computed, nextTick, reactive, ref } from "vue";
 import { ElMessage } from "element-plus";
 import { CopyDocument } from "@element-plus/icons-vue";
 import { api } from "../api";
@@ -7,7 +7,8 @@ import { clone, normalizeAccountForm } from "../utils";
 
 const emit = defineEmits(["saved", "pick-groups"]);
 const props = defineProps({
-  fetchGroupsAfterSave: { type: Boolean, default: true }
+  fetchGroupsAfterSave: { type: Boolean, default: true },
+  defaultThreshold: { type: [Number, String], default: "" }
 });
 
 const visible = ref(false);
@@ -18,6 +19,12 @@ const form = reactive(normalizeAccountForm());
 const initialForm = ref(normalizeAccountForm());
 const accessTokenSnippet = "localStorage.getItem('auth_token')";
 const refreshTokenSnippet = "localStorage.getItem('refresh_token')";
+const thresholdPlaceholder = computed(() => {
+  if (props.defaultThreshold === null || props.defaultThreshold === undefined || props.defaultThreshold === "") {
+    return "";
+  }
+  return `默认 ${props.defaultThreshold}`;
+});
 
 const rules = {
   platform: [{ required: true, message: "请选择平台", trigger: "change" }],
@@ -233,7 +240,7 @@ defineExpose({ open });
       <el-row :gutter="12">
         <el-col :xs="24" :md="8">
           <el-form-item label="预警阈值">
-            <el-input-number v-model="form.threshold" :min="0" :step="0.01" style="width: 100%" />
+            <el-input-number v-model="form.threshold" :min="0" :step="0.01" :placeholder="thresholdPlaceholder" style="width: 100%" />
           </el-form-item>
         </el-col>
         <el-col :xs="24" :md="8">

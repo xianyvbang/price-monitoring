@@ -1112,7 +1112,7 @@ onBeforeUnmount(() => {
           <div v-loading="sub2ApiImportLoading" class="sub2api-group-picker">
             <el-empty v-if="!sub2ApiImportLoading && !sub2ApiGroups.length" description="暂无可选 OpenAI 分组" />
             <el-checkbox-group v-else v-model="sub2ApiSelectedGroupIds" class="sub2api-group-list">
-              <el-checkbox v-for="group in sub2ApiGroups" :key="sub2ApiGroupId(group)" :label="sub2ApiGroupId(group)" border class="sub2api-group-option">
+              <el-checkbox v-for="group in sub2ApiGroups" :key="sub2ApiGroupId(group)" :value="sub2ApiGroupId(group)" border class="sub2api-group-option">
                 <div class="sub2api-group-copy">
                   <span>{{ sub2ApiGroupLabel(group) }}</span>
                   <small>{{ sub2ApiGroupMeta(group) }}</small>
