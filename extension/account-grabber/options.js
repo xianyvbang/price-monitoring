@@ -1,12 +1,5 @@
 const KEYS = ["appBase", "sessionCookieName", "adminUser", "adminPassword"];
-const DEFAULT_APP_BASE = "__APP_BASE_URL__";
 const statusEl = document.getElementById("status");
-
-function normalizeAppBase(value) {
-  const text = String(value || "").trim().replace(/\/$/, "");
-  if (!text || text === "__APP_BASE_URL__") return "";
-  return text;
-}
 
 function setStatus(text, isErr) {
   statusEl.textContent = text;
@@ -16,7 +9,7 @@ function setStatus(text, isErr) {
 
 async function load() {
   const data = await chrome.storage.local.get(KEYS);
-  document.getElementById("appBase").value = normalizeAppBase(data.appBase) || normalizeAppBase(DEFAULT_APP_BASE);
+  document.getElementById("appBase").value = data.appBase || "__APP_BASE_URL__";
   document.getElementById("sessionCookieName").value = data.sessionCookieName || "balance_monitor_session";
   document.getElementById("adminUser").value = data.adminUser || "";
   document.getElementById("adminPassword").value = data.adminPassword || "";
@@ -25,7 +18,6 @@ async function load() {
 document.getElementById("save").addEventListener("click", async () => {
   const obj = {};
   for (const key of KEYS) obj[key] = document.getElementById(key).value.trim();
-  obj.appBase = normalizeAppBase(obj.appBase) || normalizeAppBase(DEFAULT_APP_BASE);
   await chrome.storage.local.set(obj);
   setStatus("已保存");
 });

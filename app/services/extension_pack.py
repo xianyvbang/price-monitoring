@@ -67,7 +67,7 @@ def build_extension_zip_from_template(base_url: str, template_dir: Path, filenam
             data = path.read_bytes()
             if rel == "manifest.json":
                 data = _patch_manifest(data, origin_match)
-            elif rel in {"options.js", "background.js"}:
+            elif rel == "options.js":
                 text = data.decode("utf-8")
                 text = text.replace(BASE_URL_PLACEHOLDER, base_url_clean)
                 data = text.encode("utf-8")

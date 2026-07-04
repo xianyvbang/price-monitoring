@@ -1,18 +1,12 @@
 const DEFAULT_SESSION_COOKIE = "balance_monitor_session";
-const DEFAULT_APP_BASE = "__APP_BASE_URL__";
+const DEFAULT_APP_BASE = "http://localhost:8000";
 const DEFAULT_PUSH_TIMEOUT_MS = 20000;
-
-function normalizeAppBase(value) {
-  const text = String(value || "").trim().replace(/\/$/, "");
-  if (!text || text === "__APP_BASE_URL__") return "";
-  return text;
-}
 
 async function getStored() {
   const keys = ["appBase", "sessionCookieName", "adminUser", "adminPassword", "pushTimeoutMs"];
   const local = await chrome.storage.local.get(keys);
   return {
-    appBase: normalizeAppBase(local.appBase) || normalizeAppBase(DEFAULT_APP_BASE),
+    appBase: String(local.appBase || DEFAULT_APP_BASE).replace(/\/$/, ""),
     sessionCookie: local.sessionCookieName || DEFAULT_SESSION_COOKIE,
     adminUser: local.adminUser || "",
     adminPassword: local.adminPassword || "",
@@ -91,7 +85,6 @@ async function pushAccount(payload) {
   const cfg = await getStored();
   const data = cleanPayload(payload);
   const errors = [];
-  if (!cfg.appBase) errors.push("App Base URL 未配置或仍是占位符，请重新下载插件，或在扩展选项页保存余额监控 App 地址");
   if (!data.name) errors.push("名称必填");
   if (!data.base_url) errors.push("Base URL 必填");
   if (data.platform === "newApi") {
@@ -109,9 +102,6 @@ async function pushAccount(payload) {
   });
   const result = await resp.json().catch(() => ({}));
   if (!resp.ok || !result.ok) {
-    if (resp.status === 405) {
-      return { ok: false, message: `App Base URL 可能配置错误：${cfg.appBase} 不接受账号导入接口 POST，请在扩展选项页改为余额监控 App 地址` };
-    }
     return { ok: false, message: result.detail || result.message || `保存失败 (${resp.status})` };
   }
   return { ok: true, id: result.id, account: result.account };
