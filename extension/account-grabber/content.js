@@ -1,10 +1,38 @@
-(() => {
+;(async () => {
   "use strict";
 
   if (window.__accountGrabberContent) return;
   window.__accountGrabberContent = true;
 
   if (!/^https?:$/.test(location.protocol) || location.hostname === "opencode.ai") return;
+
+  const DEFAULT_APP_BASE = "http://localhost:8000";
+  const APP_TITLE = "余额监控";
+
+  function normalizedOrigin(value) {
+    const text = String(value || "").trim();
+    if (!text || /^__APP_BASE_URL__$/i.test(text)) return "";
+    try {
+      return new URL(text).origin;
+    } catch {
+      return "";
+    }
+  }
+
+  async function isBalanceMonitorAppPage() {
+    if ((document.title || "").trim() === APP_TITLE) {
+      return true;
+    }
+    try {
+      const stored = await chrome.storage.local.get(["appBase"]);
+      const configuredOrigin = normalizedOrigin(stored.appBase) || normalizedOrigin(DEFAULT_APP_BASE);
+      return !!configuredOrigin && configuredOrigin === location.origin;
+    } catch {
+      return false;
+    }
+  }
+
+  if (await isBalanceMonitorAppPage()) return;
 
   const SOURCE = "account-grabber-main";
   const CORE = window.AccountGrabberCore || {};

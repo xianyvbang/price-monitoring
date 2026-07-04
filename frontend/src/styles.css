@@ -295,6 +295,10 @@ a {
   margin-bottom: 16px;
 }
 
+.dashboard-list-loading {
+  min-height: 240px;
+}
+
 .stat-card {
   background: var(--panel);
   border: 1px solid var(--line);

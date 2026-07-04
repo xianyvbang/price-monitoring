@@ -787,7 +787,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section v-loading="loading">
+  <section>
     <div class="page-head">
       <div>
         <h1>余额仪表盘</h1>
@@ -844,42 +844,43 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <div v-for="[platform, rows] in platformEntries" :key="platform" :class="['panel', 'table-card', 'platform-table', `platform-table--${platform}`]">
-      <div class="panel-head platform-panel-head">
-        <div class="platform-title">
-          <h2>{{ platform }}</h2>
-          <p>主体网站</p>
-        </div>
-        <div class="platform-head-actions">
-          <el-popover placement="bottom-end" trigger="click" width="320">
-            <template #reference>
-              <el-button :icon="Operation">列显示</el-button>
-            </template>
-            <div class="column-visibility-panel">
-              <div class="column-visibility-head">
-                <strong>列显示</strong>
-                <el-button link type="primary" @click="resetColumnVisibility(platform)">默认</el-button>
+    <div v-loading="loading" class="dashboard-list-loading">
+      <div v-for="[platform, rows] in platformEntries" :key="platform" :class="['panel', 'table-card', 'platform-table', `platform-table--${platform}`]">
+        <div class="panel-head platform-panel-head">
+          <div class="platform-title">
+            <h2>{{ platform }}</h2>
+            <p>主体网站</p>
+          </div>
+          <div class="platform-head-actions">
+            <el-popover placement="bottom-end" trigger="click" width="320">
+              <template #reference>
+                <el-button :icon="Operation">列显示</el-button>
+              </template>
+              <div class="column-visibility-panel">
+                <div class="column-visibility-head">
+                  <strong>列显示</strong>
+                  <el-button link type="primary" @click="resetColumnVisibility(platform)">默认</el-button>
+                </div>
+                <el-checkbox-group :model-value="columnControlValues(platform)" class="column-visibility-list" @update:model-value="(values) => setPlatformColumnVisibility(platform, values)">
+                  <el-checkbox v-for="option in columnControlOptions(platform)" :key="option.value" :value="option.value">
+                    {{ option.label }}
+                  </el-checkbox>
+                </el-checkbox-group>
               </div>
-              <el-checkbox-group :model-value="columnControlValues(platform)" class="column-visibility-list" @update:model-value="(values) => setPlatformColumnVisibility(platform, values)">
-                <el-checkbox v-for="option in columnControlOptions(platform)" :key="option.value" :value="option.value">
-                  {{ option.label }}
-                </el-checkbox>
-              </el-checkbox-group>
-            </div>
-          </el-popover>
-          <el-tag>{{ accountCount(rows) }} 个账号<span v-if="rows.length !== accountCount(rows)"> / {{ rows.length }} 个分组</span></el-tag>
+            </el-popover>
+            <el-tag>{{ accountCount(rows) }} 个账号<span v-if="rows.length !== accountCount(rows)"> / {{ rows.length }} 个分组</span></el-tag>
+          </div>
         </div>
-      </div>
-      <template v-if="!isMobile">
-        <el-table
-          :data="rows"
-          border
-          stripe
-          row-key="dashboard_row_id"
-          :span-method="dashboardSpanMethod"
-          :row-class-name="dashboardRowClassName"
-          style="width: 100%"
-        >
+        <template v-if="!isMobile">
+          <el-table
+            :data="rows"
+            border
+            stripe
+            row-key="dashboard_row_id"
+            :span-method="dashboardSpanMethod"
+            :row-class-name="dashboardRowClassName"
+            style="width: 100%"
+          >
           <el-table-column v-if="showColumn(platform, 'name')" prop="name" label="名称" min-width="150">
             <template #default="{ row }">
               <strong>{{ row.name }}</strong>
@@ -984,10 +985,10 @@ onBeforeUnmount(() => {
               </div>
             </template>
           </el-table-column>
-        </el-table>
-      </template>
-      <div v-else class="mobile-stack">
-        <article v-for="row in dashboardCards(rows, platform)" :key="row.dashboard_row_id" class="mobile-card">
+          </el-table>
+        </template>
+        <div v-else class="mobile-stack">
+          <article v-for="row in dashboardCards(rows, platform)" :key="row.dashboard_row_id" class="mobile-card">
           <div class="mobile-card-head">
             <div class="mobile-card-title">
               <strong>{{ row.name }}</strong>
@@ -1070,7 +1071,8 @@ onBeforeUnmount(() => {
               <el-button v-if="row.last_group_rate_changed" size="small" link type="primary" :loading="row._resettingGroupRate" @click="resetGroupRate(row)">重置</el-button>
             </div>
           </div>
-        </article>
+          </article>
+        </div>
       </div>
     </div>
 
