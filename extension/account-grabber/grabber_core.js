@@ -159,20 +159,34 @@
     return "";
   }
 
-  function detectHttp(url, headers, payload) {
-    const text = String(url || "");
-    if (text.includes("/api/user/self") || newApiUserFromHeaders(headers)) return "newApi";
-    if (
+  function hasExplicitPlatformHint(value) {
+    return /(^|[._/-])(newapi|new-api|sub2api|sub-2-api)([._/-]|$)/i.test(String(value || ""));
+  }
+
+  function hasSub2ApiPath(value) {
+    const text = String(value || "");
+    return (
       text.includes("/api/v1/auth/login") ||
       text.includes("/api/v1/auth/refresh") ||
       text.includes("/api/v1/keys") ||
       text.includes("/v1/usage")
-    ) return "sub2Api";
+    );
+  }
+
+  function hasNewApiPath(value) {
+    const text = String(value || "");
+    return text.includes("/api/user/self") || text.includes("/api/user/security");
+  }
+
+  function detectHttp(url, headers, payload) {
+    const text = String(url || "");
+    if (hasNewApiPath(text) || newApiUserFromHeaders(headers)) return "newApi";
+    if (hasSub2ApiPath(text)) return "sub2Api";
     const data = safeJson(payload);
-    if (/token|access/i.test(text) && extractGeneratedAccessToken(data)) return "newApi";
-    if (extractRefreshToken(data)) return "sub2Api";
-    if (extractUserId(data) && extractAccessToken(data)) return "newApi";
-    if (extractApiKey(data)) return "sub2Api";
+    if (hasExplicitPlatformHint(text) && /token|access/i.test(text) && extractGeneratedAccessToken(data)) return "newApi";
+    if (hasExplicitPlatformHint(text) && extractRefreshToken(data)) return "sub2Api";
+    if (hasExplicitPlatformHint(text) && extractUserId(data) && extractAccessToken(data)) return "newApi";
+    if (hasExplicitPlatformHint(text) && extractApiKey(data)) return "sub2Api";
     return "";
   }
 
@@ -191,6 +205,9 @@
     extractApiKey,
     bearerFromHeaders,
     newApiUserFromHeaders,
+    hasExplicitPlatformHint,
+    hasSub2ApiPath,
+    hasNewApiPath,
     detectHttp,
   };
 

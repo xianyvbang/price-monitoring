@@ -206,7 +206,30 @@
     return "";
   }
 
+  function hasExplicitPlatformHint(value) {
+    if (CORE.hasExplicitPlatformHint) return CORE.hasExplicitPlatformHint(value);
+    return /(^|[._/-])(newapi|new-api|sub2api|sub-2-api)([._/-]|$)/i.test(String(value || ""));
+  }
+
+  function hasSub2ApiPath(value) {
+    if (CORE.hasSub2ApiPath) return CORE.hasSub2ApiPath(value);
+    const text = String(value || "");
+    return (
+      text.includes("/api/v1/auth/login") ||
+      text.includes("/api/v1/auth/refresh") ||
+      text.includes("/api/v1/keys") ||
+      text.includes("/v1/usage")
+    );
+  }
+
+  function hasNewApiPath(value) {
+    if (CORE.hasNewApiPath) return CORE.hasNewApiPath(value);
+    const text = String(value || "");
+    return text.includes("/api/user/self") || text.includes("/api/user/security");
+  }
+
   function scanStorage() {
+    const explicitSiteHint = hasExplicitPlatformHint(location.hostname);
     for (const storage of [safeStorage("localStorage"), safeStorage("sessionStorage")]) {
       if (!storage) continue;
       try {
@@ -215,8 +238,10 @@
           const value = storage.getItem(key) || "";
           const lower = key.toLowerCase();
           const parsed = safeJson(value);
-          if (!state.platform && /refresh[_-]?token|auth[_-]?token/.test(lower)) state.platform = "sub2Api";
-          if (!state.platform && /new[_-]?api|newapi|user[_-]?id|userid/.test(lower)) state.platform = "newApi";
+          if (!state.platform && /sub2[_-]?api/.test(lower)) state.platform = "sub2Api";
+          if (!state.platform && /new[_-]?api|newapi/.test(lower)) state.platform = "newApi";
+          if (!state.platform && explicitSiteHint && /refresh[_-]?token|auth[_-]?token/.test(lower)) state.platform = "sub2Api";
+          if (!state.platform && explicitSiteHint && /user[_-]?id|userid/.test(lower)) state.platform = "newApi";
           if (!state.refreshToken && /refresh[_-]?token/.test(lower) && !isMasked(value)) state.refreshToken = value.trim();
           if (!state.accessToken && /(access[_-]?token|auth[_-]?token|^token$)/.test(lower) && !isMasked(value)) state.accessToken = value.trim();
           if (!state.userId && /^(user[_-]?id|userid)$/.test(lower)) state.userId = value.trim();
@@ -249,7 +274,7 @@
     const bearer = bearerFromHeaders(headers);
     const headerUser = newApiUserFromHeaders(headers);
 
-    if (url.includes("/api/user/self")) {
+    if (hasNewApiPath(url)) {
       state.platform = "newApi";
       if (bearer) state.accessToken = bearer;
       if (headerUser) state.userId = headerUser;
@@ -265,14 +290,14 @@
       state.accessToken ||= bearer;
     } else if (url.includes("/v1/usage")) {
       state.platform = "sub2Api";
-    } else if (/token|access|security/i.test(url)) {
+    } else if (/token|access|security/i.test(url) && (state.platform === "newApi" || hasExplicitPlatformHint(url) || hasExplicitPlatformHint(location.hostname))) {
       const access = extractGeneratedAccessToken(data);
       if (access) {
         state.platform ||= "newApi";
         state.accessToken = access;
       }
       state.refreshToken = extractRefreshToken(data) || state.refreshToken;
-    } else if (/key/i.test(url)) {
+    } else if (/key/i.test(url) && (state.platform === "sub2Api" || hasSub2ApiPath(url) || hasExplicitPlatformHint(url) || hasExplicitPlatformHint(location.hostname))) {
       const key = extractApiKeys(data);
       if (key) {
         state.platform ||= "sub2Api";

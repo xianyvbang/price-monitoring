@@ -242,6 +242,10 @@ assert.strictEqual(core.extractApiKey({ data: { token: "login-access-token" } })
 const tokens = { data: { access_token: "sub-at", refresh_token: "sub-rt" } };
 assert.strictEqual(core.extractAccessToken(tokens), "sub-at");
 assert.strictEqual(core.extractRefreshToken(tokens), "sub-rt");
+
+assert.strictEqual(core.detectHttp("https://github.com/session", {}, JSON.stringify({ data: { refresh_token: "github-refresh-token" } })), "");
+assert.strictEqual(core.detectHttp("https://github.com/api/key", {}, JSON.stringify({ data: { key: "github-key" } })), "");
+assert.strictEqual(core.detectHttp("https://sub.example/api/v1/auth/refresh", {}, JSON.stringify(tokens)), "sub2Api");
 """
     result = subprocess.run(["node", "-e", script], cwd=repo, capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
