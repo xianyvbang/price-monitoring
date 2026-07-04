@@ -175,8 +175,8 @@ def test_api_import_account_by_base_url_adds_different_base_url_even_when_name_m
     existing_id = test_db.upsert_account(
         {
             "platform": "sub2Api",
-            "name": "180txt",
-            "base_url": "https://a.180txt.cn",
+            "name": "xybbz",
+            "base_url": "https://a.xybbz.xyz",
             "api_key": "sk-old",
             "access_token": "old-at",
         }
@@ -188,8 +188,8 @@ def test_api_import_account_by_base_url_adds_different_base_url_even_when_name_m
             "/api/accounts/import-by-base-url",
             json={
                 "platform": "sub2Api",
-                "name": "180txt",
-                "base_url": "https://ccb.180txt.cn",
+                "name": "xybbz",
+                "base_url": "https://sub2api.xybbz.xyz",
                 "api_key": "sk-new",
                 "access_token": "new-at",
                 "refresh_token": "new-rt",
@@ -201,17 +201,17 @@ def test_api_import_account_by_base_url_adds_different_base_url_even_when_name_m
     payload = response.json()
     assert payload["id"] != existing_id
     assert payload["action"] == "新增"
-    matching = [item for item in test_db.list_accounts(platform="sub2Api") if item["base_url"] in {"https://a.180txt.cn", "https://ccb.180txt.cn"}]
+    matching = [item for item in test_db.list_accounts(platform="sub2Api") if item["base_url"] in {"https://a.xybbz.xyz", "https://sub2api.xybbz.xyz"}]
     assert len(matching) == 2
     created = test_db.get_account(payload["id"])
-    assert created["name"] == "180txt (2)"
-    assert created["base_url"] == "https://ccb.180txt.cn"
+    assert created["name"] == "xybbz (2)"
+    assert created["base_url"] == "https://sub2api.xybbz.xyz"
     assert decrypt_value(created["api_key_enc"], config.app_secret_key) == "sk-new"
     assert decrypt_value(created["access_token_enc"], config.app_secret_key) == "new-at"
     assert decrypt_value(created["refresh_token_enc"], config.app_secret_key) == "new-rt"
     original = test_db.get_account(existing_id)
-    assert original["name"] == "180txt"
-    assert original["base_url"] == "https://a.180txt.cn"
+    assert original["name"] == "xybbz"
+    assert original["base_url"] == "https://a.xybbz.xyz"
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
@@ -223,7 +223,7 @@ const assert = require("assert");
 
 assert.strictEqual(core.inferName("www.newapi.price.example.com"), "example");
 assert.strictEqual(core.inferName("console.sub2api.2chat.cc"), "2chat");
-assert.strictEqual(core.inferName("ccb.180txt.cn"), "180txt");
+assert.strictEqual(core.inferName("sub2api.xybbz.xyz"), "xybbz");
 assert.strictEqual(core.keysPageUrl("https://sub.example/admin"), "https://sub.example/keys");
 assert.strictEqual(core.keysPageUrl("https://sub.example/"), "https://sub.example/keys");
 assert.strictEqual(core.newApiTokenApiUrl("https://new.example/dashboard"), "https://new.example/api/user/token");
