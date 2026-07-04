@@ -96,7 +96,7 @@ async function pushAccount(payload) {
   }
   if (errors.length) return { ok: false, message: errors.join("；") };
 
-  const resp = await appFetch(cfg, "/api/accounts", {
+  const resp = await appFetch(cfg, "/api/accounts/import-by-base-url", {
     method: "POST",
     body: JSON.stringify(data),
   });

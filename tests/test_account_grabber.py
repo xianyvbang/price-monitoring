@@ -128,6 +128,92 @@ def test_api_create_accounts_from_grabber_defaults_encrypts_secrets(tmp_path, mo
     assert decrypt_value(sub_account["refresh_token_enc"], config.app_secret_key) == "sub-rt"
 
 
+def test_api_import_account_by_base_url_updates_same_base_url(tmp_path, monkeypatch):
+    test_db = setup_test_db(tmp_path, monkeypatch)
+    existing_id = test_db.upsert_account(
+        {
+            "platform": "newApi",
+            "name": "old-name",
+            "base_url": "https://new.example",
+            "access_token": "old-at",
+            "user_id": "1",
+            "threshold": 1,
+        }
+    )
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.post(
+            "/api/accounts/import-by-base-url",
+            json={
+                "platform": "newApi",
+                "name": "new-name",
+                "base_url": "https://new.example/",
+                "access_token": "new-at",
+                "user_id": "42",
+                "threshold": 5,
+                "note": "1:1",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["id"] == existing_id
+    assert payload["action"] == "更新"
+    account = test_db.get_account(existing_id)
+    assert account["name"] == "new-name"
+    assert account["base_url"] == "https://new.example"
+    assert account["threshold"] == 5
+    assert decrypt_value(account["access_token_enc"], config.app_secret_key) == "new-at"
+    assert decrypt_value(account["user_id_enc"], config.app_secret_key) == "42"
+    matching = [item for item in test_db.list_accounts(platform="newApi") if item["base_url"] == "https://new.example"]
+    assert len(matching) == 1
+
+
+def test_api_import_account_by_base_url_adds_different_base_url_even_when_name_matches(tmp_path, monkeypatch):
+    test_db = setup_test_db(tmp_path, monkeypatch)
+    existing_id = test_db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "180txt",
+            "base_url": "https://a.180txt.cn",
+            "api_key": "sk-old",
+            "access_token": "old-at",
+        }
+    )
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.post(
+            "/api/accounts/import-by-base-url",
+            json={
+                "platform": "sub2Api",
+                "name": "180txt",
+                "base_url": "https://ccb.180txt.cn",
+                "api_key": "sk-new",
+                "access_token": "new-at",
+                "refresh_token": "new-rt",
+                "threshold": 5,
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["id"] != existing_id
+    assert payload["action"] == "新增"
+    matching = [item for item in test_db.list_accounts(platform="sub2Api") if item["base_url"] in {"https://a.180txt.cn", "https://ccb.180txt.cn"}]
+    assert len(matching) == 2
+    created = test_db.get_account(payload["id"])
+    assert created["name"] == "180txt (2)"
+    assert created["base_url"] == "https://ccb.180txt.cn"
+    assert decrypt_value(created["api_key_enc"], config.app_secret_key) == "sk-new"
+    assert decrypt_value(created["access_token_enc"], config.app_secret_key) == "new-at"
+    assert decrypt_value(created["refresh_token_enc"], config.app_secret_key) == "new-rt"
+    original = test_db.get_account(existing_id)
+    assert original["name"] == "180txt"
+    assert original["base_url"] == "https://a.180txt.cn"
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
 def test_account_grabber_core_extractors():
     repo = Path(__file__).resolve().parents[1]
