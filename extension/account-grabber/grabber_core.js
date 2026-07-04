@@ -187,6 +187,32 @@
     }
   }
 
+  function looksLikeApiResponse(status, contentType, body) {
+    const code = Number(status || 0);
+    if (!code || code === 404 || code >= 500) return false;
+    const type = String(contentType || "").toLowerCase();
+    if (type.includes("application/json")) return true;
+    const text = String(body || "").trim();
+    if (!text || /^<!doctype\s+html|<html[\s>]/i.test(text)) return false;
+    const parsed = safeJson(text);
+    return parsed && typeof parsed === "object";
+  }
+
+  function detectProbeResponse(path, status, contentType, body) {
+    const text = String(path || "");
+    if (!looksLikeApiResponse(status, contentType, body)) return "";
+    if (text.includes("/api/user/self") || text.includes("/api/user/security")) return "newApi";
+    if (
+      text.includes("/api/v1/keys") ||
+      text.includes("/api/v1/auth/login") ||
+      text.includes("/api/v1/auth/refresh") ||
+      text.includes("/v1/usage")
+    ) {
+      return "sub2Api";
+    }
+    return "";
+  }
+
   function detectHttp(url, headers, payload, pageOrigin, pageHostname) {
     const text = String(url || "");
     const data = safeJson(payload);
@@ -227,6 +253,8 @@
     hasSub2ApiPath,
     hasNewApiPath,
     sameOrigin,
+    looksLikeApiResponse,
+    detectProbeResponse,
     detectHttp,
   };
 

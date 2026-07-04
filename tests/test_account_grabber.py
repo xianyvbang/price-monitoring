@@ -249,6 +249,11 @@ assert.strictEqual(core.detectHttp("https://github.com/user/repo/blob/main/sub2a
 assert.strictEqual(core.detectHttp("https://api.github.com/api/v1/keys", {}, JSON.stringify({ data: { items: [{ key: "github-key" }] } }), "https://github.com", "github.com"), "");
 assert.strictEqual(core.detectHttp("https://sub.example/api/v1/auth/refresh", {}, JSON.stringify(tokens)), "sub2Api");
 assert.strictEqual(core.detectHttp("https://sub.example/api/v1/auth/refresh", {}, JSON.stringify(tokens), "https://sub.example", "sub.example"), "sub2Api");
+
+assert.strictEqual(core.detectProbeResponse("/api/v1/keys", 401, "application/json", JSON.stringify({ detail: "Unauthorized" })), "sub2Api");
+assert.strictEqual(core.detectProbeResponse("/api/v1/keys", 200, "text/html", "<!doctype html><html></html>"), "");
+assert.strictEqual(core.detectProbeResponse("/api/v1/keys", 404, "application/json", JSON.stringify({ message: "Not Found" })), "");
+assert.strictEqual(core.detectProbeResponse("/api/user/self", 401, "application/json", JSON.stringify({ message: "Unauthorized" })), "newApi");
 """
     result = subprocess.run(["node", "-e", script], cwd=repo, capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr

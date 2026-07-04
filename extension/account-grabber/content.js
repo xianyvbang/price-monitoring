@@ -37,6 +37,7 @@
   let host = null;
   let root = null;
   let visible = false;
+  let siteProbeStarted = false;
 
   function inferName(hostname) {
     if (CORE.inferName) return CORE.inferName(hostname);
@@ -234,6 +235,57 @@
       return new URL(String(value || ""), location.href).origin === location.origin;
     } catch {
       return false;
+    }
+  }
+
+  function detectProbeResponse(path, status, contentType, body) {
+    if (CORE.detectProbeResponse) return CORE.detectProbeResponse(path, status, contentType, body);
+    const code = Number(status || 0);
+    const type = String(contentType || "").toLowerCase();
+    const text = String(body || "").trim();
+    const apiLike = code && code !== 404 && code < 500 && (type.includes("application/json") || (text && !/^<!doctype\s+html|<html[\s>]/i.test(text) && typeof safeJson(text) === "object"));
+    if (!apiLike) return "";
+    if (String(path || "").includes("/api/user/self")) return "newApi";
+    if (String(path || "").includes("/api/v1/keys")) return "sub2Api";
+    return "";
+  }
+
+  async function probeSite() {
+    if (siteProbeStarted || state.platform) return;
+    siteProbeStarted = true;
+    for (const item of [
+      { platform: "sub2Api", path: "/api/v1/keys" },
+      { platform: "newApi", path: "/api/user/self" },
+    ]) {
+      if (state.platform) return;
+      try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 3500);
+        const response = await fetch(location.origin + item.path, {
+          method: "GET",
+          credentials: "include",
+          cache: "no-store",
+          headers: { Accept: "application/json" },
+          signal: ctrl.signal,
+        });
+        clearTimeout(timer);
+        const contentType = response.headers.get("content-type") || "";
+        const text = await response.clone().text().catch(() => "");
+        const platform = detectProbeResponse(item.path, response.status, contentType, text);
+        if (platform === item.platform) {
+          state.platform = platform;
+          const data = safeJson(text);
+          if (platform === "sub2Api") {
+            state.apiKey ||= extractApiKeys(data);
+          } else {
+            state.userId ||= extractUserId(data);
+            state.accessToken ||= extractAccessToken(data);
+          }
+          maybeShow();
+          render();
+          return;
+        }
+      } catch {}
     }
   }
 
@@ -534,5 +586,6 @@
   });
 
   setTimeout(scanStorage, 500);
+  setTimeout(probeSite, 700);
   setInterval(scanStorage, 3000);
 })();
