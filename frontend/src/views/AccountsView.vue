@@ -2,7 +2,7 @@
 import { onMounted, reactive, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { CopyDocument, Delete, Edit, Plus, Upload } from "@element-plus/icons-vue";
+import { CopyDocument, Delete, Download, Edit, Plus, Upload } from "@element-plus/icons-vue";
 import { api } from "../api";
 import AccountDialog from "../components/AccountDialog.vue";
 import GroupPickerDialog from "../components/GroupPickerDialog.vue";
@@ -185,6 +185,31 @@ function bulkPlaceholder(platform) {
   return "JSON 数组，或 CSV 行：name,baseUrl,accessToken,userId,threshold,note,rechargeUrl";
 }
 
+async function downloadAccountGrabber() {
+  try {
+    const resp = await fetch("/api/account-grabber/extension.zip", { credentials: "same-origin" });
+    if (!resp.ok) {
+      let message = "下载失败";
+      try {
+        const payload = await resp.json();
+        message = payload.detail || payload.message || message;
+      } catch {}
+      throw new Error(message);
+    }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "account-grabber.zip";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    ElMessage.error(error.message || "下载插件失败");
+  }
+}
+
 function mobileAccounts(platform) {
   return rows(platform);
 }
@@ -216,6 +241,7 @@ onMounted(async () => {
       <div class="page-actions">
         <el-button type="primary" :icon="Plus" @click="openCreate">添加账号</el-button>
         <el-button :icon="Upload" @click="openBulk">批量导入</el-button>
+        <el-button :icon="Download" @click="downloadAccountGrabber">下载账号导入插件</el-button>
       </div>
     </div>
 

@@ -32,7 +32,7 @@ from app.security import decrypt_value, encrypt_value
 from app.security import verify_password
 from app.services.balance import login_sub2api_tokens, query_newapi_group_options, query_sub2api_group_options
 from app.services.emailer import send_email
-from app.services.extension_pack import build_extension_zip
+from app.services.extension_pack import build_account_grabber_extension_zip, build_extension_zip
 from app.services.opencode_go import (
     KEY_LIST_DEFAULT_JS_URL,
     KEY_LIST_GET_REFERENCE_ID,
@@ -1881,6 +1881,22 @@ async def api_download_opencode_go_grabber(request: Request):
     )
 
 
+@app.get("/api/account-grabber/extension.zip")
+async def api_download_account_grabber(request: Request):
+    """下载定制后的 NewAPI/Sub2API 账号导入浏览器扩展 zip。"""
+    user = require_user(request)
+    try:
+        body, filename = build_account_grabber_extension_zip(request.base_url)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    db.add_log("info", "account", f"{user} 下载 NewAPI/Sub2API 账号导入扩展")
+    return Response(
+        content=body,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @app.get("/api/logs")
 async def api_logs(request: Request):
     require_user(request)
@@ -2037,6 +2053,30 @@ async def api_create_account(request: Request):
     return {"id": account_id, "ok": True, "account": public_edit_account(account_id)}
 
 
+@app.post("/api/accounts/import-by-base-url")
+async def api_import_account_by_base_url(request: Request):
+    require_user(request)
+    payload = await request.json()
+    account_data = _account_from_payload(payload)
+    current_account = _account_by_platform_base_url(account_data["platform"], account_data["base_url"])
+    account_data["name"] = _unique_account_name(
+        account_data["platform"],
+        account_data["name"],
+        exclude_account_id=int(current_account["id"]) if current_account else None,
+    )
+    if current_account:
+        prepared = await _prepare_account_data_for_save(account_data, current_account)
+        db.update_account(int(current_account["id"]), prepared)
+        account_id = int(current_account["id"])
+        action = "更新"
+    else:
+        prepared = await _prepare_account_data_for_save(account_data)
+        account_id = db.upsert_account(prepared)
+        action = "新增"
+    db.add_log("info", "account", f"API 按 Base URL 导入账号{action}: {account_data['platform']} / {account_data['base_url']}")
+    return {"id": account_id, "ok": True, "action": action, "account": public_edit_account(account_id)}
+
+
 @app.put("/api/accounts/{account_id}")
 async def api_update_account(request: Request, account_id: int):
     require_user(request)
@@ -2052,6 +2092,37 @@ async def api_update_account(request: Request, account_id: int):
         raise HTTPException(status_code=404, detail="账号不存在") from None
     db.add_log("info", "account", f"API 更新账号: {payload.get('platform')} / {payload.get('name')}")
     return {"id": account_id, "ok": True, "account": public_edit_account(account_id)}
+
+
+def _normalized_base_url(value: Any) -> str:
+    return str(value or "").strip().rstrip("/")
+
+
+def _account_by_platform_base_url(platform: str, base_url: str) -> Any | None:
+    target = _normalized_base_url(base_url)
+    if not target:
+        return None
+    for account in db.list_accounts(platform=platform):
+        if _normalized_base_url(account["base_url"]) == target:
+            return account
+    return None
+
+
+def _unique_account_name(platform: str, desired_name: str, exclude_account_id: int | None = None) -> str:
+    base = str(desired_name or "").strip() or "account"
+    used = {
+        str(account["name"] or "")
+        for account in db.list_accounts(platform=platform)
+        if exclude_account_id is None or int(account["id"]) != exclude_account_id
+    }
+    if base not in used:
+        return base
+    index = 2
+    while True:
+        candidate = f"{base} ({index})"
+        if candidate not in used:
+            return candidate
+        index += 1
 
 
 async def _prepare_account_data_for_save(account_data: dict[str, Any], current_account: Any | None = None) -> dict[str, Any]:

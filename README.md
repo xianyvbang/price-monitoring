@@ -96,6 +96,8 @@ JSON 示例：
 
 如果 `sub2Api` 站点开启了 Turnstile 人机验证（例如 `https://2chat.cc`），服务端无法只用 `email/password` 自动登录，登录接口可能返回 `400`。这时可以在账号里填写网页登录后的 `auth_token` 到 `accessToken`，并可选填写 `refresh_token` 到 `refreshToken`；查组会优先使用 `refreshToken` 刷新 `accessToken`，并在 `accessToken` 失效前自动刷新。JSON 批量导入时字段名为 `access_token` / `accessToken` 和 `refresh_token` / `refreshToken`。
 
+平台配置页面提供“下载账号导入插件”按钮，可下载独立的 `NewAPI/Sub2API Account Grabber` Chrome/Edge 扩展。它与 OpenCode Go 插件分开，源码模板位于 `extension/account-grabber`。安装后，扩展会在识别到 newApi 或 sub2Api 类网站时显示右侧悬浮按钮；悬浮窗可自动填入名称、Base URL、备注 `1:1`、预警阈值 `5`、仪表盘显示和自动查询开关，并从页面请求或浏览器存储中抓取 newApi 的 `accessToken/userId`、sub2Api 的第一个 `apiKey` 与已登录 `accessToken/refreshToken`。推送到 app 时会按平台和 Base URL 判重：Base URL 相同则更新账号，不同则新增账号；保存后不会立即触发余额或分组查询。
+
 ## OpenCode Go
 
 页面顶部的 `OpenCode Go` 用于监控 OpenCode Go 订阅的 5h、7d、30d 用量和 API key。新增账号时填写 Google 邮箱和密码用于账号归档；服务端不会启动内置浏览器，也不会自动操作 Google 登录。
@@ -126,6 +128,7 @@ Cookie: name=value; name2=value2
 - `GET /api/dashboard`
 - `GET /api/settings`
 - `POST /api/accounts`
+- `POST /api/accounts/import-by-base-url`
 - `POST /api/accounts/bulk`
 - `POST /api/accounts/{id}/query`
 - `DELETE /api/accounts/{id}`
@@ -148,5 +151,6 @@ Cookie: name=value; name2=value2
 - `GET /api/opencode-go/accounts/{id}/history`
 - `GET /api/opencode-go/accounts/{id}/api-key`
 - `GET /api/opencode-go-grabber/extension.zip`
+- `GET /api/account-grabber/extension.zip`
 
 所有接口都需要先通过 Web 登录获取 Cookie。
