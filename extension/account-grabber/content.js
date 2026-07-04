@@ -228,6 +228,15 @@
     return text.includes("/api/user/self") || text.includes("/api/user/security");
   }
 
+  function sameOriginUrl(value) {
+    if (CORE.sameOrigin) return CORE.sameOrigin(value, location.origin);
+    try {
+      return new URL(String(value || ""), location.href).origin === location.origin;
+    } catch {
+      return false;
+    }
+  }
+
   function scanStorage() {
     const explicitSiteHint = hasExplicitPlatformHint(location.hostname);
     for (const storage of [safeStorage("localStorage"), safeStorage("sessionStorage")]) {
@@ -238,8 +247,8 @@
           const value = storage.getItem(key) || "";
           const lower = key.toLowerCase();
           const parsed = safeJson(value);
-          if (!state.platform && /sub2[_-]?api/.test(lower)) state.platform = "sub2Api";
-          if (!state.platform && /new[_-]?api|newapi/.test(lower)) state.platform = "newApi";
+          if (!state.platform && explicitSiteHint && /sub2[_-]?api/.test(lower)) state.platform = "sub2Api";
+          if (!state.platform && explicitSiteHint && /new[_-]?api|newapi/.test(lower)) state.platform = "newApi";
           if (!state.platform && explicitSiteHint && /refresh[_-]?token|auth[_-]?token/.test(lower)) state.platform = "sub2Api";
           if (!state.platform && explicitSiteHint && /user[_-]?id|userid/.test(lower)) state.platform = "newApi";
           if (!state.refreshToken && /refresh[_-]?token/.test(lower) && !isMasked(value)) state.refreshToken = value.trim();
@@ -273,31 +282,38 @@
     const data = safeJson(payload.responseText || "");
     const bearer = bearerFromHeaders(headers);
     const headerUser = newApiUserFromHeaders(headers);
+    const sameOrigin = sameOriginUrl(url);
+    const explicitSiteHint = hasExplicitPlatformHint(location.hostname);
 
-    if (hasNewApiPath(url)) {
-      state.platform = "newApi";
+    if (sameOrigin && hasNewApiPath(url)) {
+      if (url.includes("/api/user/security") || bearer || headerUser || extractUserId(data) || extractAccessToken(data)) {
+        state.platform = "newApi";
+      }
       if (bearer) state.accessToken = bearer;
       if (headerUser) state.userId = headerUser;
       state.userId ||= extractUserId(data);
       state.accessToken ||= extractAccessToken(data);
-    } else if (url.includes("/api/v1/auth/login") || url.includes("/api/v1/auth/refresh")) {
-      state.platform = "sub2Api";
-      state.accessToken = extractAccessToken(data) || state.accessToken;
-      state.refreshToken = extractRefreshToken(data) || state.refreshToken;
-    } else if (url.includes("/api/v1/keys")) {
-      state.platform = "sub2Api";
-      state.apiKey = extractApiKeys(data) || state.apiKey;
+    } else if (sameOrigin && (url.includes("/api/v1/auth/login") || url.includes("/api/v1/auth/refresh"))) {
+      const access = extractAccessToken(data);
+      const refresh = extractRefreshToken(data);
+      if (access || refresh) state.platform = "sub2Api";
+      state.accessToken = access || state.accessToken;
+      state.refreshToken = refresh || state.refreshToken;
+    } else if (sameOrigin && url.includes("/api/v1/keys")) {
+      const key = extractApiKeys(data);
+      if (key) state.platform = "sub2Api";
+      state.apiKey = key || state.apiKey;
       state.accessToken ||= bearer;
-    } else if (url.includes("/v1/usage")) {
+    } else if (sameOrigin && url.includes("/v1/usage") && state.platform === "sub2Api") {
       state.platform = "sub2Api";
-    } else if (/token|access|security/i.test(url) && (state.platform === "newApi" || hasExplicitPlatformHint(url) || hasExplicitPlatformHint(location.hostname))) {
+    } else if (sameOrigin && /token|access|security/i.test(url) && (state.platform === "newApi" || explicitSiteHint)) {
       const access = extractGeneratedAccessToken(data);
       if (access) {
         state.platform ||= "newApi";
         state.accessToken = access;
       }
       state.refreshToken = extractRefreshToken(data) || state.refreshToken;
-    } else if (/key/i.test(url) && (state.platform === "sub2Api" || hasSub2ApiPath(url) || hasExplicitPlatformHint(url) || hasExplicitPlatformHint(location.hostname))) {
+    } else if (sameOrigin && /key/i.test(url) && (state.platform === "sub2Api" || (explicitSiteHint && hasSub2ApiPath(url)))) {
       const key = extractApiKeys(data);
       if (key) {
         state.platform ||= "sub2Api";

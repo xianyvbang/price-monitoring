@@ -245,7 +245,10 @@ assert.strictEqual(core.extractRefreshToken(tokens), "sub-rt");
 
 assert.strictEqual(core.detectHttp("https://github.com/session", {}, JSON.stringify({ data: { refresh_token: "github-refresh-token" } })), "");
 assert.strictEqual(core.detectHttp("https://github.com/api/key", {}, JSON.stringify({ data: { key: "github-key" } })), "");
+assert.strictEqual(core.detectHttp("https://github.com/user/repo/blob/main/sub2api-key.md", {}, JSON.stringify({ data: { key: "github-key" } }), "https://github.com", "github.com"), "");
+assert.strictEqual(core.detectHttp("https://api.github.com/api/v1/keys", {}, JSON.stringify({ data: { items: [{ key: "github-key" }] } }), "https://github.com", "github.com"), "");
 assert.strictEqual(core.detectHttp("https://sub.example/api/v1/auth/refresh", {}, JSON.stringify(tokens)), "sub2Api");
+assert.strictEqual(core.detectHttp("https://sub.example/api/v1/auth/refresh", {}, JSON.stringify(tokens), "https://sub.example", "sub.example"), "sub2Api");
 """
     result = subprocess.run(["node", "-e", script], cwd=repo, capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr

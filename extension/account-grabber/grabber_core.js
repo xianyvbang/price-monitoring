@@ -178,15 +178,33 @@
     return text.includes("/api/user/self") || text.includes("/api/user/security");
   }
 
-  function detectHttp(url, headers, payload) {
+  function sameOrigin(url, pageOrigin) {
+    if (!pageOrigin) return true;
+    try {
+      return new URL(String(url || ""), pageOrigin).origin === pageOrigin;
+    } catch {
+      return false;
+    }
+  }
+
+  function detectHttp(url, headers, payload, pageOrigin, pageHostname) {
     const text = String(url || "");
-    if (hasNewApiPath(text) || newApiUserFromHeaders(headers)) return "newApi";
-    if (hasSub2ApiPath(text)) return "sub2Api";
     const data = safeJson(payload);
-    if (hasExplicitPlatformHint(text) && /token|access/i.test(text) && extractGeneratedAccessToken(data)) return "newApi";
-    if (hasExplicitPlatformHint(text) && extractRefreshToken(data)) return "sub2Api";
-    if (hasExplicitPlatformHint(text) && extractUserId(data) && extractAccessToken(data)) return "newApi";
-    if (hasExplicitPlatformHint(text) && extractApiKey(data)) return "sub2Api";
+    const siteHint = hasExplicitPlatformHint(pageHostname || "");
+    if (!sameOrigin(text, pageOrigin)) return "";
+    if (hasNewApiPath(text) || newApiUserFromHeaders(headers)) {
+      if (text.includes("/api/user/security")) return "newApi";
+      if (newApiUserFromHeaders(headers) || bearerFromHeaders(headers) || extractUserId(data) || extractAccessToken(data)) return "newApi";
+      return "";
+    }
+    if (text.includes("/api/v1/auth/login") || text.includes("/api/v1/auth/refresh")) {
+      return extractAccessToken(data) || extractRefreshToken(data) ? "sub2Api" : "";
+    }
+    if (text.includes("/api/v1/keys")) return extractApiKey(data) ? "sub2Api" : "";
+    if (siteHint && /token|access|security/i.test(text) && extractGeneratedAccessToken(data)) return "newApi";
+    if (siteHint && extractRefreshToken(data)) return "sub2Api";
+    if (siteHint && extractUserId(data) && extractAccessToken(data)) return "newApi";
+    if (siteHint && extractApiKey(data)) return "sub2Api";
     return "";
   }
 
@@ -208,6 +226,7 @@
     hasExplicitPlatformHint,
     hasSub2ApiPath,
     hasNewApiPath,
+    sameOrigin,
     detectHttp,
   };
 

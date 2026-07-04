@@ -48,8 +48,17 @@
     return result;
   }
 
+  function sameOrigin(url) {
+    try {
+      return new URL(String(url || ""), location.href).origin === location.origin;
+    } catch {
+      return false;
+    }
+  }
+
   function candidate(url, headers) {
     const text = String(url || "");
+    if (!sameOrigin(text)) return false;
     if (CANDIDATE_PATHS.some((path) => text.includes(path))) return true;
     if (/\/api\/.*(?:token|access|security|key)|(?:access[_-]?token|api[_-]?key)/i.test(text)) return true;
     const h = headerObject(headers);
