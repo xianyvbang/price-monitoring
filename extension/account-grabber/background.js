@@ -12,7 +12,7 @@ async function getStored() {
   const keys = ["appBase", "sessionCookieName", "adminUser", "adminPassword", "pushTimeoutMs"];
   const local = await chrome.storage.local.get(keys);
   return {
-    appBase: normalizeAppBase(local.appBase || DEFAULT_APP_BASE),
+    appBase: normalizeAppBase(local.appBase) || normalizeAppBase(DEFAULT_APP_BASE),
     sessionCookie: local.sessionCookieName || DEFAULT_SESSION_COOKIE,
     adminUser: local.adminUser || "",
     adminPassword: local.adminPassword || "",
@@ -91,7 +91,7 @@ async function pushAccount(payload) {
   const cfg = await getStored();
   const data = cleanPayload(payload);
   const errors = [];
-  if (!cfg.appBase) errors.push("请在扩展选项页配置 App Base URL");
+  if (!cfg.appBase) errors.push("App Base URL 未配置或仍是占位符，请重新下载插件，或在扩展选项页保存余额监控 App 地址");
   if (!data.name) errors.push("名称必填");
   if (!data.base_url) errors.push("Base URL 必填");
   if (data.platform === "newApi") {
