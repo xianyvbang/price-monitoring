@@ -102,6 +102,12 @@ async function pushAccount(payload) {
   });
   const result = await resp.json().catch(() => ({}));
   if (!resp.ok || !result.ok) {
+    if (resp.status === 401 && (!cfg.adminUser || !cfg.adminPassword)) {
+      return { ok: false, message: "App 登录已失效，且扩展选项页未配置管理员账号密码；请先登录 App，或在扩展选项页配置管理员账号密码后重试" };
+    }
+    if (resp.status === 401) {
+      return { ok: false, message: result.detail || result.message || "App 自动登录失败，请检查扩展选项页里的管理员账号密码" };
+    }
     return { ok: false, message: result.detail || result.message || `保存失败 (${resp.status})` };
   }
   return { ok: true, id: result.id, account: result.account };
