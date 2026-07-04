@@ -313,6 +313,7 @@
         button.push { width:100%; margin-top:10px; padding:8px; border:0; border-radius:4px; background:#0f766e; color:#fff; cursor:pointer; font-size:13px; }
         button.secondary { background:#64748b; }
         button.danger { background:#dc2626; }
+        button.inline-link { width:auto; margin:0; padding:0; border:0; background:transparent; color:#0f766e; cursor:pointer; font:inherit; text-decoration:underline; }
         button:disabled { opacity:.62; cursor:not-allowed; }
         #status { min-height:18px; margin-top:7px; font-size:12px; }
         .ok { color:#15803d; }
@@ -354,7 +355,7 @@
         <button class="push" id="push">推送到 App</button>
         <button class="push danger" id="clear">清空抓取值</button>
         <div id="status"></div>
-        <div class="muted">推送只保存账号，不会立即查询余额或分组。需在扩展选项页配置 App 地址。</div>
+        <div class="muted">推送只保存账号，不会立即查询余额或分组。需在扩展<button class="inline-link" id="optionsLink" type="button">选项页</button>配置 App 地址。</div>
       </div>
     `;
     document.documentElement.appendChild(host);
@@ -381,6 +382,10 @@
     $("copyAccess").addEventListener("click", () => copySecret(state.accessToken));
     $("copyApi").addEventListener("click", () => copySecret(state.apiKey));
     $("copyRefresh").addEventListener("click", () => copySecret(state.refreshToken));
+    $("optionsLink").addEventListener("click", async () => {
+      const result = await bg({ type: "open-options" });
+      if (!result.ok) setStatus(result.message || "无法打开选项页", "bad");
+    });
     $("clear").addEventListener("click", () => {
       state.accessToken = "";
       state.refreshToken = "";
