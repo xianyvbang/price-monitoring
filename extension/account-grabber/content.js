@@ -12,7 +12,7 @@
   const SUFFIXES = new Set(["com", "net", "org", "io", "ai", "cc", "cn", "top", "xyz", "site", "app", "dev", "cloud", "co", "uk"]);
   const KEY_FIELDS = ["key", "api_key", "apiKey", "token"];
   const DIRECT_KEY_FIELDS = ["key", "api_key", "apiKey"];
-  const ACCESS_FIELDS = ["access_token", "accessToken", "auth_token", "authToken", "token"];
+  const ACCESS_FIELDS = ["access_token", "accessToken", "auth_token", "authToken", "system_access_token", "systemAccessToken", "token"];
   const REFRESH_FIELDS = ["refresh_token", "refreshToken"];
   const USER_ID_FIELDS = ["user_id", "userId", "userid", "id"];
 
@@ -121,6 +121,21 @@
       if (!found) found = pickField(obj, ACCESS_FIELDS);
     });
     return found;
+  }
+
+  function extractGeneratedAccessToken(payload) {
+    if (CORE.extractGeneratedAccessToken) return CORE.extractGeneratedAccessToken(payload);
+    const access = extractAccessToken(payload);
+    if (access) return access;
+    const data = unwrap(payload);
+    if (typeof data === "string" && looksLikeToken(data)) return data.trim();
+    if (typeof payload === "string" && looksLikeToken(payload)) return payload.trim();
+    return "";
+  }
+
+  function looksLikeToken(value) {
+    const text = String(value || "").trim();
+    return text.length >= 16 && !/\s/.test(text) && !isMasked(text);
   }
 
   function extractRefreshToken(payload) {
@@ -250,8 +265,8 @@
       state.accessToken ||= bearer;
     } else if (url.includes("/v1/usage")) {
       state.platform = "sub2Api";
-    } else if (/token/i.test(url)) {
-      const access = extractAccessToken(data);
+    } else if (/token|access|security/i.test(url)) {
+      const access = extractGeneratedAccessToken(data);
       if (access) {
         state.platform ||= "newApi";
         state.accessToken = access;

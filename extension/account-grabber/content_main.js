@@ -51,7 +51,7 @@
   function candidate(url, headers) {
     const text = String(url || "");
     if (CANDIDATE_PATHS.some((path) => text.includes(path))) return true;
-    if (/\/api\/.*(?:token|key)|(?:access[_-]?token|api[_-]?key)/i.test(text)) return true;
+    if (/\/api\/.*(?:token|access|security|key)|(?:access[_-]?token|api[_-]?key)/i.test(text)) return true;
     const h = headerObject(headers);
     return Object.keys(h).some((key) => key.toLowerCase() === "new-api-user" || key.toLowerCase() === "authorization");
   }

@@ -5,7 +5,7 @@
   const SUFFIXES = new Set(["com", "net", "org", "io", "ai", "cc", "cn", "top", "xyz", "site", "app", "dev", "cloud", "co", "uk"]);
   const KEY_FIELDS = ["key", "api_key", "apiKey", "token"];
   const DIRECT_KEY_FIELDS = ["key", "api_key", "apiKey"];
-  const ACCESS_FIELDS = ["access_token", "accessToken", "auth_token", "authToken", "token"];
+  const ACCESS_FIELDS = ["access_token", "accessToken", "auth_token", "authToken", "system_access_token", "systemAccessToken", "token"];
   const REFRESH_FIELDS = ["refresh_token", "refreshToken"];
   const USER_ID_FIELDS = ["user_id", "userId", "userid", "id"];
 
@@ -22,6 +22,11 @@
   function isMasked(value) {
     const text = String(value || "");
     return !text || (text.includes("*") && text.replace(/\*/g, "").length < text.length / 2);
+  }
+
+  function looksLikeToken(value) {
+    const text = String(value || "").trim();
+    return text.length >= 16 && !/\s/.test(text) && !isMasked(text);
   }
 
   function safeJson(text) {
@@ -80,6 +85,15 @@
       if (!found) found = pickField(obj, ACCESS_FIELDS);
     });
     return found;
+  }
+
+  function extractGeneratedAccessToken(payload) {
+    const access = extractAccessToken(payload);
+    if (access) return access;
+    const data = unwrap(payload);
+    if (typeof data === "string" && looksLikeToken(data)) return data.trim();
+    if (typeof payload === "string" && looksLikeToken(payload)) return payload.trim();
+    return "";
   }
 
   function extractRefreshToken(payload) {
@@ -155,6 +169,7 @@
       text.includes("/v1/usage")
     ) return "sub2Api";
     const data = safeJson(payload);
+    if (/token|access/i.test(text) && extractGeneratedAccessToken(data)) return "newApi";
     if (extractRefreshToken(data)) return "sub2Api";
     if (extractUserId(data) && extractAccessToken(data)) return "newApi";
     if (extractApiKey(data)) return "sub2Api";
@@ -164,11 +179,13 @@
   const api = {
     inferName,
     isMasked,
+    looksLikeToken,
     safeJson,
     unwrap,
     walk,
     pickField,
     extractAccessToken,
+    extractGeneratedAccessToken,
     extractRefreshToken,
     extractUserId,
     extractApiKey,
