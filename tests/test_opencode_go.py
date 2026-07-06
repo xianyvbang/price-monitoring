@@ -1165,6 +1165,102 @@ def test_opencode_go_import_sub2api_requires_groups(tmp_path, monkeypatch):
     assert "请选择至少一个" in response.json()["message"]
 
 
+def test_opencode_go_bulk_import_sub2api_skips_duplicate_names_in_group(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    configure_sub2api(db)
+    first_id = db.upsert_opencode_go_account(
+        {
+            "name": "first@example.com",
+            "email": "first@example.com",
+            "password": "secret-password",
+            "api_key": "sk-first-secret",
+        }
+    )
+    duplicate_id = db.upsert_opencode_go_account(
+        {
+            "name": "duplicate@example.com",
+            "email": "duplicate@example.com",
+            "password": "secret-password",
+            "api_key": "sk-duplicate-secret",
+        }
+    )
+    missing_key_id = db.upsert_opencode_go_account(
+        {
+            "name": "missing@example.com",
+            "email": "missing@example.com",
+            "password": "secret-password",
+        }
+    )
+    DummySub2ApiClient.requests = []
+    DummySub2ApiClient.responses = [
+        DummySub2ApiResponse(
+            {
+                "code": 0,
+                "data": {
+                    "accounts": [
+                        {"id": 201, "name": "opencode-duplicate@example.com", "platform": "openai", "group_ids": [8]},
+                        {"id": 202, "name": "opencode-other@example.com", "platform": "openai", "group_ids": [9]},
+                    ]
+                },
+            }
+        ),
+        DummySub2ApiResponse({"code": 0, "data": {"models": ["gpt-5", "gpt-5-mini"]}}),
+        DummySub2ApiResponse(
+            {
+                "code": 0,
+                "data": {
+                    "id": 123,
+                    "name": "opencode-first@example.com",
+                    "credentials": {
+                        "base_url": "https://opencode.ai/zen/go",
+                        "api_key": "sk-first-secret",
+                    },
+                },
+            }
+        ),
+    ]
+    monkeypatch.setattr("app.services.sub2api_admin.httpx.AsyncClient", DummySub2ApiClient)
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.post(
+            "/api/opencode-go/accounts/import-sub2api",
+            json={"account_ids": [first_id, duplicate_id, missing_key_id, first_id], "group_ids": [8]},
+        )
+        logs = client.get("/api/logs")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 1
+    assert payload["skipped_count"] == 1
+    assert payload["failed_count"] == 1
+    assert payload["imported"][0]["name"] == "opencode-first@example.com"
+    assert payload["skipped"][0]["id"] == duplicate_id
+    assert payload["skipped"][0]["name"] == "opencode-duplicate@example.com"
+    assert payload["failed"][0]["id"] == missing_key_id
+    assert "尚未获取 API key" in payload["failed"][0]["message"]
+    assert "sk-first-secret" not in response.text
+    assert "sk-duplicate-secret" not in response.text
+    assert "admin-secret" not in response.text
+    assert "sk-first-secret" not in logs.text
+    assert "sk-duplicate-secret" not in logs.text
+    assert "admin-secret" not in logs.text
+
+    list_request = DummySub2ApiClient.requests[0]
+    assert list_request["method"] == "GET"
+    assert list_request["url"] == "https://sub.example/api/v1/admin/accounts"
+    assert list_request["params"]["platform"] == "openai"
+    assert list_request["params"]["group_id"] == 8
+
+    preview_requests = [request for request in DummySub2ApiClient.requests if request["url"].endswith("/models/sync-upstream-preview")]
+    create_requests = [request for request in DummySub2ApiClient.requests if request["method"] == "POST" and request["url"] == "https://sub.example/api/v1/admin/accounts"]
+    assert len(preview_requests) == 1
+    assert len(create_requests) == 1
+    assert preview_requests[0]["json"]["api_key"] == "sk-first-secret"
+    assert create_requests[0]["json"]["name"] == "opencode-first@example.com"
+    assert create_requests[0]["json"]["group_ids"] == [8]
+
+
 def test_opencode_go_import_cpa_requires_config(tmp_path, monkeypatch):
     db = setup_test_db(tmp_path, monkeypatch)
     account_id = db.upsert_opencode_go_account(

@@ -83,6 +83,7 @@ export const api = {
   opencodeGoPassword: (id) => request(`/api/opencode-go/accounts/${id}/password`),
   opencodeGoSub2ApiGroups: () => request("/api/opencode-go/sub2api/groups"),
   importOpencodeGoToSub2Api: (id, payload) => request(`/api/opencode-go/accounts/${id}/import-sub2api`, { method: "POST", body: JSON.stringify(payload) }),
+  bulkImportOpencodeGoToSub2Api: (payload) => request("/api/opencode-go/accounts/import-sub2api", { method: "POST", body: JSON.stringify(payload) }),
   importOpencodeGoToCpa: (id) => request(`/api/opencode-go/accounts/${id}/import-cpa`, { method: "POST", body: JSON.stringify({}) }),
   bulkImportOpencodeGoToCpa: (payload) => request("/api/opencode-go/accounts/import-cpa", { method: "POST", body: JSON.stringify(payload) }),
   logs: (params = {}) => request(`/api/logs${queryString(params)}`),

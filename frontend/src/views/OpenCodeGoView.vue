@@ -60,6 +60,9 @@ const sub2ApiImporting = ref(false);
 const sub2ApiImportAccount = ref(null);
 const sub2ApiGroups = ref([]);
 const sub2ApiSelectedGroupIds = ref([]);
+const sub2ApiBulkImportVisible = ref(false);
+const sub2ApiBulkSelectedGroupIds = ref([]);
+const sub2ApiBulkImporting = ref(false);
 const cpaImportingId = ref(null);
 const cpaBulkImporting = ref(false);
 const formRef = ref(null);
@@ -90,6 +93,7 @@ const sub2ApiImportName = computed(() => {
   const email = String(sub2ApiImportAccount.value?.email || "").trim();
   return email ? `opencode-${email}` : "-";
 });
+const sub2ApiBulkImportCount = computed(() => selectedImportableAccounts.value.length);
 
 const rules = {
   email: [{ required: true, message: "请输入 Google 邮箱", trigger: "blur" }],
@@ -475,6 +479,21 @@ async function openSub2ApiImport(account) {
   sub2ApiGroups.value = [];
   sub2ApiSelectedGroupIds.value = [];
   sub2ApiImportVisible.value = true;
+  await loadSub2ApiGroups();
+}
+
+async function openBulkSub2ApiImport() {
+  if (!selectedImportableAccounts.value.length) {
+    ElMessage.error("请选择至少一个已获取 API key 的账号");
+    return;
+  }
+  sub2ApiGroups.value = [];
+  sub2ApiBulkSelectedGroupIds.value = [];
+  sub2ApiBulkImportVisible.value = true;
+  await loadSub2ApiGroups();
+}
+
+async function loadSub2ApiGroups() {
   sub2ApiImportLoading.value = true;
   try {
     const payload = await api.opencodeGoSub2ApiGroups();
@@ -526,6 +545,39 @@ async function submitSub2ApiImport() {
     ElMessage.error(error.message || "导入 Sub2API 失败");
   } finally {
     sub2ApiImporting.value = false;
+  }
+}
+
+async function submitBulkSub2ApiImport() {
+  const targets = selectedImportableAccounts.value;
+  if (!targets.length) {
+    ElMessage.error("请选择至少一个已获取 API key 的账号");
+    return;
+  }
+  if (!sub2ApiBulkSelectedGroupIds.value.length) {
+    ElMessage.error("请选择至少一个 Sub2API 分组");
+    return;
+  }
+  sub2ApiBulkImporting.value = true;
+  try {
+    const payload = await api.bulkImportOpencodeGoToSub2Api({
+      account_ids: targets.map((account) => account.id),
+      group_ids: sub2ApiBulkSelectedGroupIds.value
+    });
+    const count = payload.count || 0;
+    const skippedCount = payload.skipped_count ?? payload.skippedCount ?? (payload.skipped || []).length;
+    const failedCount = payload.failed_count ?? payload.failedCount ?? (payload.failed || []).length;
+    sub2ApiBulkImportVisible.value = false;
+    selectedAccountIds.value = [];
+    if (failedCount > 0 || skippedCount > 0) {
+      ElMessage.warning(`已导入 Sub2API ${count} 个，跳过 ${skippedCount} 个，失败 ${failedCount} 个`);
+    } else {
+      ElMessage.success(`已批量导入 Sub2API ${count} 个账号`);
+    }
+  } catch (error) {
+    ElMessage.error(error.message || "批量导入 Sub2API 失败");
+  } finally {
+    sub2ApiBulkImporting.value = false;
   }
 }
 
@@ -761,7 +813,7 @@ function hasApiKey(account) {
 }
 
 function canSelectForCpa(row) {
-  return hasApiKey(row) && !cpaBulkImporting.value;
+  return hasApiKey(row) && !cpaBulkImporting.value && !sub2ApiBulkImporting.value;
 }
 
 function normalizeAccountUsage(account) {
@@ -903,6 +955,7 @@ onBeforeUnmount(() => {
       <div class="panel-head">
         <h2>Go 用量</h2>
         <div class="panel-actions">
+          <el-button size="small" :icon="Upload" :loading="sub2ApiBulkImporting" :disabled="!selectedImportCount" @click="openBulkSub2ApiImport">批量导入 Sub2API</el-button>
           <el-button size="small" :icon="Upload" :loading="cpaBulkImporting" :disabled="!selectedImportCount" @click="bulkImportToCpa">批量导入 CPA</el-button>
           <el-tag>{{ selectedImportCount }} 已选</el-tag>
           <el-tag>{{ pagination.total }} 个账号</el-tag>
@@ -983,7 +1036,7 @@ onBeforeUnmount(() => {
       <div v-else class="mobile-stack">
         <article v-for="row in accounts" :key="row.id" class="mobile-card">
           <div class="mobile-card-head">
-            <el-checkbox v-model="selectedAccountIds" :value="row.id" :disabled="!hasApiKey(row) || cpaBulkImporting" />
+            <el-checkbox v-model="selectedAccountIds" :value="row.id" :disabled="!hasApiKey(row) || cpaBulkImporting || sub2ApiBulkImporting" />
             <div class="mobile-card-title">
               <strong>{{ row.email }}</strong>
               <div class="mobile-card-meta">
@@ -1130,6 +1183,44 @@ onBeforeUnmount(() => {
         <div class="dialog-footer">
           <el-button @click="sub2ApiImportVisible = false">取消</el-button>
           <el-button type="primary" :loading="sub2ApiImporting" :disabled="sub2ApiImportLoading || !sub2ApiSelectedGroupIds.length" @click="submitSub2ApiImport">导入</el-button>
+        </div>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="sub2ApiBulkImportVisible" title="批量导入 Sub2API" width="680px">
+      <el-form label-position="top" @submit.prevent="submitBulkSub2ApiImport">
+        <el-form-item label="导入账号">
+          <el-input :model-value="`已选择 ${sub2ApiBulkImportCount} 个已获取 API key 的账号`" readonly />
+        </el-form-item>
+        <el-form-item label="Sub2API 分组">
+          <div v-loading="sub2ApiImportLoading" class="sub2api-group-picker">
+            <el-empty v-if="!sub2ApiImportLoading && !sub2ApiGroups.length" description="暂无可选 OpenAI 分组" />
+            <el-checkbox-group v-else v-model="sub2ApiBulkSelectedGroupIds" class="sub2api-group-list">
+              <el-checkbox v-for="group in sub2ApiGroups" :key="sub2ApiGroupId(group)" :value="sub2ApiGroupId(group)" border class="sub2api-group-option">
+                <div class="sub2api-group-copy">
+                  <span>{{ sub2ApiGroupLabel(group) }}</span>
+                  <small>{{ sub2ApiGroupMeta(group) }}</small>
+                </div>
+              </el-checkbox>
+            </el-checkbox-group>
+          </div>
+        </el-form-item>
+        <div class="import-helper">
+          <span>导入前会按所选分组检查账号名称 opencode-邮箱，分组中已存在同名账号会自动跳过。</span>
+          <span>其余账号会创建为 OpenAI APIkey 账号，Base URL 固定为 https://opencode.ai/zen/go。</span>
+        </div>
+      </el-form>
+      <template #footer>
+        <div class="dialog-footer">
+          <el-button @click="sub2ApiBulkImportVisible = false">取消</el-button>
+          <el-button
+            type="primary"
+            :loading="sub2ApiBulkImporting"
+            :disabled="sub2ApiImportLoading || !sub2ApiBulkSelectedGroupIds.length || !sub2ApiBulkImportCount"
+            @click="submitBulkSub2ApiImport"
+          >
+            导入
+          </el-button>
         </div>
       </template>
     </el-dialog>

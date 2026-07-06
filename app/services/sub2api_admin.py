@@ -32,6 +32,32 @@ class Sub2ApiAdminClient:
             raise Sub2ApiAdminError("Sub2API 分组响应格式不正确", status_code=502)
         return [group for group in groups if isinstance(group, dict) and _is_openai_group(group)]
 
+    async def list_openai_accounts(self, group_id: int | None = None) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"platform": SUB2API_OPENAI_PLATFORM, "page": 1, "page_size": 1000}
+        if group_id is not None:
+            params["group_id"] = int(group_id)
+        payload = await self._request("GET", "/api/v1/admin/accounts", params=params)
+        accounts = _extract_sub2api_list(payload, ("accounts", "items", "records", "rows", "list", "data"))
+        if accounts is None:
+            raise Sub2ApiAdminError("Sub2API 账号响应格式不正确", status_code=502)
+        return [account for account in accounts if isinstance(account, dict) and _is_openai_account(account)]
+
+    async def existing_openai_account_names_in_groups(self, group_ids: list[int]) -> set[str]:
+        names: set[str] = set()
+        seen_group_ids: set[int] = set()
+        for group_id in group_ids:
+            group_id = int(group_id)
+            if group_id in seen_group_ids:
+                continue
+            seen_group_ids.add(group_id)
+            for account in await self.list_openai_accounts(group_id):
+                if not _account_belongs_to_group_or_unknown(account, group_id):
+                    continue
+                name = _normalize_account_name(account.get("name"))
+                if name:
+                    names.add(name)
+        return names
+
     async def import_opencode_go_account(self, email: str, api_key: str, group_ids: list[int]) -> dict[str, Any]:
         email = str(email or "").strip()
         api_key = str(api_key or "").strip()
@@ -124,6 +150,66 @@ def _sub2api_error_message(payload: Any, status_code: int) -> str:
 def _is_openai_group(group: dict[str, Any]) -> bool:
     platform = str(group.get("platform") or "").strip().lower()
     return not platform or platform == SUB2API_OPENAI_PLATFORM
+
+
+def _is_openai_account(account: dict[str, Any]) -> bool:
+    platform = str(account.get("platform") or "").strip().lower()
+    return not platform or platform == SUB2API_OPENAI_PLATFORM
+
+
+def _extract_sub2api_list(payload: Any, keys: tuple[str, ...]) -> list[Any] | None:
+    data = _unwrap_sub2api_data(payload)
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in keys:
+            value = data.get(key)
+            if isinstance(value, list):
+                return value
+            if isinstance(value, dict):
+                nested = _extract_sub2api_list(value, keys)
+                if nested is not None:
+                    return nested
+    return None
+
+
+def _account_belongs_to_group_or_unknown(account: dict[str, Any], group_id: int) -> bool:
+    group_ids = _account_group_ids(account)
+    return not group_ids or int(group_id) in group_ids
+
+
+def _account_group_ids(account: dict[str, Any]) -> set[int]:
+    values: list[Any] = []
+    for key in ("group_id", "groupId", "group_ids", "groupIds", "groups", "plans"):
+        if key in account:
+            values.append(account.get(key))
+    group_ids: set[int] = set()
+    for value in values:
+        _collect_group_ids(group_ids, value)
+    return group_ids
+
+
+def _collect_group_ids(target: set[int], value: Any) -> None:
+    if value is None or value == "":
+        return
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            _collect_group_ids(target, item)
+        return
+    if isinstance(value, dict):
+        for key in ("id", "group_id", "groupId"):
+            _collect_group_ids(target, value.get(key))
+        return
+    try:
+        group_id = int(value)
+    except (TypeError, ValueError):
+        return
+    if group_id > 0:
+        target.add(group_id)
+
+
+def _normalize_account_name(value: Any) -> str:
+    return str(value or "").strip().lower()
 
 
 def _normalize_model_ids(models: list[Any]) -> list[str]:

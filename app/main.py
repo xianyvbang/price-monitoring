@@ -1805,6 +1805,58 @@ async def api_import_opencode_go_to_sub2api(request: Request, account_id: int):
     return {"ok": True, **result}
 
 
+@app.post("/api/opencode-go/accounts/import-sub2api")
+async def api_bulk_import_opencode_go_to_sub2api(request: Request):
+    require_user(request)
+    payload = await request.json()
+    try:
+        account_ids = _opencode_go_account_ids_payload(payload)
+        group_ids = _sub2api_import_group_ids(payload)
+        client = sub2api_admin_client()
+        existing_names = await client.existing_openai_account_names_in_groups(group_ids)
+    except (ValueError, Sub2ApiAdminError) as exc:
+        status_code = exc.status_code if isinstance(exc, Sub2ApiAdminError) else 400
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=status_code)
+
+    imported = []
+    skipped = []
+    failed = []
+    for account_id in account_ids:
+        account = db.get_opencode_go_account(account_id)
+        if not account:
+            failed.append({"id": account_id, "message": "OpenCode Go 账号不存在"})
+            continue
+        email = decrypt_value(account["email_enc"], db.secret_key) if account["email_enc"] else ""
+        target_name = _opencode_go_sub2api_name(email)
+        if target_name.lower() in existing_names:
+            skipped.append({"id": account_id, "email": email, "name": target_name, "message": "分组中已存在同名账号"})
+            db.add_log("info", "opencode-go", f"{account['name']} 批量导入 Sub2API 已跳过: {target_name} 已存在")
+            continue
+        api_key = decrypt_value(account["api_key_enc"], db.secret_key) if account["api_key_enc"] else ""
+        try:
+            result = await client.import_opencode_go_account(email, api_key, group_ids)
+        except Sub2ApiAdminError as exc:
+            failed.append({"id": account_id, "email": email, "name": target_name, "message": str(exc)})
+            db.add_log("error", "opencode-go", f"{account['name']} 批量导入 Sub2API 失败: {exc}")
+            continue
+        imported.append(result)
+        existing_names.add(str(result.get("name") or target_name).strip().lower())
+        db.add_log("info", "opencode-go", f"{account['name']} 已批量导入 Sub2API: {result['name']}，模型 {result['model_count']} 个")
+    return {
+        "ok": True,
+        "count": len(imported),
+        "failed_count": len(failed),
+        "failedCount": len(failed),
+        "skipped_count": len(skipped),
+        "skippedCount": len(skipped),
+        "imported": imported,
+        "skipped": skipped,
+        "failed": failed,
+        "group_ids": group_ids,
+        "groupIds": group_ids,
+    }
+
+
 @app.post("/api/opencode-go/accounts/{account_id}/import-cpa")
 async def api_import_opencode_go_to_cpa(request: Request, account_id: int):
     require_user(request)
@@ -3176,6 +3228,10 @@ async def _import_opencode_go_account_to_cpa(account: Any, client: CpaAdminClien
     email = decrypt_value(account["email_enc"], db.secret_key) if account["email_enc"] else ""
     api_key = decrypt_value(account["api_key_enc"], db.secret_key) if account["api_key_enc"] else ""
     return await client.import_opencode_go_account(email, api_key)
+
+
+def _opencode_go_sub2api_name(email: str) -> str:
+    return f"opencode-{str(email or '').strip()}"
 
 
 def public_reminders() -> list[dict[str, Any]]:
