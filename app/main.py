@@ -1564,18 +1564,28 @@ async def api_opencode_go_accounts(request: Request):
     require_user(request)
     page = _positive_query_int(request.query_params.get("page"), 1)
     page_size = min(_positive_query_int(request.query_params.get("page_size") or request.query_params.get("pageSize"), OPENCODE_GO_PAGE_SIZE), OPENCODE_GO_MAX_PAGE_SIZE)
+    email = str(request.query_params.get("email") or "").strip()
+    weekly_usage_gte_99 = _to_bool(request.query_params.get("weekly_usage_gte_99") or request.query_params.get("weeklyUsageGte99"))
+    monthly_usage_gte_99 = _to_bool(request.query_params.get("monthly_usage_gte_99") or request.query_params.get("monthlyUsageGte99"))
     sort_by = str(request.query_params.get("sort_by") or request.query_params.get("sortBy") or "created_at").strip()
     sort_order = str(request.query_params.get("sort_order") or request.query_params.get("sortOrder") or "desc").strip().lower()
     if sort_by not in {"name", "created_at", "updated_at", "last_checked_at"}:
         sort_by = "created_at"
     if sort_order not in {"asc", "desc"}:
         sort_order = "desc"
-    total = db.count_opencode_go_accounts()
+    total = db.count_opencode_go_accounts(
+        email=email,
+        weekly_usage_gte_99=weekly_usage_gte_99,
+        monthly_usage_gte_99=monthly_usage_gte_99,
+    )
     total_pages = max(1, (total + page_size - 1) // page_size)
     page = min(page, total_pages)
     accounts = [
         public_opencode_go_account(row)
         for row in db.list_opencode_go_accounts(
+            email=email,
+            weekly_usage_gte_99=weekly_usage_gte_99,
+            monthly_usage_gte_99=monthly_usage_gte_99,
             limit=page_size,
             offset=(page - 1) * page_size,
             sort_by=sort_by,

@@ -1252,6 +1252,69 @@ def test_opencode_go_accounts_are_paginated_by_created_at_desc(tmp_path, monkeyp
     assert second_page.json()["accounts"][0]["email"] == "user04@example.com"
 
 
+def test_opencode_go_accounts_support_case_insensitive_email_search(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    for email in ("alice@example.com", "ALICE+work@example.com", "bob@example.com"):
+        db.upsert_opencode_go_account({"email": email, "password": "secret-password"})
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.get("/api/opencode-go/accounts", params={"email": "alice"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["pagination"]["total"] == 2
+    assert {account["email"] for account in payload["accounts"]} == {"alice@example.com", "ALICE+work@example.com"}
+
+
+def test_opencode_go_accounts_filter_usage_at_least_99_percent(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    usage_by_email = {
+        "both@example.com": ({"usagePercent": 99}, {"usage_percent": 100}),
+        "weekly@example.com": ({"usage_percent": 99.5}, {"usagePercent": 98.9}),
+        "monthly@example.com": ({"usagePercent": 20}, {"usage_percent": 99}),
+        "below@example.com": ({"usagePercent": 98.9}, {"usagePercent": 98.9}),
+    }
+    for email, (weekly_usage, monthly_usage) in usage_by_email.items():
+        account_id = db.upsert_opencode_go_account({"email": email, "password": "secret-password"})
+        db.update_opencode_go_result(
+            account_id,
+            {"is_valid": True, "weekly_usage": weekly_usage, "monthly_usage": monthly_usage},
+        )
+    invalid_id = db.upsert_opencode_go_account({"email": "invalid@example.com", "password": "secret-password"})
+    db.upsert_opencode_go_account({"email": "missing@example.com", "password": "secret-password"})
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE opencode_go_accounts SET last_weekly_usage = ?, last_monthly_usage = ? WHERE id = ?",
+            ("not-json", "not-json", invalid_id),
+        )
+
+    with TestClient(app) as client:
+        login(client)
+        weekly = client.get("/api/opencode-go/accounts", params={"weekly_usage_gte_99": "true"})
+        monthly = client.get("/api/opencode-go/accounts", params={"monthlyUsageGte99": "true"})
+        both = client.get(
+            "/api/opencode-go/accounts",
+            params={"weekly_usage_gte_99": "true", "monthly_usage_gte_99": "true"},
+        )
+
+    assert weekly.status_code == 200
+    assert weekly.json()["pagination"]["total"] == 2
+    assert {account["email"] for account in weekly.json()["accounts"]} == {
+        "both@example.com",
+        "weekly@example.com",
+    }
+    assert monthly.status_code == 200
+    assert monthly.json()["pagination"]["total"] == 2
+    assert {account["email"] for account in monthly.json()["accounts"]} == {
+        "both@example.com",
+        "monthly@example.com",
+    }
+    assert both.status_code == 200
+    assert both.json()["pagination"]["total"] == 1
+    assert [account["email"] for account in both.json()["accounts"]] == ["both@example.com"]
+
+
 def test_opencode_go_import_cpa_upserts_openai_provider_with_all_models(tmp_path, monkeypatch):
     db = setup_test_db(tmp_path, monkeypatch)
     configure_cpa(db)

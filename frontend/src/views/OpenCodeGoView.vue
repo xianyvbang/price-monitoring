@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { CopyDocument, Delete, Document, Download, Edit, Link, Plus, Refresh, Setting, Timer, Upload } from "@element-plus/icons-vue";
+import { CopyDocument, Delete, Document, Download, Edit, Link, Plus, Refresh, Search, Setting, Timer, Upload } from "@element-plus/icons-vue";
 import { api } from "../api";
 import { useViewport } from "../composables/useViewport";
 import { boolValue, formatTime } from "../utils";
@@ -11,6 +11,8 @@ const loading = ref(false);
 const refreshingAll = ref(false);
 const accounts = ref([]);
 const pagination = reactive({ page: 1, page_size: 20, total: 0, total_pages: 1 });
+const emailSearch = ref("");
+const usageFilters = ref([]);
 const selectedAccountIds = ref([]);
 const summary = ref({ account_count: 0, last_success_at: null });
 const refreshRemaining = ref(300);
@@ -113,6 +115,9 @@ async function loadAccounts() {
     const payload = await api.opencodeGoAccounts({
       page: pagination.page,
       page_size: pagination.page_size,
+      email: emailSearch.value.trim(),
+      weekly_usage_gte_99: usageFilters.value.includes("weekly"),
+      monthly_usage_gte_99: usageFilters.value.includes("monthly"),
       sort_by: "created_at",
       sort_order: "desc"
     });
@@ -423,6 +428,11 @@ function handlePageChange(page) {
 
 function handlePageSizeChange(pageSize) {
   pagination.page_size = pageSize;
+  pagination.page = 1;
+  loadAccounts();
+}
+
+function applyFilters() {
   pagination.page = 1;
   loadAccounts();
 }
@@ -903,6 +913,20 @@ onBeforeUnmount(() => {
       <div class="panel-head">
         <h2>Go 用量</h2>
         <div class="panel-actions">
+          <el-input
+            v-model="emailSearch"
+            size="small"
+            clearable
+            style="width: 220px"
+            placeholder="模糊搜索邮箱"
+            @clear="applyFilters"
+            @keyup.enter="applyFilters"
+          />
+          <el-checkbox-group v-model="usageFilters" size="small" @change="applyFilters">
+            <el-checkbox value="weekly">7d ≥ 99%</el-checkbox>
+            <el-checkbox value="monthly">30d ≥ 99%</el-checkbox>
+          </el-checkbox-group>
+          <el-button size="small" :icon="Search" @click="applyFilters">搜索</el-button>
           <el-button size="small" :icon="Upload" :loading="cpaBulkImporting" :disabled="!selectedImportCount" @click="bulkImportToCpa">批量导入 CPA</el-button>
           <el-tag>{{ selectedImportCount }} 已选</el-tag>
           <el-tag>{{ pagination.total }} 个账号</el-tag>

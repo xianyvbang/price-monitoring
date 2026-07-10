@@ -1086,6 +1086,9 @@ class Database:
     def list_opencode_go_accounts(
         self,
         enabled_only: bool = False,
+        email: str = "",
+        weekly_usage_gte_99: bool = False,
+        monthly_usage_gte_99: bool = False,
         limit: int | None = None,
         offset: int = 0,
         sort_by: str = "name",
@@ -1093,8 +1096,19 @@ class Database:
     ) -> list[sqlite3.Row]:
         query = "SELECT * FROM opencode_go_accounts"
         params: list[Any] = []
+        conditions: list[str] = []
         if enabled_only:
-            query += " WHERE is_enabled = 1"
+            conditions.append("is_enabled = 1")
+        if email:
+            escaped_email = email.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            conditions.append("name LIKE ? ESCAPE '\\' COLLATE NOCASE")
+            params.append(f"%{escaped_email}%")
+        if weekly_usage_gte_99:
+            conditions.append(_opencode_go_usage_filter("last_weekly_usage"))
+        if monthly_usage_gte_99:
+            conditions.append(_opencode_go_usage_filter("last_monthly_usage"))
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
         sort_columns = {
             "name": "name",
             "created_at": "created_at",
@@ -1115,13 +1129,30 @@ class Database:
         with self.connect() as conn:
             return conn.execute(query, tuple(params)).fetchall()
 
-    def count_opencode_go_accounts(self, enabled_only: bool = False) -> int:
+    def count_opencode_go_accounts(
+        self,
+        enabled_only: bool = False,
+        email: str = "",
+        weekly_usage_gte_99: bool = False,
+        monthly_usage_gte_99: bool = False,
+    ) -> int:
         query = "SELECT COUNT(*) AS count FROM opencode_go_accounts"
-        params: tuple[Any, ...] = ()
+        params: list[Any] = []
+        conditions: list[str] = []
         if enabled_only:
-            query += " WHERE is_enabled = 1"
+            conditions.append("is_enabled = 1")
+        if email:
+            escaped_email = email.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            conditions.append("name LIKE ? ESCAPE '\\' COLLATE NOCASE")
+            params.append(f"%{escaped_email}%")
+        if weekly_usage_gte_99:
+            conditions.append(_opencode_go_usage_filter("last_weekly_usage"))
+        if monthly_usage_gte_99:
+            conditions.append(_opencode_go_usage_filter("last_monthly_usage"))
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
         with self.connect() as conn:
-            row = conn.execute(query, params).fetchone()
+            row = conn.execute(query, tuple(params)).fetchone()
             return int(row["count"] if row else 0)
 
     def latest_successful_opencode_go_checked_at(self) -> str | None:
@@ -2098,6 +2129,16 @@ def _json_dumps(value: Any) -> str:
     import json
 
     return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _opencode_go_usage_filter(column: str) -> str:
+    if column not in {"last_weekly_usage", "last_monthly_usage"}:
+        raise ValueError("不支持的 OpenCode Go 用量筛选字段")
+    return (
+        f"CASE WHEN json_valid({column}) THEN CAST(COALESCE("
+        f"json_extract({column}, '$.usage_percent'), "
+        f"json_extract({column}, '$.usagePercent')) AS REAL) END >= 99"
+    )
 
 
 def _mask_opencode_api_key(value: str) -> str:
