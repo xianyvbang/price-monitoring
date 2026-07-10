@@ -20,6 +20,7 @@ CHINA_TZ = timezone(timedelta(hours=8))
 DEFAULT_BALANCE_UNIT = "USD"
 BALANCE_HISTORY_MONTHS = 9
 BALANCE_TREND_DAYS = 3
+CONSUMPTION_QUERY_BATCH_SIZE = 500
 REQUEST_TIMEOUT_SECONDS = 60
 BALANCE_QUERY_INTERVAL_SECONDS = 5 * 60
 GROUP_RATE_QUERY_INTERVAL_SECONDS = 20 * 60
@@ -655,6 +656,33 @@ class Database:
             conditions.append("is_enabled = 1")
         if visible_only:
             conditions.append("is_visible = 1")
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY platform, name"
+        with self.connect() as conn:
+            return conn.execute(query, tuple(params)).fetchall()
+
+    def list_account_summaries(
+        self,
+        platform: Optional[str] = None,
+        name_query: Optional[str] = None,
+    ) -> list[sqlite3.Row]:
+        query = """
+            SELECT
+                id, platform, name, base_url, note, recharge_url,
+                recharge_paid_amount, recharge_received_amount, key_id_enc,
+                api_key_enc, email_enc, password_enc, access_token_enc,
+                refresh_token_enc, user_id_enc, threshold, is_enabled, is_visible
+            FROM accounts
+        """
+        conditions = []
+        params: list[Any] = []
+        if platform:
+            conditions.append("platform = ?")
+            params.append(platform)
+        if name_query:
+            conditions.append("name LIKE ? ESCAPE '\\'")
+            params.append(_like_pattern(name_query))
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY platform, name"
@@ -1728,17 +1756,63 @@ class Database:
         return self.get_consumption_since(account_id, _today_start_utc())
 
     def get_consumption_stats(self, account_id: int) -> dict[str, Optional[float]]:
+        self.cleanup_balance_history()
+        return self.get_consumption_stats_for_accounts([account_id]).get(account_id, {})
+
+    def get_consumption_stats_for_accounts(
+        self,
+        account_ids: Iterable[int],
+    ) -> dict[int, dict[str, Optional[float]]]:
+        normalized_ids = sorted({int(account_id) for account_id in account_ids})
+        if not normalized_ids:
+            return {}
+
         today_start = _today_start_utc()
         this_month_start = _this_month_start_utc()
         last_month_start = _last_month_start_utc()
+        periods = {
+            "today": (today_start, None),
+            "yesterday": (_yesterday_start_utc(), today_start),
+            "last_24h": (_hours_ago(24), None),
+            "last_7d": (_days_ago(7), None),
+            "last_14d": (_days_ago(14), None),
+            "this_month": (this_month_start, None),
+            "last_month": (last_month_start, this_month_start),
+        }
+        earliest_since = min(since for since, _ in periods.values())
+        records_by_account: dict[int, list[sqlite3.Row]] = {account_id: [] for account_id in normalized_ids}
+
+        with self.connect() as conn:
+            for offset in range(0, len(normalized_ids), CONSUMPTION_QUERY_BATCH_SIZE):
+                batch_ids = normalized_ids[offset : offset + CONSUMPTION_QUERY_BATCH_SIZE]
+                placeholders = ", ".join("?" for _ in batch_ids)
+                records = conn.execute(
+                    f"""
+                    SELECT account_id, remaining, checked_at
+                    FROM query_records
+                    WHERE account_id IN ({placeholders})
+                        AND is_valid = 1
+                        AND remaining IS NOT NULL
+                        AND checked_at >= ?
+                    ORDER BY account_id ASC, checked_at ASC, id ASC
+                    """,
+                    (*batch_ids, earliest_since),
+                ).fetchall()
+                for record in records:
+                    records_by_account[int(record["account_id"])].append(record)
+
         return {
-            "today": self.get_today_consumption(account_id),
-            "yesterday": self.get_consumption_between(account_id, _yesterday_start_utc(), today_start),
-            "last_24h": self.get_consumption_since(account_id, _hours_ago(24)),
-            "last_7d": self.get_consumption_since(account_id, _days_ago(7)),
-            "last_14d": self.get_consumption_since(account_id, _days_ago(14)),
-            "this_month": self.get_consumption_since(account_id, this_month_start),
-            "last_month": self.get_consumption_between(account_id, last_month_start, this_month_start),
+            account_id: {
+                key: _sum_consumption(
+                    [
+                        record
+                        for record in records
+                        if record["checked_at"] >= since and (until is None or record["checked_at"] < until)
+                    ]
+                )
+                for key, (since, until) in periods.items()
+            }
+            for account_id, records in records_by_account.items()
         }
 
     def clear_balance_history(self, account_id: int) -> None:

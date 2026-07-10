@@ -491,6 +491,43 @@ def public_account(row: Any) -> dict[str, Any]:
     return data
 
 
+def public_account_summary(row: Any) -> dict[str, Any]:
+    data = row_to_dict(row)
+    key_id_enc = data.get("key_id_enc")
+    monitor_groups = db.list_monitor_groups(int(data["id"]))
+    selected_group_ids = [
+        monitor_group_to_dict(group, db.secret_key)["group_id"]
+        for group in monitor_groups
+        if group["group_id_enc"]
+    ]
+    selected_group_id = selected_group_ids[0] if selected_group_ids else (
+        decrypt_value(key_id_enc, config.app_secret_key)
+        if data["platform"] in {"newApi", "sub2Api"} and key_id_enc
+        else None
+    )
+    return {
+        "id": data["id"],
+        "platform": data["platform"],
+        "name": data["name"],
+        "base_url": data["base_url"],
+        "note": data.get("note"),
+        "recharge_url": data.get("recharge_url"),
+        "recharge_paid_amount": float(data.get("recharge_paid_amount") or 1),
+        "recharge_received_amount": float(data.get("recharge_received_amount") or 1),
+        "threshold": data.get("threshold"),
+        "is_enabled": bool(data.get("is_enabled", True)),
+        "is_visible": bool(data.get("is_visible", True)),
+        "selected_group_id": selected_group_id,
+        "selected_group_ids": selected_group_ids,
+        "has_api_key": bool(data.get("api_key_enc")),
+        "has_email": bool(data.get("email_enc")),
+        "has_password": bool(data.get("password_enc")),
+        "has_access_token": bool(data.get("access_token_enc")),
+        "has_refresh_token": bool(data.get("refresh_token_enc")),
+        "has_user_id": bool(data.get("user_id_enc")),
+    }
+
+
 def public_opencode_go_account(row: Any, include_api_key: bool = False) -> dict[str, Any]:
     data = row_to_dict(row)
     email_enc = data.pop("email_enc", None)
@@ -944,6 +981,20 @@ def grouped_accounts(
     return grouped
 
 
+def grouped_account_summaries(
+    platform: str | None = None,
+    name_query: str | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    if platform in {"newApi", "sub2Api"}:
+        grouped = {platform: []}
+    else:
+        grouped = {"newApi": [], "sub2Api": []}
+        platform = None
+    for row in db.list_account_summaries(platform=platform, name_query=name_query):
+        grouped[row["platform"]].append(public_account_summary(row))
+    return grouped
+
+
 def public_dashboard_source_account(row: Any) -> dict[str, Any]:
     data = row_to_dict(row)
     data["is_enabled"] = bool(data.get("is_enabled", True))
@@ -1053,7 +1104,33 @@ def dashboard_grouped_accounts(account_filter: dict[str, Any] | None = None) -> 
 
 
 def consumption_grouped_accounts(account_filter: dict[str, Any] | None = None) -> dict[str, list[dict[str, Any]]]:
-    grouped, _ = _filtered_dashboard_accounts(account_filter, visible_only=False)
+    account_filter = account_filter or {}
+    platform_filter = account_filter.get("platform") if account_filter.get("platform") in {"newApi", "sub2Api"} else None
+    low_balance_filter = account_filter.get("low_balance") if account_filter.get("low_balance") in {"low", "normal"} else None
+    default_threshold = _optional_number(db.get_general_settings().get("default_threshold"))
+    grouped = {platform_filter: []} if platform_filter else {"newApi": [], "sub2Api": []}
+
+    for row in db.list_dashboard_accounts(platform=platform_filter, name_query=account_filter.get("name") or None):
+        account = row_to_dict(row)
+        account["is_eliminated"] = bool(account.get("is_eliminated"))
+        account_is_low = is_low_balance_account(account, default_threshold)
+        if low_balance_filter in {"low", "normal"} and account["is_eliminated"]:
+            continue
+        if low_balance_filter == "low" and not account_is_low:
+            continue
+        if low_balance_filter == "normal" and account_is_low:
+            continue
+        account["last_unit"] = str(account.get("last_unit") or DEFAULT_BALANCE_UNIT).strip() or DEFAULT_BALANCE_UNIT
+        account["recharge_paid_amount"] = float(account.get("recharge_paid_amount") or 1)
+        account["recharge_received_amount"] = float(account.get("recharge_received_amount") or 1)
+        grouped[str(account["platform"])].append(account)
+
+    accounts = [account for platform_accounts in grouped.values() for account in platform_accounts]
+    stats_by_account = db.get_consumption_stats_for_accounts(int(account["id"]) for account in accounts)
+    for account in accounts:
+        stats = stats_by_account.get(int(account["id"]), {})
+        account["consumption_stats"] = stats
+        account["actual_consumption_stats"] = actual_consumption_stats(stats, account)
     return grouped
 
 
@@ -1483,7 +1560,7 @@ async def change_password_form(request: Request):
 async def api_accounts(request: Request):
     require_user(request)
     account_filter = account_filter_from_query(request)
-    return grouped_accounts(platform=account_filter.get("platform"), name_query=account_filter.get("name") or None)
+    return grouped_account_summaries(platform=account_filter.get("platform"), name_query=account_filter.get("name") or None)
 
 
 @app.get("/api/dashboard")
@@ -1500,7 +1577,7 @@ async def api_dashboard(request: Request):
 
 
 @app.get("/api/dashboard/consumption-summary")
-async def api_dashboard_consumption_summary(request: Request):
+def api_dashboard_consumption_summary(request: Request):
     require_user(request)
     account_filter = account_filter_from_query(request)
     consumption_grouped = consumption_grouped_accounts(account_filter)
