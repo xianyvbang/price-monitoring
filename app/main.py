@@ -27,6 +27,7 @@ from app.models import (
     monitor_group_to_dict,
     reminder_to_dict,
     row_to_dict,
+    utc_now,
 )
 from app.security import decrypt_value, encrypt_value
 from app.security import verify_password
@@ -53,6 +54,7 @@ from app.services.opencode_go import (
 from app.services.cpa_admin import (
     CPA_AUTHORIZATION_SETTING,
     CPA_SITE_URL_SETTING,
+    OPENCODE_GO_CPA_AUTO_DELETE_SETTING,
     CpaAdminClient,
     CpaAdminError,
     cpa_admin_client_from_db,
@@ -568,6 +570,10 @@ def public_opencode_go_account(row: Any, include_api_key: bool = False) -> dict[
     cpa_provider_disabled = data.get("cpa_provider_disabled")
     data["cpa_provider_disabled"] = None if cpa_provider_disabled is None else bool(cpa_provider_disabled)
     data["cpaProviderDisabled"] = data["cpa_provider_disabled"]
+    data["cpa_provider_deleted"] = bool(data.get("cpa_provider_deleted"))
+    data["cpaProviderDeleted"] = data["cpa_provider_deleted"]
+    data["cpa_deleted_at"] = data.get("cpa_deleted_at")
+    data["cpaDeletedAt"] = data["cpa_deleted_at"]
     data["cpa_reenable_pending"] = bool(data.get("cpa_reenable_pending"))
     data["cpaReenablePending"] = data["cpa_reenable_pending"]
     data["cpa_last_action_at"] = data.get("cpa_last_action_at")
@@ -1707,12 +1713,15 @@ async def api_opencode_go_settings(request: Request):
     server_id = db.get_setting(OPENCODE_GO_LITE_SERVER_ID_SETTING, "")
     key_js_url = db.get_setting(OPENCODE_GO_KEY_LIST_JS_URL_SETTING, KEY_LIST_DEFAULT_JS_URL)
     key_server_id = db.get_setting(OPENCODE_GO_KEY_LIST_SERVER_ID_SETTING, "")
+    cpa_auto_delete_enabled = _opencode_go_cpa_auto_delete_enabled()
     return {
         "settings": {
             "query_interval": general_settings["query_interval"],
             "queryInterval": general_settings["query_interval"],
             "monitor_paused": general_settings["monitor_paused"],
             "monitorPaused": general_settings["monitor_paused"],
+            "cpa_auto_delete_enabled": cpa_auto_delete_enabled,
+            "cpaAutoDeleteEnabled": cpa_auto_delete_enabled,
             "lite_subscription_js_url": js_url,
             "liteSubscriptionJsUrl": js_url,
             "lite_subscription_server_id": server_id,
@@ -1762,6 +1771,7 @@ async def api_save_opencode_go_settings(request: Request):
     db.set_setting(OPENCODE_GO_KEY_LIST_SERVER_ID_SETTING, key_server_id)
     scheduler.notify_settings_changed()
     general_settings = db.get_general_settings()
+    cpa_auto_delete_enabled = _opencode_go_cpa_auto_delete_enabled()
     db.add_log("info", "opencode-go", "API 更新 OpenCode Go 用量和 API key JS 文件配置")
     return {
         "ok": True,
@@ -1770,6 +1780,8 @@ async def api_save_opencode_go_settings(request: Request):
             "queryInterval": general_settings["query_interval"],
             "monitor_paused": general_settings["monitor_paused"],
             "monitorPaused": general_settings["monitor_paused"],
+            "cpa_auto_delete_enabled": cpa_auto_delete_enabled,
+            "cpaAutoDeleteEnabled": cpa_auto_delete_enabled,
             "lite_subscription_js_url": js_url,
             "liteSubscriptionJsUrl": js_url,
             "lite_subscription_server_id": server_id,
@@ -1788,6 +1800,28 @@ async def api_save_opencode_go_settings(request: Request):
             "defaultKeyListServerId": KEY_LIST_GET_REFERENCE_ID,
             "key_list_server_instance": KEY_LIST_SERVER_INSTANCE,
             "keyListServerInstance": KEY_LIST_SERVER_INSTANCE,
+        },
+    }
+
+
+@app.post("/api/opencode-go/settings/cpa-auto-delete")
+async def api_save_opencode_go_cpa_auto_delete(request: Request):
+    require_user(request)
+    payload = await request.json()
+    enabled = payload.get("enabled") if isinstance(payload, dict) else None
+    if not isinstance(enabled, bool):
+        return JSONResponse({"ok": False, "message": "enabled 必须是布尔值"}, status_code=400)
+    db.set_setting(OPENCODE_GO_CPA_AUTO_DELETE_SETTING, "1" if enabled else "0")
+    db.add_log(
+        "warning" if enabled else "info",
+        "opencode-go",
+        f"OpenCode Go 30d CPA 测试失败自动删除已{'开启' if enabled else '关闭'}",
+    )
+    return {
+        "ok": True,
+        "settings": {
+            "cpa_auto_delete_enabled": enabled,
+            "cpaAutoDeleteEnabled": enabled,
         },
     }
 
@@ -3262,7 +3296,21 @@ def _opencode_go_account_ids_payload(payload: Any) -> list[int]:
 async def _import_opencode_go_account_to_cpa(account: Any, client: CpaAdminClient) -> dict[str, Any]:
     email = decrypt_value(account["email_enc"], db.secret_key) if account["email_enc"] else ""
     api_key = decrypt_value(account["api_key_enc"], db.secret_key) if account["api_key_enc"] else ""
-    return await client.import_opencode_go_account(email, api_key)
+    result = await client.import_opencode_go_account(email, api_key)
+    db.update_opencode_go_cpa_state(
+        int(account["id"]),
+        provider_disabled=False,
+        provider_deleted=False,
+        clear_deleted_at=True,
+        reenable_pending=False,
+        action_at=utc_now(),
+        clear_error=True,
+    )
+    return result
+
+
+def _opencode_go_cpa_auto_delete_enabled() -> bool:
+    return _to_bool(db.get_setting(OPENCODE_GO_CPA_AUTO_DELETE_SETTING, "0"))
 
 
 def public_reminders() -> list[dict[str, Any]]:

@@ -10,6 +10,7 @@ from app.security import decrypt_value
 
 OPENCODE_GO_CPA_BASE_URL = "https://opencode.ai/zen/go/v1"
 OPENCODE_GO_CPA_MODELS_URL = f"{OPENCODE_GO_CPA_BASE_URL}/models"
+OPENCODE_GO_CPA_AUTO_DELETE_SETTING = "opencode_go_cpa_auto_delete_enabled"
 CPA_AUTHORIZATION_SETTING = "cpa_authorization_enc"
 CPA_SITE_URL_SETTING = "cpa_site_url"
 
@@ -54,22 +55,121 @@ class CpaAdminClient:
             "updated": updated,
         }
 
-    async def set_openai_provider_disabled(self, email: str, disabled: bool) -> dict[str, Any]:
-        email = str(email or "").strip()
-        if not email:
-            raise CpaAdminError("OpenCode Go 账号缺少邮箱")
-        config_payload = await self._request("GET", "/config")
-        providers = _openai_compatibility_providers(config_payload)
-        saved_providers, found, changed = _set_provider_disabled(providers, email, disabled)
-        if not found:
+    async def test_openai_provider(self, email: str) -> dict[str, Any]:
+        email = _required_provider_email(email)
+        providers = await self.list_openai_providers()
+        matches = [provider for provider in providers if _provider_name(provider) == email]
+        if not matches:
             raise CpaAdminError("CPA 中未找到邮箱 provider，请先导入 CPA", status_code=404)
-        if changed:
-            await self._request("PUT", "/openai-compatibility", json=saved_providers)
+
+        success_count = 0
+        failure_messages: list[str] = []
+        tested_key_count = 0
+        for provider in matches:
+            base_url = str(provider.get("base-url") or provider.get("base_url") or provider.get("baseUrl") or "").strip()
+            endpoint = _openai_chat_completions_url(base_url)
+            model = _provider_test_model(provider)
+            entries = _provider_api_key_entries(provider)
+            if not endpoint:
+                failure_messages.append("provider 服务地址不合法")
+                continue
+            if not model:
+                failure_messages.append("provider 缺少测试模型")
+                continue
+            if not entries:
+                failure_messages.append("provider 缺少 API key")
+                continue
+
+            for entry in entries:
+                tested_key_count += 1
+                api_key = str(entry.get("api-key") or entry.get("api_key") or entry.get("apiKey") or "").strip()
+                auth_index = _auth_index(entry) or _auth_index(provider)
+                headers = _provider_headers(provider)
+                if not _has_header(headers, "content-type"):
+                    headers["Content-Type"] = "application/json"
+                if not _has_header(headers, "authorization"):
+                    if api_key:
+                        headers["Authorization"] = f"Bearer {api_key}"
+                    elif auth_index:
+                        headers["Authorization"] = "Bearer $TOKEN$"
+                    else:
+                        failure_messages.append(f"API key #{tested_key_count} 缺少认证信息")
+                        continue
+                request_payload: dict[str, Any] = {
+                    "method": "POST",
+                    "url": endpoint,
+                    "header": headers,
+                    "data": json.dumps(
+                        {
+                            "model": model,
+                            "messages": [{"role": "user", "content": "Hi"}],
+                            "stream": False,
+                            "max_tokens": 5,
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                }
+                if auth_index:
+                    request_payload["auth_index"] = auth_index
+                try:
+                    payload = await self._request("POST", "/api-call", json=request_payload)
+                except CpaAdminError as exc:
+                    failure_messages.append(f"API key #{tested_key_count}: {_safe_error_text(exc)}")
+                    continue
+                status_code = _api_call_status_code(payload)
+                if 200 <= status_code < 300:
+                    success_count += 1
+                else:
+                    failure_messages.append(
+                        f"API key #{tested_key_count}: {_api_call_response_error(payload, status_code)}"
+                    )
+
+        return {
+            "name": email,
+            "healthy": success_count > 0,
+            "tested_key_count": tested_key_count,
+            "testedKeyCount": tested_key_count,
+            "success_count": success_count,
+            "successCount": success_count,
+            "failure_count": len(failure_messages),
+            "failureCount": len(failure_messages),
+            "error": "；".join(failure_messages)[:500],
+        }
+
+    async def list_openai_providers(self) -> list[dict[str, Any]]:
+        return _openai_compatibility_providers(await self._request("GET", "/openai-compatibility"))
+
+    async def set_openai_provider_disabled(self, email: str, disabled: bool) -> dict[str, Any]:
+        email = _required_provider_email(email)
+        providers = await self.list_openai_providers()
+        matches = [
+            (index, provider)
+            for index, provider in enumerate(providers)
+            if _provider_name(provider) == email
+        ]
+        if not matches:
+            raise CpaAdminError("CPA 中未找到邮箱 provider，请先导入 CPA", status_code=404)
+        changed_indices = [index for index, provider in matches if bool(provider.get("disabled", False)) != disabled]
+        for index in changed_indices:
+            await self._request(
+                "PATCH",
+                "/openai-compatibility",
+                json={"index": index, "value": {"disabled": disabled}},
+            )
         return {
             "name": email,
             "disabled": disabled,
-            "changed": changed,
+            "changed": bool(changed_indices),
         }
+
+    async def delete_openai_provider(self, email: str) -> dict[str, Any]:
+        email = _required_provider_email(email)
+        providers = await self.list_openai_providers()
+        if not any(_provider_name(provider) == email for provider in providers):
+            raise CpaAdminError("CPA 中未找到邮箱 provider，请先导入 CPA", status_code=404)
+        await self._request("DELETE", "/openai-compatibility", params={"name": email})
+        return {"name": email, "deleted": True}
 
     async def fetch_opencode_models(self, api_key: str) -> list[str]:
         payload = await self._request(
@@ -155,6 +255,7 @@ def _openai_compatibility_providers(payload: Any) -> list[dict[str, Any]]:
 def _build_opencode_openai_provider(email: str, api_key: str, models: list[str]) -> dict[str, Any]:
     return {
         "name": email,
+        "disabled": False,
         "base-url": OPENCODE_GO_CPA_BASE_URL,
         "api-key-entries": [{"api-key": api_key}],
         "models": [{"name": model} for model in models],
@@ -178,25 +279,104 @@ def _upsert_provider(providers: list[dict[str, Any]], provider: dict[str, Any]) 
     return saved, updated
 
 
-def _set_provider_disabled(providers: list[dict[str, Any]], name: str, disabled: bool) -> tuple[list[dict[str, Any]], bool, bool]:
-    target_name = str(name or "").strip()
-    saved = []
-    found = False
-    changed = False
-    for item in providers:
-        if str(item.get("name") or "").strip() != target_name:
-            saved.append(item)
-            continue
-        found = True
-        current_disabled = bool(item.get("disabled", False))
-        if current_disabled == disabled:
-            saved.append(item)
-            continue
-        next_item = dict(item)
-        next_item["disabled"] = disabled
-        saved.append(next_item)
-        changed = True
-    return saved, found, changed
+def _required_provider_email(value: Any) -> str:
+    email = str(value or "").strip()
+    if not email:
+        raise CpaAdminError("OpenCode Go 账号缺少邮箱")
+    return email
+
+
+def _provider_name(provider: dict[str, Any]) -> str:
+    return str(provider.get("name") or "").strip()
+
+
+def _provider_test_model(provider: dict[str, Any]) -> str:
+    configured = str(
+        provider.get("test-model") or provider.get("test_model") or provider.get("testModel") or ""
+    ).strip()
+    if configured:
+        return configured
+    models = provider.get("models")
+    if not isinstance(models, list):
+        return ""
+    for item in models:
+        value = item.get("name") if isinstance(item, dict) else item
+        model = str(value or "").strip()
+        if model:
+            return model
+    return ""
+
+
+def _provider_api_key_entries(provider: dict[str, Any]) -> list[dict[str, Any]]:
+    entries = provider.get("api-key-entries")
+    if entries is None:
+        entries = provider.get("api_key_entries", provider.get("apiKeyEntries"))
+    if isinstance(entries, list):
+        return [dict(item) for item in entries if isinstance(item, dict)]
+    return []
+
+
+def _provider_headers(provider: dict[str, Any]) -> dict[str, str]:
+    raw = provider.get("headers")
+    if not isinstance(raw, dict):
+        return {}
+    return {str(key): str(value) for key, value in raw.items() if str(key).strip()}
+
+
+def _auth_index(value: dict[str, Any]) -> str:
+    return str(value.get("auth-index") or value.get("auth_index") or value.get("authIndex") or "").strip()
+
+
+def _has_header(headers: dict[str, str], name: str) -> bool:
+    target = name.lower()
+    return any(str(key).lower() == target for key in headers)
+
+
+def _openai_chat_completions_url(base_url: str) -> str:
+    text = str(base_url or "").strip().rstrip("/")
+    parsed = urlparse(text)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+    if text.lower().endswith("/chat/completions"):
+        return text
+    return f"{text}/chat/completions"
+
+
+def _api_call_status_code(payload: Any) -> int:
+    if not isinstance(payload, dict):
+        return 0
+    try:
+        return int(payload.get("status_code") or payload.get("statusCode") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _api_call_response_error(payload: Any, status_code: int) -> str:
+    if not isinstance(payload, dict):
+        return "CPA 测试响应格式不正确"
+    body = payload.get("body")
+    if body is None:
+        body = payload.get("body_text", payload.get("bodyText"))
+    message = ""
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except json.JSONDecodeError:
+            message = body
+    if isinstance(body, dict):
+        error = body.get("error")
+        if isinstance(error, dict):
+            message = str(error.get("message") or "")
+        elif error:
+            message = str(error)
+        if not message:
+            message = str(body.get("message") or body.get("detail") or "")
+    prefix = f"HTTP {status_code}" if status_code else "请求失败"
+    return f"{prefix} {message}".strip()[:300]
+
+
+def _safe_error_text(exc: Exception) -> str:
+    return (str(exc) or "未知错误")[:300]
 
 
 def _normalize_model_ids(payload: Any) -> list[str]:

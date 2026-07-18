@@ -1,8 +1,10 @@
+import json
+
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import app
+from app.main import app, public_opencode_go_account
 from app.models import Database
 from app.security import decrypt_value, encrypt_value
 from app.services.opencode_go import (
@@ -647,6 +649,27 @@ def test_opencode_go_settings_rejects_non_opencode_js_url(tmp_path, monkeypatch)
     assert "opencode.ai" in response.json()["message"]
 
 
+def test_opencode_go_cpa_auto_delete_setting_defaults_off_and_persists(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+
+    with TestClient(app) as client:
+        login(client)
+        initial = client.get("/api/opencode-go/settings")
+        invalid = client.post("/api/opencode-go/settings/cpa-auto-delete", json={"enabled": "true"})
+        enabled = client.post("/api/opencode-go/settings/cpa-auto-delete", json={"enabled": True})
+        loaded = client.get("/api/opencode-go/settings")
+        disabled = client.post("/api/opencode-go/settings/cpa-auto-delete", json={"enabled": False})
+
+    assert initial.status_code == 200
+    assert initial.json()["settings"]["cpa_auto_delete_enabled"] is False
+    assert initial.json()["settings"]["cpaAutoDeleteEnabled"] is False
+    assert invalid.status_code == 400
+    assert enabled.json()["settings"]["cpa_auto_delete_enabled"] is True
+    assert loaded.json()["settings"]["cpaAutoDeleteEnabled"] is True
+    assert disabled.json()["settings"]["cpa_auto_delete_enabled"] is False
+    assert db.get_setting("opencode_go_cpa_auto_delete_enabled") == "0"
+
+
 def test_opencode_go_query_all_skips_disabled_accounts(tmp_path, monkeypatch):
     db = setup_test_db(tmp_path, monkeypatch)
     calls = []
@@ -688,7 +711,7 @@ def test_opencode_go_query_all_skips_disabled_accounts(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_opencode_go_query_all_skips_weekly_limit_but_manual_refreshes(tmp_path, monkeypatch):
+async def test_opencode_go_query_all_refreshes_weekly_limit_and_manual_refreshes(tmp_path, monkeypatch):
     db = setup_test_db(tmp_path, monkeypatch)
     calls = []
 
@@ -730,9 +753,9 @@ async def test_opencode_go_query_all_skips_weekly_limit_but_manual_refreshes(tmp
     results = await query_all_opencode_go_accounts(db)
     manual_result = await query_opencode_go_for_account(db, high_id)
 
-    assert {result["account_id"] for result in results} == {low_id, missing_id, invalid_id}
+    assert {result["account_id"] for result in results} == {high_id, low_id, missing_id, invalid_id}
     assert manual_result["account_id"] == high_id
-    assert "high@example.com" not in calls[:-1]
+    assert "high@example.com" in calls[:-1]
     assert calls[-1] == "high@example.com"
 
 
@@ -1326,6 +1349,13 @@ def test_opencode_go_import_cpa_upserts_openai_provider_with_all_models(tmp_path
             "api_key": "sk-opencode-secret",
         }
     )
+    db.update_opencode_go_cpa_state(
+        account_id,
+        provider_disabled=True,
+        provider_deleted=True,
+        deleted_at="2026-07-18T00:00:00+00:00",
+        error="old error",
+    )
     DummySub2ApiClient.requests = []
     DummySub2ApiClient.responses = [
         DummySub2ApiResponse({"status_code": 200, "body": {"data": [{"id": "gpt-5"}, {"id": "gpt-5-mini"}, {"id": "gpt-5"}]}}),
@@ -1381,13 +1411,18 @@ def test_opencode_go_import_cpa_upserts_openai_provider_with_all_models(tmp_path
     assert len(saved_providers) == 2
     assert saved_providers[0] == {
         "name": "user@example.com",
-        "disabled": True,
+        "disabled": False,
         "headers": {"X-Keep": "1"},
         "base-url": "https://opencode.ai/zen/go/v1",
         "api-key-entries": [{"api-key": "sk-opencode-secret"}],
         "models": [{"name": "gpt-5"}, {"name": "gpt-5-mini"}],
     }
     assert saved_providers[1]["name"] == "other@example.com"
+    account = db.get_opencode_go_account(account_id)
+    assert account["cpa_provider_disabled"] == 0
+    assert account["cpa_provider_deleted"] == 0
+    assert account["cpa_deleted_at"] is None
+    assert account["cpa_last_action_error"] is None
     assert "sk-opencode-secret" not in logs.text
     assert "cpa-secret" not in logs.text
 
@@ -1413,11 +1448,107 @@ async def test_cpa_set_provider_disabled_noop_when_already_target_state(monkeypa
     assert result == {"name": "ready@example.com", "disabled": True, "changed": False}
     assert len(DummySub2ApiClient.requests) == 1
     assert DummySub2ApiClient.requests[0]["method"] == "GET"
-    assert DummySub2ApiClient.requests[0]["url"] == "https://cpa.example/v0/management/config"
+    assert DummySub2ApiClient.requests[0]["url"] == "https://cpa.example/v0/management/openai-compatibility"
 
 
 @pytest.mark.asyncio
-async def test_opencode_go_refresh_auto_disables_cpa_on_weekly_limit_and_stops_repeating(tmp_path, monkeypatch):
+async def test_cpa_provider_test_checks_all_keys_and_accepts_any_success(monkeypatch):
+    DummySub2ApiClient.requests = []
+    DummySub2ApiClient.responses = [
+        DummySub2ApiResponse(
+            {
+                "openai-compatibility": [
+                    {
+                        "name": "multi@example.com",
+                        "base-url": "https://opencode.ai/zen/go/v1",
+                        "headers": {"X-Custom": "kept"},
+                        "api-key-entries": [
+                            {"api-key": "sk-failed", "auth-index": "auth-failed"},
+                            {"api-key": "sk-working", "auth-index": "auth-working"},
+                        ],
+                        "models": [{"name": "gpt-test"}],
+                    }
+                ]
+            }
+        ),
+        DummySub2ApiResponse({"status_code": 401, "body": '{"error":{"message":"invalid key"}}'}),
+        DummySub2ApiResponse({"status_code": 200, "body": '{"choices":[]}'}),
+    ]
+    monkeypatch.setattr("app.services.cpa_admin.httpx.AsyncClient", DummySub2ApiClient)
+
+    client = CpaAdminClient("https://cpa.example", "cpa-secret")
+    result = await client.test_openai_provider("multi@example.com")
+
+    assert result["healthy"] is True
+    assert result["tested_key_count"] == 2
+    assert result["success_count"] == 1
+    assert result["failure_count"] == 1
+    assert [request["method"] for request in DummySub2ApiClient.requests] == ["GET", "POST", "POST"]
+    first_test = DummySub2ApiClient.requests[1]["json"]
+    second_test = DummySub2ApiClient.requests[2]["json"]
+    assert first_test["url"] == "https://opencode.ai/zen/go/v1/chat/completions"
+    assert first_test["auth_index"] == "auth-failed"
+    assert second_test["auth_index"] == "auth-working"
+    assert first_test["header"] == {
+        "X-Custom": "kept",
+        "Content-Type": "application/json",
+        "Authorization": "Bearer sk-failed",
+    }
+    assert json.loads(first_test["data"]) == {
+        "model": "gpt-test",
+        "messages": [{"role": "user", "content": "Hi"}],
+        "stream": False,
+        "max_tokens": 5,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("weekly_percent", "should_test"), [(98.9, False), (99, True)])
+async def test_opencode_go_weekly_threshold_boundary(tmp_path, monkeypatch, weekly_percent, should_test):
+    db = setup_test_db(tmp_path, monkeypatch)
+    configure_cpa(db)
+    account_id = db.upsert_opencode_go_account(
+        {"email": "weekly-boundary@example.com", "password": "secret-password", "is_enabled": True}
+    )
+
+    async def fake_refresh(*args, **kwargs):
+        return {
+            "is_valid": True,
+            "rolling_usage": {"usagePercent": 10},
+            "weekly_usage": {"usagePercent": weekly_percent},
+            "monthly_usage": {"usagePercent": 20},
+        }
+
+    DummySub2ApiClient.requests = []
+    DummySub2ApiClient.responses = []
+    if should_test:
+        DummySub2ApiClient.responses = [
+            DummySub2ApiResponse(
+                {
+                    "openai-compatibility": [
+                        {
+                            "name": "weekly-boundary@example.com",
+                            "base-url": "https://opencode.ai/zen/go/v1",
+                            "api-key-entries": [{"api-key": "sk-working"}],
+                            "models": [{"name": "gpt-5"}],
+                        }
+                    ]
+                }
+            ),
+            DummySub2ApiResponse({"status_code": 200, "body": {"choices": []}}),
+        ]
+    monkeypatch.setattr("app.services.scheduler.refresh_opencode_go_account", fake_refresh)
+    monkeypatch.setattr("app.services.cpa_admin.httpx.AsyncClient", DummySub2ApiClient)
+
+    await query_opencode_go_for_account(db, account_id)
+
+    expected_methods = ["GET", "POST"] if should_test else []
+    assert [request["method"] for request in DummySub2ApiClient.requests] == expected_methods
+    assert db.get_opencode_go_account(account_id)["cpa_provider_disabled"] is None
+
+
+@pytest.mark.asyncio
+async def test_opencode_go_refresh_tests_five_hour_limit_then_disables_and_reenables(tmp_path, monkeypatch):
     db = setup_test_db(tmp_path, monkeypatch)
     configure_cpa(db)
     account_id = db.upsert_opencode_go_account(
@@ -1432,32 +1563,71 @@ async def test_opencode_go_refresh_auto_disables_cpa_on_weekly_limit_and_stops_r
         return {
             "is_valid": True,
             "workspace_id": "ws_1",
-            "weekly_usage": {"usagePercent": 99, "resetInSec": 120},
+            "rolling_usage": {"usagePercent": 99, "resetInSec": 60},
+            "weekly_usage": {"usagePercent": 98.9, "resetInSec": 120},
             "monthly_usage": {"usagePercent": 50, "resetInSec": 180},
         }
 
     DummySub2ApiClient.requests = []
     DummySub2ApiClient.responses = [
+        DummySub2ApiResponse(
+            {
+                "openai-compatibility": [
+                    {
+                        "name": "auto-disable@example.com",
+                        "disabled": False,
+                        "base-url": "https://opencode.ai/zen/go/v1",
+                        "api-key-entries": [{"api-key": "sk-failed", "auth-index": "auth-1"}],
+                        "models": [{"name": "gpt-5"}],
+                    }
+                ]
+            }
+        ),
+        DummySub2ApiResponse({"status_code": 429, "body": {"error": {"message": "quota exhausted"}}}),
         DummySub2ApiResponse({"openai-compatibility": [{"name": "auto-disable@example.com", "disabled": False}]}),
+        DummySub2ApiResponse({"ok": True}),
+        DummySub2ApiResponse(
+            {
+                "openai-compatibility": [
+                    {
+                        "name": "auto-disable@example.com",
+                        "disabled": True,
+                        "base-url": "https://opencode.ai/zen/go/v1",
+                        "api-key-entries": [{"api-key": "sk-recovered", "auth-index": "auth-1"}],
+                        "models": [{"name": "gpt-5"}],
+                    }
+                ]
+            }
+        ),
+        DummySub2ApiResponse({"status_code": 200, "body": {"choices": []}}),
+        DummySub2ApiResponse({"openai-compatibility": [{"name": "auto-disable@example.com", "disabled": True}]}),
         DummySub2ApiResponse({"ok": True}),
     ]
     monkeypatch.setattr("app.services.scheduler.refresh_opencode_go_account", fake_refresh)
     monkeypatch.setattr("app.services.cpa_admin.httpx.AsyncClient", DummySub2ApiClient)
 
-    first = await query_opencode_go_for_account(db, account_id)
+    await query_opencode_go_for_account(db, account_id)
     after_first = db.get_opencode_go_account(account_id)
-    first_requests = list(DummySub2ApiClient.requests)
-    DummySub2ApiClient.requests = []
-    second = await query_opencode_go_for_account(db, account_id)
+    await query_opencode_go_for_account(db, account_id)
+    after_second = db.get_opencode_go_account(account_id)
 
-    assert first["is_valid"] is True
-    assert second["is_valid"] is True
     assert after_first["cpa_provider_disabled"] == 1
     assert after_first["cpa_reenable_pending"] == 0
-    assert [request["method"] for request in first_requests] == ["GET", "PUT"]
-    assert first_requests[1]["json"][0]["disabled"] is True
-    assert DummySub2ApiClient.requests == []
+    assert after_second["cpa_provider_disabled"] == 0
+    assert [request["method"] for request in DummySub2ApiClient.requests] == [
+        "GET",
+        "POST",
+        "GET",
+        "PATCH",
+        "GET",
+        "POST",
+        "GET",
+        "PATCH",
+    ]
+    assert DummySub2ApiClient.requests[3]["json"] == {"index": 0, "value": {"disabled": True}}
+    assert DummySub2ApiClient.requests[7]["json"] == {"index": 0, "value": {"disabled": False}}
     assert any("CPA 自动停用成功" in log["message"] for log in db.list_logs(category="opencode-go"))
+    assert any("CPA 自动启用成功" in log["message"] for log in db.list_logs(category="opencode-go"))
 
 
 @pytest.mark.asyncio
@@ -1475,6 +1645,7 @@ async def test_opencode_go_refresh_auto_enables_cpa_after_recovery_and_retries_f
         account_id,
         {
             "is_valid": True,
+            "rolling_usage": {"usagePercent": 99, "resetInSec": 60},
             "weekly_usage": {"usagePercent": 99, "resetInSec": 120},
             "monthly_usage": {"usagePercent": 80, "resetInSec": 180},
         },
@@ -1485,6 +1656,7 @@ async def test_opencode_go_refresh_auto_enables_cpa_after_recovery_and_retries_f
         return {
             "is_valid": True,
             "workspace_id": "ws_1",
+            "rolling_usage": {"usagePercent": 10, "resetInSec": 60},
             "weekly_usage": {"usagePercent": 20, "resetInSec": 120},
             "monthly_usage": {"usagePercent": 80, "resetInSec": 180},
         }
@@ -1513,8 +1685,8 @@ async def test_opencode_go_refresh_auto_enables_cpa_after_recovery_and_retries_f
     assert after_success["cpa_provider_disabled"] == 0
     assert after_success["cpa_reenable_pending"] == 0
     assert after_success["cpa_last_action_error"] is None
-    assert [request["method"] for request in requests_after_success] == ["GET", "PUT", "GET", "PUT"]
-    assert requests_after_success[-1]["json"][0]["disabled"] is False
+    assert [request["method"] for request in requests_after_success] == ["GET", "PATCH", "GET", "PATCH"]
+    assert requests_after_success[-1]["json"] == {"index": 0, "value": {"disabled": False}}
     assert DummySub2ApiClient.requests == []
     logs = db.list_logs(category="opencode-go")
     assert any("CPA 自动启用失败" in log["message"] for log in logs)
@@ -1522,7 +1694,7 @@ async def test_opencode_go_refresh_auto_enables_cpa_after_recovery_and_retries_f
 
 
 @pytest.mark.asyncio
-async def test_opencode_go_refresh_does_not_enable_cpa_while_monthly_still_limited(tmp_path, monkeypatch):
+async def test_opencode_go_refresh_reenables_auto_disabled_cpa_when_monthly_test_passes(tmp_path, monkeypatch):
     db = setup_test_db(tmp_path, monkeypatch)
     configure_cpa(db)
     account_id = db.upsert_opencode_go_account(
@@ -1536,6 +1708,7 @@ async def test_opencode_go_refresh_does_not_enable_cpa_while_monthly_still_limit
         account_id,
         {
             "is_valid": True,
+            "rolling_usage": {"usagePercent": 20, "resetInSec": 60},
             "weekly_usage": {"usagePercent": 99, "resetInSec": 120},
             "monthly_usage": {"usagePercent": 99, "resetInSec": 180},
         },
@@ -1546,21 +1719,179 @@ async def test_opencode_go_refresh_does_not_enable_cpa_while_monthly_still_limit
         return {
             "is_valid": True,
             "workspace_id": "ws_1",
+            "rolling_usage": {"usagePercent": 20, "resetInSec": 60},
             "weekly_usage": {"usagePercent": 20, "resetInSec": 120},
             "monthly_usage": {"usagePercent": 99, "resetInSec": 180},
         }
 
     DummySub2ApiClient.requests = []
-    DummySub2ApiClient.responses = []
+    DummySub2ApiClient.responses = [
+        DummySub2ApiResponse(
+            {
+                "openai-compatibility": [
+                    {
+                        "name": "monthly-full@example.com",
+                        "disabled": True,
+                        "base-url": "https://opencode.ai/zen/go/v1",
+                        "api-key-entries": [{"api-key": "sk-working"}],
+                        "models": [{"name": "gpt-5"}],
+                    }
+                ]
+            }
+        ),
+        DummySub2ApiResponse({"status_code": 200, "body": {"choices": []}}),
+        DummySub2ApiResponse({"openai-compatibility": [{"name": "monthly-full@example.com", "disabled": True}]}),
+        DummySub2ApiResponse({"ok": True}),
+    ]
     monkeypatch.setattr("app.services.scheduler.refresh_opencode_go_account", fake_refresh)
     monkeypatch.setattr("app.services.cpa_admin.httpx.AsyncClient", DummySub2ApiClient)
 
     await query_opencode_go_for_account(db, account_id)
 
     account = db.get_opencode_go_account(account_id)
-    assert account["cpa_provider_disabled"] == 1
+    assert account["cpa_provider_disabled"] == 0
     assert account["cpa_reenable_pending"] == 0
+    assert [request["method"] for request in DummySub2ApiClient.requests] == ["GET", "POST", "GET", "PATCH"]
+
+
+@pytest.mark.asyncio
+async def test_opencode_go_monthly_test_failure_disables_when_auto_delete_is_off(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    configure_cpa(db)
+    account_id = db.upsert_opencode_go_account(
+        {"email": "monthly-disable@example.com", "password": "secret-password", "is_enabled": True}
+    )
+
+    async def fake_refresh(*args, **kwargs):
+        return {
+            "is_valid": True,
+            "rolling_usage": {"usagePercent": 20},
+            "weekly_usage": {"usagePercent": 30},
+            "monthly_usage": {"usagePercent": 99},
+        }
+
+    provider = {
+        "name": "monthly-disable@example.com",
+        "disabled": False,
+        "base-url": "https://opencode.ai/zen/go/v1",
+        "api-key-entries": [{"api-key": "sk-failed"}],
+        "models": [{"name": "gpt-5"}],
+    }
+    DummySub2ApiClient.requests = []
+    DummySub2ApiClient.responses = [
+        DummySub2ApiResponse({"openai-compatibility": [provider]}),
+        DummySub2ApiResponse({"status_code": 401, "body": {"error": "expired"}}),
+        DummySub2ApiResponse({"openai-compatibility": [provider]}),
+        DummySub2ApiResponse({"ok": True}),
+    ]
+    monkeypatch.setattr("app.services.scheduler.refresh_opencode_go_account", fake_refresh)
+    monkeypatch.setattr("app.services.cpa_admin.httpx.AsyncClient", DummySub2ApiClient)
+
+    await query_opencode_go_for_account(db, account_id)
+
+    account = db.get_opencode_go_account(account_id)
+    assert db.get_setting("opencode_go_cpa_auto_delete_enabled") == "0"
+    assert account["cpa_provider_disabled"] == 1
+    assert account["cpa_provider_deleted"] == 0
+    assert [request["method"] for request in DummySub2ApiClient.requests] == ["GET", "POST", "GET", "PATCH"]
+
+
+@pytest.mark.asyncio
+async def test_opencode_go_monthly_test_failure_deletes_and_later_skips_cpa(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    configure_cpa(db)
+    db.set_setting("opencode_go_cpa_auto_delete_enabled", "1")
+    account_id = db.upsert_opencode_go_account(
+        {"email": "monthly-delete@example.com", "password": "secret-password", "is_enabled": True}
+    )
+    refresh_calls = []
+
+    async def fake_refresh(*args, **kwargs):
+        refresh_calls.append("refresh")
+        return {
+            "is_valid": True,
+            "rolling_usage": {"usagePercent": 20},
+            "weekly_usage": {"usagePercent": 99},
+            "monthly_usage": {"usagePercent": 100},
+        }
+
+    provider = {
+        "name": "monthly-delete@example.com",
+        "disabled": False,
+        "base-url": "https://opencode.ai/zen/go/v1",
+        "api-key-entries": [{"api-key": "sk-failed"}],
+        "models": [{"name": "gpt-5"}],
+    }
+    DummySub2ApiClient.requests = []
+    DummySub2ApiClient.responses = [
+        DummySub2ApiResponse({"openai-compatibility": [provider]}),
+        DummySub2ApiResponse({"status_code": 429, "body": {"error": "quota exhausted"}}),
+        DummySub2ApiResponse({"openai-compatibility": [provider]}),
+        DummySub2ApiResponse({"status": "ok"}),
+    ]
+    monkeypatch.setattr("app.services.scheduler.refresh_opencode_go_account", fake_refresh)
+    monkeypatch.setattr("app.services.cpa_admin.httpx.AsyncClient", DummySub2ApiClient)
+
+    await query_opencode_go_for_account(db, account_id)
+    deleted = db.get_opencode_go_account(account_id)
+    first_requests = list(DummySub2ApiClient.requests)
+    DummySub2ApiClient.requests = []
+    await query_opencode_go_for_account(db, account_id)
+
+    assert deleted["cpa_provider_deleted"] == 1
+    assert deleted["cpa_provider_disabled"] == 0
+    assert deleted["cpa_deleted_at"]
+    assert deleted["is_enabled"] == 1
+    public = public_opencode_go_account(deleted)
+    assert public["cpa_provider_deleted"] is True
+    assert public["cpaProviderDeleted"] is True
+    assert public["cpaDeletedAt"] == deleted["cpa_deleted_at"]
+    assert [request["method"] for request in first_requests] == ["GET", "POST", "GET", "DELETE"]
+    assert first_requests[-1]["params"] == {"name": "monthly-delete@example.com"}
     assert DummySub2ApiClient.requests == []
+    assert refresh_calls == ["refresh", "refresh"]
+
+
+@pytest.mark.asyncio
+async def test_opencode_go_monthly_delete_failure_does_not_mark_deleted(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    configure_cpa(db)
+    db.set_setting("opencode_go_cpa_auto_delete_enabled", "1")
+    account_id = db.upsert_opencode_go_account(
+        {"email": "delete-failed@example.com", "password": "secret-password", "is_enabled": True}
+    )
+
+    async def fake_refresh(*args, **kwargs):
+        return {
+            "is_valid": True,
+            "rolling_usage": {"usagePercent": 20},
+            "weekly_usage": {"usagePercent": 20},
+            "monthly_usage": {"usagePercent": 99},
+        }
+
+    provider = {
+        "name": "delete-failed@example.com",
+        "base-url": "https://opencode.ai/zen/go/v1",
+        "api-key-entries": [{"api-key": "sk-failed"}],
+        "models": [{"name": "gpt-5"}],
+    }
+    DummySub2ApiClient.requests = []
+    DummySub2ApiClient.responses = [
+        DummySub2ApiResponse({"openai-compatibility": [provider]}),
+        DummySub2ApiResponse({"status_code": 500, "body": {"error": "upstream failed"}}),
+        DummySub2ApiResponse({"openai-compatibility": [provider]}),
+        DummySub2ApiResponse({"error": "save failed"}, status_code=500),
+    ]
+    monkeypatch.setattr("app.services.scheduler.refresh_opencode_go_account", fake_refresh)
+    monkeypatch.setattr("app.services.cpa_admin.httpx.AsyncClient", DummySub2ApiClient)
+
+    await query_opencode_go_for_account(db, account_id)
+
+    account = db.get_opencode_go_account(account_id)
+    assert account["cpa_provider_deleted"] == 0
+    assert account["cpa_deleted_at"] is None
+    assert "save failed" in account["cpa_last_action_error"]
+    assert any("CPA 自动删除失败" in log["message"] for log in db.list_logs(category="opencode-go"))
 
 
 @pytest.mark.asyncio
@@ -1596,7 +1927,7 @@ async def test_opencode_go_refresh_cpa_missing_provider_logs_and_keeps_refresh_s
     assert account["cpa_provider_disabled"] is None
     assert "CPA 中未找到邮箱 provider" in account["cpa_last_action_error"]
     assert [request["method"] for request in DummySub2ApiClient.requests] == ["GET"]
-    assert any("CPA 自动停用失败" in log["message"] for log in db.list_logs(category="opencode-go"))
+    assert any("CPA 自动测试无法执行" in log["message"] for log in db.list_logs(category="opencode-go"))
 
 
 def test_opencode_go_bulk_import_cpa_imports_selected_accounts(tmp_path, monkeypatch):

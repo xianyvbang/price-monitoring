@@ -8,7 +8,12 @@ from app.models import DEFAULT_BALANCE_UNIT, Database, actual_consumption_stats,
 from app.models import utc_now
 from app.services.alerts import handle_alert_state
 from app.services.balance import query_account, query_newapi_group, query_sub2api_group
-from app.services.cpa_admin import CpaAdminError, cpa_admin_client_from_db
+from app.services.cpa_admin import (
+    OPENCODE_GO_CPA_AUTO_DELETE_SETTING,
+    CpaAdminClient,
+    CpaAdminError,
+    cpa_admin_client_from_db,
+)
 from app.services.emailer import build_group_rate_change_email, build_reminder_email, send_email
 from app.services.opencode_go import refresh_opencode_go_account
 
@@ -338,33 +343,10 @@ async def query_opencode_go_for_account(db: Database, account_id: int, *, respec
 async def query_all_opencode_go_accounts(db: Database) -> list[dict]:
     results = []
     for account in db.list_opencode_go_accounts(enabled_only=True):
-        weekly_usage_percent = _opencode_go_weekly_usage_percent(account)
-        if weekly_usage_percent is not None and weekly_usage_percent >= OPENCODE_GO_CPA_USAGE_THRESHOLD:
-            db.add_log("info", "opencode-go", f"{account['name']} OpenCode Go 7d 用量已达到 {weekly_usage_percent:.1f}%，自动刷新跳过")
-            continue
         result = await query_opencode_go_for_account(db, account["id"], respect_enabled=True)
         if not result.get("skipped"):
             results.append(result)
     return results
-
-
-def _opencode_go_weekly_usage_percent(account) -> float | None:
-    value = account["last_weekly_usage"]
-    if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except json.JSONDecodeError:
-            return None
-    if not isinstance(value, dict):
-        return None
-    usage_percent = value.get("usage_percent", value.get("usagePercent"))
-    if isinstance(usage_percent, bool):
-        return None
-    try:
-        number = float(usage_percent)
-    except (TypeError, ValueError):
-        return None
-    return number
 
 
 def _group_summary_from_result(result: dict) -> dict:
@@ -424,37 +406,102 @@ def _monitor_group_summaries_from_result(db: Database, account_id: int, result: 
 
 
 async def sync_opencode_go_cpa_state(db: Database, account: dict, result: dict) -> None:
+    rolling = _usage_percent(result.get("rolling_usage") or result.get("rollingUsage"))
     weekly = _usage_percent(result.get("weekly_usage") or result.get("weeklyUsage"))
     monthly = _usage_percent(result.get("monthly_usage") or result.get("monthlyUsage"))
-    if weekly is None and monthly is None:
+    if rolling is None and weekly is None and monthly is None:
         return
     account_id = int(account["id"])
     email = str(account["name"] or "").strip()
+    if bool(account["cpa_provider_deleted"]):
+        return
     provider_disabled = _nullable_bool(account["cpa_provider_disabled"])
-    reenable_pending = bool(account["cpa_reenable_pending"])
+    rolling_full = rolling is not None and rolling >= OPENCODE_GO_CPA_USAGE_THRESHOLD
     weekly_full = weekly is not None and weekly >= OPENCODE_GO_CPA_USAGE_THRESHOLD
     monthly_full = monthly is not None and monthly >= OPENCODE_GO_CPA_USAGE_THRESHOLD
-    if weekly_full or monthly_full:
-        if provider_disabled is True:
-            return
-        await _set_opencode_go_cpa_disabled(db, account_id, email, True, weekly, monthly)
+    usage_text = _usage_windows_text(rolling, weekly, monthly)
+
+    if not (rolling_full or weekly_full or monthly_full):
+        all_recovered = all(
+            value is not None and value < OPENCODE_GO_CPA_USAGE_THRESHOLD
+            for value in (rolling, weekly, monthly)
+        )
+        if provider_disabled is True and all_recovered:
+            await _set_opencode_go_cpa_disabled(
+                db,
+                account_id,
+                email,
+                False,
+                rolling,
+                weekly,
+                monthly,
+            )
         return
 
-    weekly_recovered = weekly is not None and weekly < OPENCODE_GO_CPA_USAGE_THRESHOLD
-    monthly_recovered = monthly is not None and monthly < OPENCODE_GO_CPA_USAGE_THRESHOLD
-    if not (weekly_recovered and monthly_recovered):
+    try:
+        client = cpa_admin_client_from_db(db)
+        test_result = await client.test_openai_provider(email)
+    except CpaAdminError as exc:
+        message = _safe_cpa_action_error(exc)
+        db.update_opencode_go_cpa_state(account_id, error=message)
+        db.add_log("error", "opencode-go", f"{email} CPA 自动测试无法执行，用量 {usage_text}: {message}")
         return
-    if provider_disabled is not True:
+
+    if test_result.get("healthy"):
+        success_count = int(test_result.get("success_count") or 0)
+        tested_count = int(test_result.get("tested_key_count") or 0)
+        db.add_log(
+            "info",
+            "opencode-go",
+            f"{email} CPA 自动测试连通，用量 {usage_text}，通过 {success_count}/{tested_count}",
+        )
+        if provider_disabled is True:
+            await _set_opencode_go_cpa_disabled(
+                db,
+                account_id,
+                email,
+                False,
+                rolling,
+                weekly,
+                monthly,
+                client=client,
+            )
+        else:
+            db.update_opencode_go_cpa_state(
+                account_id,
+                reenable_pending=False,
+                action_at=utc_now(),
+                clear_error=True,
+            )
         return
-    previous_weekly = _usage_percent(account["last_weekly_usage"])
-    previous_monthly = _usage_percent(account["last_monthly_usage"])
-    previous_full = (
-        (previous_weekly is not None and previous_weekly >= OPENCODE_GO_CPA_USAGE_THRESHOLD)
-        or (previous_monthly is not None and previous_monthly >= OPENCODE_GO_CPA_USAGE_THRESHOLD)
+
+    test_error = str(test_result.get("error") or "所有 CPA API key 测试均报错")[:500]
+    db.add_log("warning", "opencode-go", f"{email} CPA 自动测试报错，用量 {usage_text}: {test_error}")
+    auto_delete_enabled = _setting_enabled(
+        db.get_setting(OPENCODE_GO_CPA_AUTO_DELETE_SETTING, "0")
     )
-    if not (reenable_pending or previous_full):
+    if monthly_full and auto_delete_enabled:
+        await _delete_opencode_go_cpa_provider(
+            db,
+            account_id,
+            email,
+            rolling,
+            weekly,
+            monthly,
+            client,
+        )
         return
-    await _set_opencode_go_cpa_disabled(db, account_id, email, False, weekly, monthly)
+
+    await _set_opencode_go_cpa_disabled(
+        db,
+        account_id,
+        email,
+        True,
+        rolling,
+        weekly,
+        monthly,
+        client=client,
+    )
 
 
 async def _set_opencode_go_cpa_disabled(
@@ -462,12 +509,15 @@ async def _set_opencode_go_cpa_disabled(
     account_id: int,
     email: str,
     disabled: bool,
+    rolling: float | None,
     weekly: float | None,
     monthly: float | None,
+    *,
+    client: CpaAdminClient | None = None,
 ) -> None:
     action = "停用" if disabled else "启用"
     try:
-        client = cpa_admin_client_from_db(db)
+        client = client or cpa_admin_client_from_db(db)
         result = await client.set_openai_provider_disabled(email, disabled)
     except CpaAdminError as exc:
         message = _safe_cpa_action_error(exc)
@@ -476,7 +526,7 @@ async def _set_opencode_go_cpa_disabled(
             reenable_pending=(not disabled) or None,
             error=message,
         )
-        db.add_log("error", "opencode-go", f"{email} CPA 自动{action}失败，用量 {_usage_pair_text(weekly, monthly)}: {message}")
+        db.add_log("error", "opencode-go", f"{email} CPA 自动{action}失败，用量 {_usage_windows_text(rolling, weekly, monthly)}: {message}")
         return
     db.update_opencode_go_cpa_state(
         account_id,
@@ -486,7 +536,48 @@ async def _set_opencode_go_cpa_disabled(
         clear_error=True,
     )
     suffix = "，无需远端变更" if not result.get("changed") else ""
-    db.add_log("warning" if disabled else "info", "opencode-go", f"{email} CPA 自动{action}成功，用量 {_usage_pair_text(weekly, monthly)}{suffix}")
+    db.add_log(
+        "warning" if disabled else "info",
+        "opencode-go",
+        f"{email} CPA 自动{action}成功，用量 {_usage_windows_text(rolling, weekly, monthly)}{suffix}",
+    )
+
+
+async def _delete_opencode_go_cpa_provider(
+    db: Database,
+    account_id: int,
+    email: str,
+    rolling: float | None,
+    weekly: float | None,
+    monthly: float | None,
+    client: CpaAdminClient,
+) -> None:
+    try:
+        await client.delete_openai_provider(email)
+    except CpaAdminError as exc:
+        message = _safe_cpa_action_error(exc)
+        db.update_opencode_go_cpa_state(account_id, error=message)
+        db.add_log(
+            "error",
+            "opencode-go",
+            f"{email} CPA 自动删除失败，用量 {_usage_windows_text(rolling, weekly, monthly)}: {message}",
+        )
+        return
+    deleted_at = utc_now()
+    db.update_opencode_go_cpa_state(
+        account_id,
+        provider_disabled=False,
+        provider_deleted=True,
+        deleted_at=deleted_at,
+        reenable_pending=False,
+        action_at=deleted_at,
+        clear_error=True,
+    )
+    db.add_log(
+        "warning",
+        "opencode-go",
+        f"{email} CPA 自动删除成功，用量 {_usage_windows_text(rolling, weekly, monthly)}",
+    )
 
 
 def _usage_percent(value: object) -> float | None:
@@ -510,8 +601,12 @@ def _nullable_bool(value: object) -> bool | None:
     return bool(value)
 
 
-def _usage_pair_text(weekly: float | None, monthly: float | None) -> str:
-    return f"7d {_usage_value_text(weekly)}，30d {_usage_value_text(monthly)}"
+def _usage_windows_text(rolling: float | None, weekly: float | None, monthly: float | None) -> str:
+    return (
+        f"5h {_usage_value_text(rolling)}，"
+        f"7d {_usage_value_text(weekly)}，"
+        f"30d {_usage_value_text(monthly)}"
+    )
 
 
 def _usage_value_text(value: float | None) -> str:
@@ -523,3 +618,7 @@ def _usage_value_text(value: float | None) -> str:
 def _safe_cpa_action_error(exc: Exception) -> str:
     message = str(exc) or "未知错误"
     return message[:300]
+
+
+def _setting_enabled(value: object) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}

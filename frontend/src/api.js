@@ -67,6 +67,7 @@ export const api = {
   changePassword: (payload) => request("/api/settings/password", { method: "POST", body: JSON.stringify(payload) }),
   opencodeGoSettings: () => request("/api/opencode-go/settings"),
   saveOpencodeGoSettings: (payload) => request("/api/opencode-go/settings", { method: "POST", body: JSON.stringify(payload) }),
+  setOpencodeGoCpaAutoDelete: (enabled) => request("/api/opencode-go/settings/cpa-auto-delete", { method: "POST", body: JSON.stringify({ enabled }) }),
   opencodeGoAccounts: (params = {}) => request(`/api/opencode-go/accounts${queryString(params)}`),
   createOpencodeGoAccount: (payload) => request("/api/opencode-go/accounts", { method: "POST", body: JSON.stringify(payload) }),
   bulkOpencodeGoAccounts: (payload) => request("/api/opencode-go/accounts/bulk", { method: "POST", body: JSON.stringify(payload) }),

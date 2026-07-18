@@ -215,6 +215,8 @@ class Database:
                     last_checked_at TEXT,
                     is_enabled INTEGER NOT NULL DEFAULT 0,
                     cpa_provider_disabled INTEGER,
+                    cpa_provider_deleted INTEGER NOT NULL DEFAULT 0,
+                    cpa_deleted_at TEXT,
                     cpa_reenable_pending INTEGER NOT NULL DEFAULT 0,
                     cpa_last_action_at TEXT,
                     cpa_last_action_error TEXT,
@@ -276,6 +278,7 @@ class Database:
             self._set_default(conn, "group_rate_query_interval", str(GROUP_RATE_QUERY_INTERVAL_SECONDS))
             self._set_default(conn, "default_threshold", "5")
             self._set_default(conn, "monitor_paused", "0")
+            self._set_default(conn, "opencode_go_cpa_auto_delete_enabled", "0")
             conn.execute(
                 """
                 INSERT OR IGNORE INTO smtp_settings (id, updated_at)
@@ -484,6 +487,10 @@ class Database:
         column_names = {row["name"] for row in columns}
         if "cpa_provider_disabled" not in column_names:
             conn.execute("ALTER TABLE opencode_go_accounts ADD COLUMN cpa_provider_disabled INTEGER")
+        if "cpa_provider_deleted" not in column_names:
+            conn.execute("ALTER TABLE opencode_go_accounts ADD COLUMN cpa_provider_deleted INTEGER NOT NULL DEFAULT 0")
+        if "cpa_deleted_at" not in column_names:
+            conn.execute("ALTER TABLE opencode_go_accounts ADD COLUMN cpa_deleted_at TEXT")
         if "cpa_reenable_pending" not in column_names:
             conn.execute("ALTER TABLE opencode_go_accounts ADD COLUMN cpa_reenable_pending INTEGER NOT NULL DEFAULT 0")
         if "cpa_last_action_at" not in column_names:
@@ -1399,6 +1406,9 @@ class Database:
         account_id: int,
         *,
         provider_disabled: bool | None = None,
+        provider_deleted: bool | None = None,
+        deleted_at: str | None = None,
+        clear_deleted_at: bool = False,
         reenable_pending: bool | None = None,
         action_at: str | None = None,
         error: str | None = None,
@@ -1409,6 +1419,12 @@ class Database:
         if provider_disabled is not None:
             assignments.append("cpa_provider_disabled = ?")
             params.append(1 if provider_disabled else 0)
+        if provider_deleted is not None:
+            assignments.append("cpa_provider_deleted = ?")
+            params.append(1 if provider_deleted else 0)
+        if deleted_at is not None or clear_deleted_at:
+            assignments.append("cpa_deleted_at = ?")
+            params.append(deleted_at)
         if reenable_pending is not None:
             assignments.append("cpa_reenable_pending = ?")
             params.append(1 if reenable_pending else 0)
