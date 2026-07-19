@@ -720,6 +720,11 @@ a {
   margin-bottom: 2px;
 }
 
+.import-helper .import-tip-warn {
+  color: var(--warn, #e6a23c);
+  font-weight: 600;
+}
+
 .sub2api-group-picker {
   min-height: 96px;
   width: 100%;

@@ -24,6 +24,7 @@ const saving = ref(false);
 const bulkDialogVisible = ref(false);
 const bulkText = ref("");
 const importingBulk = ref(false);
+const skipDuplicates = ref(true);
 const settingsDialogVisible = ref(false);
 const savingSettings = ref(false);
 const savingCpaAutoDelete = ref(false);
@@ -276,11 +277,24 @@ async function submitAccount() {
 async function submitBulkImport() {
   importingBulk.value = true;
   try {
-    const response = await api.bulkOpencodeGoAccounts({ bulk_text: bulkText.value });
+    const response = await api.bulkOpencodeGoAccounts({
+      bulk_text: bulkText.value,
+      skip_duplicates: skipDuplicates.value,
+    });
     bulkDialogVisible.value = false;
     pagination.page = 1;
     await loadAccounts();
-    ElMessage.success(`已导入或更新 ${response.count || 0} 个 OpenCode Go 账号`);
+    const okCount = response.count || 0;
+    const skippedCount = response.skipped || 0;
+    const failedCount = response.failed || 0;
+    let msg = `已导入 ${okCount} 个`;
+    if (skippedCount) msg += `，跳过 ${skippedCount} 个`;
+    if (failedCount) msg += `，获取失败 ${failedCount} 个`;
+    if (failedCount) {
+      ElMessage.warning(`${msg}（失败账号已建号并标记错误，可在列表中逐条点“获取 Key”重试）`);
+    } else {
+      ElMessage.success(msg);
+    }
   } catch (error) {
     ElMessage.error(error.message || "批量导入失败");
   } finally {
@@ -494,6 +508,30 @@ async function refreshAccount(account) {
     ElMessage.error(error.message || "刷新失败");
   } finally {
     account._refreshing = false;
+  }
+}
+
+async function acquireAccount(account) {
+  if (!account.has_password && !account.hasPassword) {
+    ElMessage.warning("该账号未保存 Google 密码，无法自动登录获取");
+    return;
+  }
+  account._acquiring = true;
+  try {
+    const response = await api.acquireOpencodeGo(account.id);
+    upsertLocal(response.account);
+    if (response.has_api_key) {
+      ElMessage.success("获取成功，已写入 API key 与登录态");
+    } else {
+      ElMessage.warning("已登录但未获取到 API key，可稍后点“刷新”重试或手动导入登录态");
+    }
+  } catch (error) {
+    if (error.payload?.account) {
+      upsertLocal(error.payload.account);
+    }
+    ElMessage.error(error.message || "获取失败");
+  } finally {
+    account._acquiring = false;
   }
 }
 
@@ -1103,6 +1141,7 @@ onBeforeUnmount(() => {
               <div class="table-actions">
                 <el-button size="small" :icon="Edit" @click="openEdit(row)">编辑</el-button>
                 <el-button size="small" :icon="Upload" @click="openSessionImport(row)">导入登录态</el-button>
+                <el-button size="small" :icon="Document" :loading="row._acquiring" @click="acquireAccount(row)">获取 Key</el-button>
                 <el-button size="small" :icon="Upload" :disabled="!hasApiKey(row)" @click="openSub2ApiImport(row)">导入 Sub2API</el-button>
                 <el-button size="small" :icon="Upload" :loading="cpaImportingId === row.id" :disabled="!hasApiKey(row) || cpaBulkImporting" @click="importToCpa(row)">导入 CPA</el-button>
                 <el-button size="small" :icon="Refresh" :loading="row._refreshing" @click="refreshAccount(row)">刷新</el-button>
@@ -1158,6 +1197,7 @@ onBeforeUnmount(() => {
           <div class="mobile-actions">
             <el-button size="small" :icon="Edit" @click="openEdit(row)">编辑</el-button>
             <el-button size="small" :icon="Upload" @click="openSessionImport(row)">导入登录态</el-button>
+            <el-button size="small" :icon="Document" :loading="row._acquiring" @click="acquireAccount(row)">获取 Key</el-button>
             <el-button size="small" :icon="Upload" :disabled="!hasApiKey(row)" @click="openSub2ApiImport(row)">导入 Sub2API</el-button>
             <el-button size="small" :icon="Upload" :loading="cpaImportingId === row.id" :disabled="!hasApiKey(row) || cpaBulkImporting" @click="importToCpa(row)">导入 CPA</el-button>
             <el-button size="small" :icon="Refresh" :loading="row._refreshing" @click="refreshAccount(row)">刷新</el-button>
@@ -1223,16 +1263,21 @@ onBeforeUnmount(() => {
             autocomplete="off"
           />
         </el-form-item>
+        <el-form-item>
+          <el-checkbox v-model="skipDuplicates">跳过已存在账号（重复则不重新登录获取）</el-checkbox>
+        </el-form-item>
         <div class="import-helper">
           <span>格式：账号|密码 或 账号|密码|恢复电子邮件，一行一条</span>
-          <span>账号会作为 Google 邮箱使用，空行会跳过，重复账号会更新原账号</span>
+          <span>导入时会逐条自动登录 opencode.ai 获取 API key 和登录态，失败也建号并标记错误状态</span>
+          <span>勾选跳过时，已存在账号整行跳过、不跑浏览器；否则会对重复账号重新登录获取</span>
+          <span v-if="importingBulk" class="import-tip-warn">正在逐条登录获取（每条约 15-30 秒），请勿关闭页面…</span>
           <span>待导入 {{ bulkPreviewCount }} 行</span>
         </div>
       </el-form>
       <template #footer>
         <div class="dialog-footer">
-          <el-button @click="bulkDialogVisible = false">取消</el-button>
-          <el-button type="primary" :loading="importingBulk" @click="submitBulkImport">导入</el-button>
+          <el-button :disabled="importingBulk" @click="bulkDialogVisible = false">取消</el-button>
+          <el-button type="primary" :loading="importingBulk" @click="submitBulkImport">导入并获取</el-button>
         </div>
       </template>
     </el-dialog>

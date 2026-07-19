@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -34,6 +35,7 @@ from app.security import verify_password
 from app.services.balance import login_sub2api_tokens, query_newapi_group_options, query_sub2api_group_options
 from app.services.emailer import send_email
 from app.services.extension_pack import build_account_grabber_extension_zip, build_extension_zip
+from app.services.opencode_acquire import acquire_opencode_go_account
 from app.services.opencode_go import (
     KEY_LIST_DEFAULT_JS_URL,
     KEY_LIST_GET_REFERENCE_ID,
@@ -1857,11 +1859,17 @@ async def api_bulk_opencode_go_accounts(request: Request):
     require_user(request)
     payload = await request.json()
     bulk_text = str(payload.get("bulk_text") or payload.get("bulkText") or payload.get("text") or "").strip()
+    # 是否对已存在账号跳过：跳过时不跑 Playwright、不动既有 key/cookie。
+    skip_duplicates = _to_bool(payload.get("skip_duplicates", payload.get("skipDuplicates", True)))
     try:
-        result = import_bulk_opencode_go_accounts(bulk_text)
+        result = await import_bulk_opencode_go_accounts(bulk_text, skip_duplicates=skip_duplicates)
     except ValueError as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
-    db.add_log("info", "opencode-go", f"API 批量导入 OpenCode Go 账号 {result['count']} 个")
+    db.add_log(
+        "info",
+        "opencode-go",
+        f"API 批量导入 OpenCode Go 账号 成功 {result['count']} 个，跳过 {result.get('skipped', 0)} 个，失败 {result.get('failed', 0)} 个",
+    )
     return {"ok": True, **result}
 
 
@@ -2121,6 +2129,69 @@ async def api_refresh_opencode_go_account(request: Request, account_id: int):
             status_code=400,
         )
     return {"ok": True, "result": _public_opencode_go_result(result), "account": public_opencode_go_account(updated)}
+
+
+@app.post("/api/opencode-go/accounts/{account_id}/acquire")
+async def api_acquire_opencode_go_account(request: Request, account_id: int):
+    """单条账号自动登录 opencode.ai 取 key/cookie（Playwright Google OAuth）。
+
+    与已停用的 /login 不同：本端点会真正跑浏览器登录，成功写入 storage_state +
+    workspace_id + api_key，失败标记 last_status=invalid 并保留可重试。
+    """
+    require_user(request)
+    account = db.get_opencode_go_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="OpenCode Go 账号不存在")
+    email = decrypt_value(account["email_enc"], db.secret_key) if account["email_enc"] else ""
+    password = decrypt_value(account["password_enc"], db.secret_key) if account["password_enc"] else ""
+    recovery_email = decrypt_value(account["recovery_email_enc"], db.secret_key) if account["recovery_email_enc"] else ""
+    if not email or not password:
+        raise HTTPException(status_code=400, detail="缺少 Google 邮箱或密码，无法自动登录")
+
+    loop = asyncio.get_running_loop()
+    acquired = await loop.run_in_executor(
+        None, acquire_opencode_go_account, email, password, recovery_email or None
+    )
+
+    if acquired.get("status") == "ok":
+        db.update_opencode_go_session(
+            account_id,
+            acquired.get("storage_state"),
+            workspace_id=acquired.get("workspace_id") or None,
+            status="logged_in",
+            error=None,
+        )
+        api_key = acquired.get("api_key") or ""
+        result_payload = {
+            "is_valid": True,
+            "api_key": api_key,
+            "workspace_id": acquired.get("workspace_id") or "",
+            "raw": {"acquire_info": acquired.get("info")},
+            "checked_at": utc_now(),
+        }
+        db.update_opencode_go_result(account_id, result_payload)
+        db.add_log("info", "opencode-go", f"API 自动登录获取 OpenCode Go: {account['name']}（key={'有' if api_key else '无'}）")
+        updated = db.get_opencode_go_account(account_id)
+        message = "获取成功" if api_key else "已登录但未获取到 API key"
+        return {
+            "ok": True,
+            "message": message,
+            "account": public_opencode_go_account(updated),
+            "acquired": True,
+            "has_api_key": bool(api_key),
+        }
+
+    error = acquired.get("error") or "登录获取失败"
+    error_result = {"is_valid": False, "invalid_message": error, "raw": {"acquire_info": acquired.get("info")}}
+    if acquired.get("workspace_id"):
+        error_result["workspace_id"] = acquired.get("workspace_id")
+    db.update_opencode_go_result(account_id, error_result)
+    db.add_log("warning", "opencode-go", f"API 自动登录获取失败 OpenCode Go: {account['name']} - {error}")
+    updated = db.get_opencode_go_account(account_id)
+    return JSONResponse(
+        {"ok": False, "message": error, "account": public_opencode_go_account(updated), "acquired": False},
+        status_code=400,
+    )
 
 
 @app.post("/api/opencode-go/query-all")
@@ -2924,7 +2995,7 @@ def _opencode_go_account_payload(payload: dict[str, Any], require_password: bool
     return data
 
 
-def import_bulk_opencode_go_accounts(bulk_text: str) -> dict[str, Any]:
+async def import_bulk_opencode_go_accounts(bulk_text: str, skip_duplicates: bool = True) -> dict[str, Any]:
     text = str(bulk_text or "").strip()
     if not text:
         raise ValueError("请输入要导入的账号")
@@ -2958,13 +3029,78 @@ def import_bulk_opencode_go_accounts(bulk_text: str) -> dict[str, Any]:
         raise ValueError("；".join(errors[:5]) + ("；..." if len(errors) > 5 else ""))
     if not accounts:
         raise ValueError("没有可导入的账号")
-    imported = []
+
+    imported: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    loop = asyncio.get_running_loop()
     for item in accounts:
+        email = item["email"]
+        # 重复账号：按设置跳过，既不跑 Playwright 也不动既有 key/cookie。
+        existing = db.get_opencode_go_account_by_email(email)
+        if existing and skip_duplicates:
+            skipped.append({"email": email, "reason": "账号已存在，已跳过"})
+            continue
+
+        # 新账号：先建号存凭据，再尝试自动登录取 key/cookie。失败也保留这条数据并标记状态。
         account_id = db.upsert_opencode_go_account(item)
+        acquire_status = "skipped"
+        acquire_error = ""
+        acquired = await loop.run_in_executor(
+            None, acquire_opencode_go_account, email, item.get("password", ""), item.get("recovery_email") or ""
+        )
+        if acquired.get("status") == "ok":
+            # 用显式覆盖的 session/result 写入，避免 upsert 的 COALESCE 阻止新值落地。
+            db.update_opencode_go_session(
+                account_id,
+                acquired.get("storage_state"),
+                workspace_id=acquired.get("workspace_id") or None,
+                status="logged_in",
+                error=None,
+            )
+            api_key = acquired.get("api_key") or ""
+            db.update_opencode_go_result(
+                account_id,
+                {
+                    "is_valid": True,
+                    "api_key": api_key,
+                    "workspace_id": acquired.get("workspace_id") or "",
+                    "raw": {"acquire_info": acquired.get("info")},
+                    "checked_at": utc_now(),
+                },
+            )
+            acquire_status = "ok" if api_key else "no_key"
+            if not api_key:
+                acquire_error = "已登录但未获取到 API key"
+        else:
+            # 失败：建号仍保留，last_status -> invalid，last_error 记原因。
+            acquire_error = acquired.get("error") or "登录获取失败"
+            error_result = {"is_valid": False, "invalid_message": acquire_error, "raw": {"acquire_info": acquired.get("info")}}
+            if acquired.get("workspace_id"):
+                error_result["workspace_id"] = acquired.get("workspace_id")
+            db.update_opencode_go_result(account_id, error_result)
+            acquire_status = "error"
+            failed.append({"email": email, "reason": acquire_error})
+
         account = db.get_opencode_go_account(account_id)
         if account:
-            imported.append(public_opencode_go_account(account))
-    return {"count": len(imported), "accounts": imported}
+            row = public_opencode_go_account(account)
+            row["acquire_status"] = acquire_status
+            row["acquireStatus"] = acquire_status
+            row["acquire_error"] = acquire_error
+            row["acquireError"] = acquire_error
+            imported.append(row)
+        # 串行逐条，条间短暂等待，沿用脚本节奏避免 Google 风控。
+        await asyncio.sleep(1)
+
+    return {
+        "count": len(imported),
+        "skipped": len(skipped),
+        "failed": len(failed),
+        "accounts": imported,
+        "skipped_accounts": skipped,
+        "failed_accounts": failed,
+    }
 
 
 def _opencode_go_session_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], str]:

@@ -857,6 +857,18 @@ def test_opencode_go_accounts_summary_returns_null_when_no_eligible_accounts(tmp
 def test_opencode_go_bulk_import_uses_email_as_name_and_masks_password(tmp_path, monkeypatch):
     db = setup_test_db(tmp_path, monkeypatch)
 
+    def fake_acquire(email, password, recovery_email=None):
+        return {
+            "storage_state": {"cookies": [{"name": "auth", "value": "x", "domain": ".opencode.ai", "path": "/"}], "origins": []},
+            "workspace_id": "wrk_TEST",
+            "api_key": f"sk-{email.split('@')[0]}",
+            "status": "ok",
+            "error": "",
+            "info": ["fake"],
+        }
+
+    monkeypatch.setattr("app.main.acquire_opencode_go_account", fake_acquire)
+
     with TestClient(app) as client:
         login(client)
         response = client.post(
@@ -872,6 +884,7 @@ def test_opencode_go_bulk_import_uses_email_as_name_and_masks_password(tmp_path,
     assert "first-pass" not in response.text
     first = db.get_opencode_go_account(response.json()["accounts"][0]["id"])
     assert decrypt_value(first["password_enc"], "test-key") == "first-pass"
+    assert first["workspace_id"] == "wrk_TEST"
 
 
 def test_opencode_go_bulk_import_rejects_bad_lines(tmp_path, monkeypatch):
@@ -883,6 +896,89 @@ def test_opencode_go_bulk_import_rejects_bad_lines(tmp_path, monkeypatch):
 
     assert response.status_code == 400
     assert "账号|密码" in response.json()["message"]
+
+
+def test_opencode_go_bulk_import_skips_duplicates_and_keeps_failed(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+
+    calls: list[tuple] = []
+
+    def fake_acquire(email, password, recovery_email=None):
+        calls.append((email, password, recovery_email))
+        if "fail" in email:
+            return {"storage_state": None, "workspace_id": "", "api_key": "", "status": "error", "error": "登录被拒", "info": []}
+        return {
+            "storage_state": {"cookies": [{"name": "auth", "value": "x", "domain": ".opencode.ai", "path": "/"}], "origins": []},
+            "workspace_id": "wrk_OK",
+            "api_key": "sk-good",
+            "status": "ok",
+            "error": "",
+            "info": ["fake"],
+        }
+
+    monkeypatch.setattr("app.main.acquire_opencode_go_account", fake_acquire)
+
+    with TestClient(app) as client:
+        login(client)
+        client.post(
+            "/api/opencode-go/accounts",
+            json={"name": "dup@example.com", "email": "dup@example.com", "password": "p"},
+        )
+        response = client.post(
+            "/api/opencode-go/accounts/bulk",
+            json={
+                "bulk_text": "dup@example.com|p\nnew@example.com|q\nfail@example.com|q",
+                "skip_duplicates": True,
+            },
+        )
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["count"] == 2          # new + fail 都建号
+    assert body["skipped"] == 1        # dup 跳过
+    assert body["failed"] == 1
+    # 重复账号没跑浏览器
+    assert not any(c[0] == "dup@example.com" for c in calls)
+    # 失败账号也建号并标记 invalid
+    fail_row = next(a for a in body["accounts"] if a["email"] == "fail@example.com")
+    assert fail_row["last_status"] == "invalid"
+    assert "登录被拒" in (fail_row["last_error"] or "")
+    dup_existing = db.get_opencode_go_account_by_email("dup@example.com")
+    assert decrypt_value(dup_existing["password_enc"], "test-key") == "p"
+
+
+def test_opencode_go_acquire_endpoint_writes_session_and_key(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+
+    def fake_acquire(email, password, recovery_email=None):
+        return {
+            "storage_state": {"cookies": [{"name": "auth", "value": "tok", "domain": ".opencode.ai", "path": "/"}], "origins": []},
+            "workspace_id": "wrk_ACQ",
+            "api_key": "sk-acquired",
+            "status": "ok",
+            "error": "",
+            "info": ["fake"],
+        }
+
+    monkeypatch.setattr("app.main.acquire_opencode_go_account", fake_acquire)
+
+    with TestClient(app) as client:
+        login(client)
+        created = client.post(
+            "/api/opencode-go/accounts",
+            json={"name": "u@example.com", "email": "u@example.com", "password": "pw"},
+        )
+        account_id = created.json()["id"]
+        response = client.post(f"/api/opencode-go/accounts/{account_id}/acquire")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["has_api_key"] is True
+    account = db.get_opencode_go_account(account_id)
+    assert account["workspace_id"] == "wrk_ACQ"
+    assert decrypt_value(account["api_key_enc"], "test-key") == "sk-acquired"
+    assert bool(account["storage_state_enc"]) is True
 
 
 def test_opencode_go_import_session_encrypts_and_masks_state(tmp_path, monkeypatch):

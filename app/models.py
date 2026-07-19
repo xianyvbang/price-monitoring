@@ -1211,6 +1211,17 @@ class Database:
         with self.connect() as conn:
             return conn.execute("SELECT * FROM opencode_go_accounts WHERE id = ?", (account_id,)).fetchone()
 
+    def get_opencode_go_account_by_email(self, email: str) -> Optional[sqlite3.Row]:
+        """按 Google 邮箱（即 name 列，大小写不敏感）查账号，用于批量导入判重。"""
+        normalized = str(email or "").strip().lower()
+        if not normalized:
+            return None
+        with self.connect() as conn:
+            return conn.execute(
+                "SELECT * FROM opencode_go_accounts WHERE LOWER(name) = ? LIMIT 1",
+                (normalized,),
+            ).fetchone()
+
     def upsert_opencode_go_account(self, data: dict[str, Any]) -> int:
         now = utc_now()
         email = str(data.get("email") or "").strip()
