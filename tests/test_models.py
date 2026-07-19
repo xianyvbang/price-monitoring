@@ -631,6 +631,46 @@ def test_consumption_stats_cover_24h_7d_and_14d_windows(tmp_path):
     assert stats["last_14d"] == 55
 
 
+def test_consumption_stats_batch_multiple_accounts(tmp_path):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+
+    def make_account(name: str) -> int:
+        return db.upsert_account(
+            {
+                "platform": "sub2Api",
+                "name": name,
+                "base_url": f"https://{name}.example.com",
+                "api_key": "sk-test",
+            }
+        )
+
+    first_account = make_account("batch-first")
+    second_account = make_account("batch-second")
+    empty_account = make_account("batch-empty")
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    for account_id, values in (
+        (first_account, [100, 94, 110, 107]),
+        (second_account, [50, 48.5]),
+    ):
+        for offset, remaining in enumerate(values):
+            db.update_account_result(
+                account_id,
+                {
+                    "is_valid": True,
+                    "remaining": remaining,
+                    "checked_at": (now - timedelta(hours=len(values) - offset)).isoformat(timespec="seconds"),
+                },
+            )
+
+    stats = db.get_consumption_stats_for_accounts([second_account, empty_account, first_account, first_account])
+
+    assert list(stats) == [first_account, second_account, empty_account]
+    assert stats[first_account]["last_24h"] == 9
+    assert stats[second_account]["last_24h"] == 1.5
+    assert stats[empty_account]["last_24h"] is None
+
+
 def test_consumption_stats_cover_calendar_windows(tmp_path):
     db = Database(str(tmp_path / "app.db"), "test-key")
     db.init()

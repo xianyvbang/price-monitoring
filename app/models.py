@@ -20,6 +20,7 @@ CHINA_TZ = timezone(timedelta(hours=8))
 DEFAULT_BALANCE_UNIT = "USD"
 BALANCE_HISTORY_MONTHS = 9
 BALANCE_TREND_DAYS = 3
+CONSUMPTION_QUERY_BATCH_SIZE = 500
 REQUEST_TIMEOUT_SECONDS = 60
 BALANCE_QUERY_INTERVAL_SECONDS = 5 * 60
 GROUP_RATE_QUERY_INTERVAL_SECONDS = 20 * 60
@@ -214,6 +215,8 @@ class Database:
                     last_checked_at TEXT,
                     is_enabled INTEGER NOT NULL DEFAULT 0,
                     cpa_provider_disabled INTEGER,
+                    cpa_provider_deleted INTEGER NOT NULL DEFAULT 0,
+                    cpa_deleted_at TEXT,
                     cpa_reenable_pending INTEGER NOT NULL DEFAULT 0,
                     cpa_last_action_at TEXT,
                     cpa_last_action_error TEXT,
@@ -275,6 +278,7 @@ class Database:
             self._set_default(conn, "group_rate_query_interval", str(GROUP_RATE_QUERY_INTERVAL_SECONDS))
             self._set_default(conn, "default_threshold", "5")
             self._set_default(conn, "monitor_paused", "0")
+            self._set_default(conn, "opencode_go_cpa_auto_delete_enabled", "0")
             conn.execute(
                 """
                 INSERT OR IGNORE INTO smtp_settings (id, updated_at)
@@ -483,6 +487,10 @@ class Database:
         column_names = {row["name"] for row in columns}
         if "cpa_provider_disabled" not in column_names:
             conn.execute("ALTER TABLE opencode_go_accounts ADD COLUMN cpa_provider_disabled INTEGER")
+        if "cpa_provider_deleted" not in column_names:
+            conn.execute("ALTER TABLE opencode_go_accounts ADD COLUMN cpa_provider_deleted INTEGER NOT NULL DEFAULT 0")
+        if "cpa_deleted_at" not in column_names:
+            conn.execute("ALTER TABLE opencode_go_accounts ADD COLUMN cpa_deleted_at TEXT")
         if "cpa_reenable_pending" not in column_names:
             conn.execute("ALTER TABLE opencode_go_accounts ADD COLUMN cpa_reenable_pending INTEGER NOT NULL DEFAULT 0")
         if "cpa_last_action_at" not in column_names:
@@ -655,6 +663,33 @@ class Database:
             conditions.append("is_enabled = 1")
         if visible_only:
             conditions.append("is_visible = 1")
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY platform, name"
+        with self.connect() as conn:
+            return conn.execute(query, tuple(params)).fetchall()
+
+    def list_account_summaries(
+        self,
+        platform: Optional[str] = None,
+        name_query: Optional[str] = None,
+    ) -> list[sqlite3.Row]:
+        query = """
+            SELECT
+                id, platform, name, base_url, note, recharge_url,
+                recharge_paid_amount, recharge_received_amount, key_id_enc,
+                api_key_enc, email_enc, password_enc, access_token_enc,
+                refresh_token_enc, user_id_enc, threshold, is_enabled, is_visible
+            FROM accounts
+        """
+        conditions = []
+        params: list[Any] = []
+        if platform:
+            conditions.append("platform = ?")
+            params.append(platform)
+        if name_query:
+            conditions.append("name LIKE ? ESCAPE '\\'")
+            params.append(_like_pattern(name_query))
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY platform, name"
@@ -1086,15 +1121,31 @@ class Database:
     def list_opencode_go_accounts(
         self,
         enabled_only: bool = False,
+        email: str = "",
+        weekly_usage_gte_99: bool = False,
+        monthly_usage_gte_99: bool = False,
         limit: int | None = None,
         offset: int = 0,
         sort_by: str = "name",
         sort_order: str = "asc",
+        status: str = "",
     ) -> list[sqlite3.Row]:
         query = "SELECT * FROM opencode_go_accounts"
         params: list[Any] = []
+        conditions: list[str] = []
         if enabled_only:
-            query += " WHERE is_enabled = 1"
+            conditions.append("is_enabled = 1")
+        if email:
+            escaped_email = email.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            conditions.append("name LIKE ? ESCAPE '\\' COLLATE NOCASE")
+            params.append(f"%{escaped_email}%")
+        _append_opencode_go_status_filter(conditions, params, status)
+        if weekly_usage_gte_99:
+            conditions.append(_opencode_go_usage_filter("last_weekly_usage"))
+        if monthly_usage_gte_99:
+            conditions.append(_opencode_go_usage_filter("last_monthly_usage"))
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
         sort_columns = {
             "name": "name",
             "created_at": "created_at",
@@ -1115,13 +1166,32 @@ class Database:
         with self.connect() as conn:
             return conn.execute(query, tuple(params)).fetchall()
 
-    def count_opencode_go_accounts(self, enabled_only: bool = False) -> int:
+    def count_opencode_go_accounts(
+        self,
+        enabled_only: bool = False,
+        email: str = "",
+        weekly_usage_gte_99: bool = False,
+        monthly_usage_gte_99: bool = False,
+        status: str = "",
+    ) -> int:
         query = "SELECT COUNT(*) AS count FROM opencode_go_accounts"
-        params: tuple[Any, ...] = ()
+        params: list[Any] = []
+        conditions: list[str] = []
         if enabled_only:
-            query += " WHERE is_enabled = 1"
+            conditions.append("is_enabled = 1")
+        if email:
+            escaped_email = email.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            conditions.append("name LIKE ? ESCAPE '\\' COLLATE NOCASE")
+            params.append(f"%{escaped_email}%")
+        _append_opencode_go_status_filter(conditions, params, status)
+        if weekly_usage_gte_99:
+            conditions.append(_opencode_go_usage_filter("last_weekly_usage"))
+        if monthly_usage_gte_99:
+            conditions.append(_opencode_go_usage_filter("last_monthly_usage"))
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
         with self.connect() as conn:
-            row = conn.execute(query, params).fetchone()
+            row = conn.execute(query, tuple(params)).fetchone()
             return int(row["count"] if row else 0)
 
     def latest_successful_opencode_go_checked_at(self) -> str | None:
@@ -1340,6 +1410,9 @@ class Database:
         account_id: int,
         *,
         provider_disabled: bool | None = None,
+        provider_deleted: bool | None = None,
+        deleted_at: str | None = None,
+        clear_deleted_at: bool = False,
         reenable_pending: bool | None = None,
         action_at: str | None = None,
         error: str | None = None,
@@ -1350,6 +1423,12 @@ class Database:
         if provider_disabled is not None:
             assignments.append("cpa_provider_disabled = ?")
             params.append(1 if provider_disabled else 0)
+        if provider_deleted is not None:
+            assignments.append("cpa_provider_deleted = ?")
+            params.append(1 if provider_deleted else 0)
+        if deleted_at is not None or clear_deleted_at:
+            assignments.append("cpa_deleted_at = ?")
+            params.append(deleted_at)
         if reenable_pending is not None:
             assignments.append("cpa_reenable_pending = ?")
             params.append(1 if reenable_pending else 0)
@@ -1697,17 +1776,63 @@ class Database:
         return self.get_consumption_since(account_id, _today_start_utc())
 
     def get_consumption_stats(self, account_id: int) -> dict[str, Optional[float]]:
+        self.cleanup_balance_history()
+        return self.get_consumption_stats_for_accounts([account_id]).get(account_id, {})
+
+    def get_consumption_stats_for_accounts(
+        self,
+        account_ids: Iterable[int],
+    ) -> dict[int, dict[str, Optional[float]]]:
+        normalized_ids = sorted({int(account_id) for account_id in account_ids})
+        if not normalized_ids:
+            return {}
+
         today_start = _today_start_utc()
         this_month_start = _this_month_start_utc()
         last_month_start = _last_month_start_utc()
+        periods = {
+            "today": (today_start, None),
+            "yesterday": (_yesterday_start_utc(), today_start),
+            "last_24h": (_hours_ago(24), None),
+            "last_7d": (_days_ago(7), None),
+            "last_14d": (_days_ago(14), None),
+            "this_month": (this_month_start, None),
+            "last_month": (last_month_start, this_month_start),
+        }
+        earliest_since = min(since for since, _ in periods.values())
+        records_by_account: dict[int, list[sqlite3.Row]] = {account_id: [] for account_id in normalized_ids}
+
+        with self.connect() as conn:
+            for offset in range(0, len(normalized_ids), CONSUMPTION_QUERY_BATCH_SIZE):
+                batch_ids = normalized_ids[offset : offset + CONSUMPTION_QUERY_BATCH_SIZE]
+                placeholders = ", ".join("?" for _ in batch_ids)
+                records = conn.execute(
+                    f"""
+                    SELECT account_id, remaining, checked_at
+                    FROM query_records
+                    WHERE account_id IN ({placeholders})
+                        AND is_valid = 1
+                        AND remaining IS NOT NULL
+                        AND checked_at >= ?
+                    ORDER BY account_id ASC, checked_at ASC, id ASC
+                    """,
+                    (*batch_ids, earliest_since),
+                ).fetchall()
+                for record in records:
+                    records_by_account[int(record["account_id"])].append(record)
+
         return {
-            "today": self.get_today_consumption(account_id),
-            "yesterday": self.get_consumption_between(account_id, _yesterday_start_utc(), today_start),
-            "last_24h": self.get_consumption_since(account_id, _hours_ago(24)),
-            "last_7d": self.get_consumption_since(account_id, _days_ago(7)),
-            "last_14d": self.get_consumption_since(account_id, _days_ago(14)),
-            "this_month": self.get_consumption_since(account_id, this_month_start),
-            "last_month": self.get_consumption_between(account_id, last_month_start, this_month_start),
+            account_id: {
+                key: _sum_consumption(
+                    [
+                        record
+                        for record in records
+                        if record["checked_at"] >= since and (until is None or record["checked_at"] < until)
+                    ]
+                )
+                for key, (since, until) in periods.items()
+            }
+            for account_id, records in records_by_account.items()
         }
 
     def clear_balance_history(self, account_id: int) -> None:
@@ -2098,6 +2223,31 @@ def _json_dumps(value: Any) -> str:
     import json
 
     return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _opencode_go_usage_filter(column: str) -> str:
+    if column not in {"last_weekly_usage", "last_monthly_usage"}:
+        raise ValueError("不支持的 OpenCode Go 用量筛选字段")
+    return (
+        f"CASE WHEN json_valid({column}) THEN CAST(COALESCE("
+        f"json_extract({column}, '$.usage_percent'), "
+        f"json_extract({column}, '$.usagePercent')) AS REAL) END >= 99"
+    )
+
+
+def _append_opencode_go_status_filter(conditions: list[str], params: list[Any], status: str) -> None:
+    value = str(status or "").strip().lower()
+    if value == "deleted":
+        conditions.append("cpa_provider_deleted = 1")
+        return
+    if value in {"valid", "invalid", "logged_in"}:
+        conditions.append("COALESCE(cpa_provider_deleted, 0) = 0")
+        conditions.append("last_status = ?")
+        params.append(value)
+        return
+    if value == "never":
+        conditions.append("COALESCE(cpa_provider_deleted, 0) = 0")
+        conditions.append("last_status NOT IN ('valid', 'invalid', 'logged_in')")
 
 
 def _mask_opencode_api_key(value: str) -> str:

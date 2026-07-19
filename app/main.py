@@ -27,6 +27,7 @@ from app.models import (
     monitor_group_to_dict,
     reminder_to_dict,
     row_to_dict,
+    utc_now,
 )
 from app.security import decrypt_value, encrypt_value
 from app.security import verify_password
@@ -53,6 +54,7 @@ from app.services.opencode_go import (
 from app.services.cpa_admin import (
     CPA_AUTHORIZATION_SETTING,
     CPA_SITE_URL_SETTING,
+    OPENCODE_GO_CPA_AUTO_DELETE_SETTING,
     CpaAdminClient,
     CpaAdminError,
     cpa_admin_client_from_db,
@@ -491,6 +493,43 @@ def public_account(row: Any) -> dict[str, Any]:
     return data
 
 
+def public_account_summary(row: Any) -> dict[str, Any]:
+    data = row_to_dict(row)
+    key_id_enc = data.get("key_id_enc")
+    monitor_groups = db.list_monitor_groups(int(data["id"]))
+    selected_group_ids = [
+        monitor_group_to_dict(group, db.secret_key)["group_id"]
+        for group in monitor_groups
+        if group["group_id_enc"]
+    ]
+    selected_group_id = selected_group_ids[0] if selected_group_ids else (
+        decrypt_value(key_id_enc, config.app_secret_key)
+        if data["platform"] in {"newApi", "sub2Api"} and key_id_enc
+        else None
+    )
+    return {
+        "id": data["id"],
+        "platform": data["platform"],
+        "name": data["name"],
+        "base_url": data["base_url"],
+        "note": data.get("note"),
+        "recharge_url": data.get("recharge_url"),
+        "recharge_paid_amount": float(data.get("recharge_paid_amount") or 1),
+        "recharge_received_amount": float(data.get("recharge_received_amount") or 1),
+        "threshold": data.get("threshold"),
+        "is_enabled": bool(data.get("is_enabled", True)),
+        "is_visible": bool(data.get("is_visible", True)),
+        "selected_group_id": selected_group_id,
+        "selected_group_ids": selected_group_ids,
+        "has_api_key": bool(data.get("api_key_enc")),
+        "has_email": bool(data.get("email_enc")),
+        "has_password": bool(data.get("password_enc")),
+        "has_access_token": bool(data.get("access_token_enc")),
+        "has_refresh_token": bool(data.get("refresh_token_enc")),
+        "has_user_id": bool(data.get("user_id_enc")),
+    }
+
+
 def public_opencode_go_account(row: Any, include_api_key: bool = False) -> dict[str, Any]:
     data = row_to_dict(row)
     email_enc = data.pop("email_enc", None)
@@ -531,6 +570,10 @@ def public_opencode_go_account(row: Any, include_api_key: bool = False) -> dict[
     cpa_provider_disabled = data.get("cpa_provider_disabled")
     data["cpa_provider_disabled"] = None if cpa_provider_disabled is None else bool(cpa_provider_disabled)
     data["cpaProviderDisabled"] = data["cpa_provider_disabled"]
+    data["cpa_provider_deleted"] = bool(data.get("cpa_provider_deleted"))
+    data["cpaProviderDeleted"] = data["cpa_provider_deleted"]
+    data["cpa_deleted_at"] = data.get("cpa_deleted_at")
+    data["cpaDeletedAt"] = data["cpa_deleted_at"]
     data["cpa_reenable_pending"] = bool(data.get("cpa_reenable_pending"))
     data["cpaReenablePending"] = data["cpa_reenable_pending"]
     data["cpa_last_action_at"] = data.get("cpa_last_action_at")
@@ -544,18 +587,24 @@ def opencode_go_overall_usage_summary(rows: list[Any]) -> dict[str, Any]:
     eligible_count = 0
     rolling_usage_sum = 0.0
     weekly_usage_sum = 0.0
+    monthly_usage_sum = 0.0
     for row in rows:
         data = row_to_dict(row)
+        if data.get("last_status") != "valid" or bool(data.get("cpa_provider_deleted")):
+            continue
         weekly_percent = _opencode_go_usage_percent(data.get("last_weekly_usage"))
         if weekly_percent is None or weekly_percent >= 99:
             continue
         rolling_percent = _opencode_go_usage_percent(data.get("last_rolling_usage")) or 0.0
+        monthly_percent = _opencode_go_usage_percent(data.get("last_monthly_usage")) or 0.0
         eligible_count += 1
         rolling_usage_sum += rolling_percent
         weekly_usage_sum += weekly_percent
+        monthly_usage_sum += monthly_percent
 
     rolling_average = rolling_usage_sum / eligible_count if eligible_count else None
     weekly_average = weekly_usage_sum / eligible_count if eligible_count else None
+    monthly_average = monthly_usage_sum / eligible_count if eligible_count else None
     return {
         "eligible_account_count": eligible_count,
         "eligibleAccountCount": eligible_count,
@@ -563,6 +612,8 @@ def opencode_go_overall_usage_summary(rows: list[Any]) -> dict[str, Any]:
         "overallRollingUsagePercent": rolling_average,
         "overall_weekly_usage_percent": weekly_average,
         "overallWeeklyUsagePercent": weekly_average,
+        "overall_monthly_usage_percent": monthly_average,
+        "overallMonthlyUsagePercent": monthly_average,
     }
 
 
@@ -944,6 +995,20 @@ def grouped_accounts(
     return grouped
 
 
+def grouped_account_summaries(
+    platform: str | None = None,
+    name_query: str | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    if platform in {"newApi", "sub2Api"}:
+        grouped = {platform: []}
+    else:
+        grouped = {"newApi": [], "sub2Api": []}
+        platform = None
+    for row in db.list_account_summaries(platform=platform, name_query=name_query):
+        grouped[row["platform"]].append(public_account_summary(row))
+    return grouped
+
+
 def public_dashboard_source_account(row: Any) -> dict[str, Any]:
     data = row_to_dict(row)
     data["is_enabled"] = bool(data.get("is_enabled", True))
@@ -1053,7 +1118,33 @@ def dashboard_grouped_accounts(account_filter: dict[str, Any] | None = None) -> 
 
 
 def consumption_grouped_accounts(account_filter: dict[str, Any] | None = None) -> dict[str, list[dict[str, Any]]]:
-    grouped, _ = _filtered_dashboard_accounts(account_filter, visible_only=False)
+    account_filter = account_filter or {}
+    platform_filter = account_filter.get("platform") if account_filter.get("platform") in {"newApi", "sub2Api"} else None
+    low_balance_filter = account_filter.get("low_balance") if account_filter.get("low_balance") in {"low", "normal"} else None
+    default_threshold = _optional_number(db.get_general_settings().get("default_threshold"))
+    grouped = {platform_filter: []} if platform_filter else {"newApi": [], "sub2Api": []}
+
+    for row in db.list_dashboard_accounts(platform=platform_filter, name_query=account_filter.get("name") or None):
+        account = row_to_dict(row)
+        account["is_eliminated"] = bool(account.get("is_eliminated"))
+        account_is_low = is_low_balance_account(account, default_threshold)
+        if low_balance_filter in {"low", "normal"} and account["is_eliminated"]:
+            continue
+        if low_balance_filter == "low" and not account_is_low:
+            continue
+        if low_balance_filter == "normal" and account_is_low:
+            continue
+        account["last_unit"] = str(account.get("last_unit") or DEFAULT_BALANCE_UNIT).strip() or DEFAULT_BALANCE_UNIT
+        account["recharge_paid_amount"] = float(account.get("recharge_paid_amount") or 1)
+        account["recharge_received_amount"] = float(account.get("recharge_received_amount") or 1)
+        grouped[str(account["platform"])].append(account)
+
+    accounts = [account for platform_accounts in grouped.values() for account in platform_accounts]
+    stats_by_account = db.get_consumption_stats_for_accounts(int(account["id"]) for account in accounts)
+    for account in accounts:
+        stats = stats_by_account.get(int(account["id"]), {})
+        account["consumption_stats"] = stats
+        account["actual_consumption_stats"] = actual_consumption_stats(stats, account)
     return grouped
 
 
@@ -1483,7 +1574,7 @@ async def change_password_form(request: Request):
 async def api_accounts(request: Request):
     require_user(request)
     account_filter = account_filter_from_query(request)
-    return grouped_accounts(platform=account_filter.get("platform"), name_query=account_filter.get("name") or None)
+    return grouped_account_summaries(platform=account_filter.get("platform"), name_query=account_filter.get("name") or None)
 
 
 @app.get("/api/dashboard")
@@ -1500,7 +1591,7 @@ async def api_dashboard(request: Request):
 
 
 @app.get("/api/dashboard/consumption-summary")
-async def api_dashboard_consumption_summary(request: Request):
+def api_dashboard_consumption_summary(request: Request):
     require_user(request)
     account_filter = account_filter_from_query(request)
     consumption_grouped = consumption_grouped_accounts(account_filter)
@@ -1564,18 +1655,33 @@ async def api_opencode_go_accounts(request: Request):
     require_user(request)
     page = _positive_query_int(request.query_params.get("page"), 1)
     page_size = min(_positive_query_int(request.query_params.get("page_size") or request.query_params.get("pageSize"), OPENCODE_GO_PAGE_SIZE), OPENCODE_GO_MAX_PAGE_SIZE)
+    email = str(request.query_params.get("email") or "").strip()
+    status = str(request.query_params.get("status") or "").strip().lower()
+    if status not in {"valid", "invalid", "logged_in", "never", "deleted"}:
+        status = ""
+    weekly_usage_gte_99 = _to_bool(request.query_params.get("weekly_usage_gte_99") or request.query_params.get("weeklyUsageGte99"))
+    monthly_usage_gte_99 = _to_bool(request.query_params.get("monthly_usage_gte_99") or request.query_params.get("monthlyUsageGte99"))
     sort_by = str(request.query_params.get("sort_by") or request.query_params.get("sortBy") or "created_at").strip()
     sort_order = str(request.query_params.get("sort_order") or request.query_params.get("sortOrder") or "desc").strip().lower()
     if sort_by not in {"name", "created_at", "updated_at", "last_checked_at"}:
         sort_by = "created_at"
     if sort_order not in {"asc", "desc"}:
         sort_order = "desc"
-    total = db.count_opencode_go_accounts()
+    total = db.count_opencode_go_accounts(
+        email=email,
+        status=status,
+        weekly_usage_gte_99=weekly_usage_gte_99,
+        monthly_usage_gte_99=monthly_usage_gte_99,
+    )
     total_pages = max(1, (total + page_size - 1) // page_size)
     page = min(page, total_pages)
     accounts = [
         public_opencode_go_account(row)
         for row in db.list_opencode_go_accounts(
+            email=email,
+            status=status,
+            weekly_usage_gte_99=weekly_usage_gte_99,
+            monthly_usage_gte_99=monthly_usage_gte_99,
             limit=page_size,
             offset=(page - 1) * page_size,
             sort_by=sort_by,
@@ -1620,12 +1726,15 @@ async def api_opencode_go_settings(request: Request):
     server_id = db.get_setting(OPENCODE_GO_LITE_SERVER_ID_SETTING, "")
     key_js_url = db.get_setting(OPENCODE_GO_KEY_LIST_JS_URL_SETTING, KEY_LIST_DEFAULT_JS_URL)
     key_server_id = db.get_setting(OPENCODE_GO_KEY_LIST_SERVER_ID_SETTING, "")
+    cpa_auto_delete_enabled = _opencode_go_cpa_auto_delete_enabled()
     return {
         "settings": {
             "query_interval": general_settings["query_interval"],
             "queryInterval": general_settings["query_interval"],
             "monitor_paused": general_settings["monitor_paused"],
             "monitorPaused": general_settings["monitor_paused"],
+            "cpa_auto_delete_enabled": cpa_auto_delete_enabled,
+            "cpaAutoDeleteEnabled": cpa_auto_delete_enabled,
             "lite_subscription_js_url": js_url,
             "liteSubscriptionJsUrl": js_url,
             "lite_subscription_server_id": server_id,
@@ -1675,6 +1784,7 @@ async def api_save_opencode_go_settings(request: Request):
     db.set_setting(OPENCODE_GO_KEY_LIST_SERVER_ID_SETTING, key_server_id)
     scheduler.notify_settings_changed()
     general_settings = db.get_general_settings()
+    cpa_auto_delete_enabled = _opencode_go_cpa_auto_delete_enabled()
     db.add_log("info", "opencode-go", "API 更新 OpenCode Go 用量和 API key JS 文件配置")
     return {
         "ok": True,
@@ -1683,6 +1793,8 @@ async def api_save_opencode_go_settings(request: Request):
             "queryInterval": general_settings["query_interval"],
             "monitor_paused": general_settings["monitor_paused"],
             "monitorPaused": general_settings["monitor_paused"],
+            "cpa_auto_delete_enabled": cpa_auto_delete_enabled,
+            "cpaAutoDeleteEnabled": cpa_auto_delete_enabled,
             "lite_subscription_js_url": js_url,
             "liteSubscriptionJsUrl": js_url,
             "lite_subscription_server_id": server_id,
@@ -1701,6 +1813,28 @@ async def api_save_opencode_go_settings(request: Request):
             "defaultKeyListServerId": KEY_LIST_GET_REFERENCE_ID,
             "key_list_server_instance": KEY_LIST_SERVER_INSTANCE,
             "keyListServerInstance": KEY_LIST_SERVER_INSTANCE,
+        },
+    }
+
+
+@app.post("/api/opencode-go/settings/cpa-auto-delete")
+async def api_save_opencode_go_cpa_auto_delete(request: Request):
+    require_user(request)
+    payload = await request.json()
+    enabled = payload.get("enabled") if isinstance(payload, dict) else None
+    if not isinstance(enabled, bool):
+        return JSONResponse({"ok": False, "message": "enabled 必须是布尔值"}, status_code=400)
+    db.set_setting(OPENCODE_GO_CPA_AUTO_DELETE_SETTING, "1" if enabled else "0")
+    db.add_log(
+        "warning" if enabled else "info",
+        "opencode-go",
+        f"OpenCode Go 30d CPA 测试失败自动删除已{'开启' if enabled else '关闭'}",
+    )
+    return {
+        "ok": True,
+        "settings": {
+            "cpa_auto_delete_enabled": enabled,
+            "cpaAutoDeleteEnabled": enabled,
         },
     }
 
@@ -3227,7 +3361,21 @@ def _opencode_go_account_ids_payload(payload: Any) -> list[int]:
 async def _import_opencode_go_account_to_cpa(account: Any, client: CpaAdminClient) -> dict[str, Any]:
     email = decrypt_value(account["email_enc"], db.secret_key) if account["email_enc"] else ""
     api_key = decrypt_value(account["api_key_enc"], db.secret_key) if account["api_key_enc"] else ""
-    return await client.import_opencode_go_account(email, api_key)
+    result = await client.import_opencode_go_account(email, api_key)
+    db.update_opencode_go_cpa_state(
+        int(account["id"]),
+        provider_disabled=False,
+        provider_deleted=False,
+        clear_deleted_at=True,
+        reenable_pending=False,
+        action_at=utc_now(),
+        clear_error=True,
+    )
+    return result
+
+
+def _opencode_go_cpa_auto_delete_enabled() -> bool:
+    return _to_bool(db.get_setting(OPENCODE_GO_CPA_AUTO_DELETE_SETTING, "0"))
 
 
 def _opencode_go_sub2api_name(email: str) -> str:

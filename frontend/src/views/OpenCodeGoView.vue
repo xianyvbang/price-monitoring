@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { CopyDocument, Delete, Document, Download, Edit, Link, Plus, Refresh, Setting, Timer, Upload } from "@element-plus/icons-vue";
+import { CopyDocument, Delete, Document, Download, Edit, Link, Plus, Refresh, Search, Setting, Timer, Upload } from "@element-plus/icons-vue";
 import { api } from "../api";
 import { useViewport } from "../composables/useViewport";
 import { boolValue, formatTime } from "../utils";
@@ -11,6 +11,9 @@ const loading = ref(false);
 const refreshingAll = ref(false);
 const accounts = ref([]);
 const pagination = reactive({ page: 1, page_size: 20, total: 0, total_pages: 1 });
+const emailSearch = ref("");
+const statusFilter = ref("");
+const usageFilters = ref([]);
 const selectedAccountIds = ref([]);
 const summary = ref({ account_count: 0, last_success_at: null });
 const refreshRemaining = ref(300);
@@ -23,6 +26,7 @@ const bulkText = ref("");
 const importingBulk = ref(false);
 const settingsDialogVisible = ref(false);
 const savingSettings = ref(false);
+const savingCpaAutoDelete = ref(false);
 const opencodeSettings = ref({
   lite_subscription_js_url: "",
   lite_subscription_server_id: "",
@@ -34,7 +38,8 @@ const opencodeSettings = ref({
   default_key_list_server_id: "",
   key_list_server_instance: "server-fn:2",
   query_interval: 300,
-  monitor_paused: false
+  monitor_paused: false,
+  cpa_auto_delete_enabled: false
 });
 const settingsForm = reactive({ lite_subscription_js_url: "", key_list_js_url: "" });
 const sessionDialogVisible = ref(false);
@@ -74,6 +79,7 @@ const lastSuccessAt = computed(() => summary.value.last_success_at ?? summary.va
 const eligibleAccountCount = computed(() => summary.value.eligible_account_count ?? summary.value.eligibleAccountCount ?? 0);
 const overallRollingUsage = computed(() => usagePercentWindow(summary.value.overall_rolling_usage_percent ?? summary.value.overallRollingUsagePercent));
 const overallWeeklyUsage = computed(() => usagePercentWindow(summary.value.overall_weekly_usage_percent ?? summary.value.overallWeeklyUsagePercent));
+const overallMonthlyUsage = computed(() => usagePercentWindow(summary.value.overall_monthly_usage_percent ?? summary.value.overallMonthlyUsagePercent));
 const selectedAccounts = computed(() => accounts.value.filter((account) => selectedAccountIds.value.includes(account.id)));
 const selectedImportableAccounts = computed(() => selectedAccounts.value.filter(hasApiKey));
 const selectedImportCount = computed(() => selectedImportableAccounts.value.length);
@@ -89,6 +95,7 @@ const keyListServerId = computed(() => opencodeSettings.value.key_list_server_id
 const keyListServerInstance = computed(() => opencodeSettings.value.key_list_server_instance || opencodeSettings.value.keyListServerInstance || "server-fn:2");
 const queryInterval = computed(() => normalizedQueryInterval(opencodeSettings.value.query_interval ?? opencodeSettings.value.queryInterval));
 const monitorPaused = computed(() => boolValue(opencodeSettings.value.monitor_paused ?? opencodeSettings.value.monitorPaused));
+const cpaAutoDeleteEnabled = computed(() => boolValue(opencodeSettings.value.cpa_auto_delete_enabled ?? opencodeSettings.value.cpaAutoDeleteEnabled));
 const sub2ApiImportName = computed(() => {
   const email = String(sub2ApiImportAccount.value?.email || "").trim();
   return email ? `opencode-${email}` : "-";
@@ -117,6 +124,10 @@ async function loadAccounts() {
     const payload = await api.opencodeGoAccounts({
       page: pagination.page,
       page_size: pagination.page_size,
+      email: emailSearch.value.trim(),
+      status: statusFilter.value,
+      weekly_usage_gte_99: usageFilters.value.includes("weekly"),
+      monthly_usage_gte_99: usageFilters.value.includes("monthly"),
       sort_by: "created_at",
       sort_order: "desc"
     });
@@ -201,6 +212,30 @@ async function saveSettings() {
     ElMessage.error(error.message || "保存配置失败");
   } finally {
     savingSettings.value = false;
+  }
+}
+
+async function toggleCpaAutoDelete(enabled) {
+  if (enabled) {
+    try {
+      await ElMessageBox.confirm(
+        "开启后，30d 用量达到 99% 且 CPA 全部 API key 测试报错时，将直接删除对应 provider。该操作不可撤销。",
+        "开启 CPA 自动删除",
+        { type: "warning", confirmButtonText: "确认开启", cancelButtonText: "取消" }
+      );
+    } catch {
+      return;
+    }
+  }
+  savingCpaAutoDelete.value = true;
+  try {
+    const response = await api.setOpencodeGoCpaAutoDelete(Boolean(enabled));
+    opencodeSettings.value = { ...opencodeSettings.value, ...(response.settings || {}) };
+    ElMessage.success(`CPA 自动删除已${enabled ? "开启" : "关闭"}`);
+  } catch (error) {
+    ElMessage.error(error.message || "保存 CPA 自动删除设置失败");
+  } finally {
+    savingCpaAutoDelete.value = false;
   }
 }
 
@@ -431,6 +466,11 @@ function handlePageSizeChange(pageSize) {
   loadAccounts();
 }
 
+function applyFilters() {
+  pagination.page = 1;
+  loadAccounts();
+}
+
 async function toggleEnabled(account) {
   try {
     const response = await api.setOpencodeGoEnabled(account.id, !boolValue(account.is_enabled));
@@ -591,6 +631,7 @@ async function importToCpa(account) {
   try {
     const payload = await api.importOpencodeGoToCpa(account.id);
     const modelCount = payload.model_count ?? payload.modelCount ?? (payload.models || []).length;
+    await loadAccounts();
     ElMessage.success(`已导入 CPA，模型 ${modelCount} 个`);
   } catch (error) {
     ElMessage.error(error.message || "导入 CPA 失败");
@@ -616,6 +657,7 @@ async function bulkImportToCpa() {
     const count = payload.count || 0;
     const failedCount = payload.failed_count ?? payload.failedCount ?? (payload.failed || []).length;
     selectedAccountIds.value = [];
+    await loadAccounts();
     if (failedCount > 0) {
       ElMessage.warning(`已导入 CPA ${count} 个，失败 ${failedCount} 个`);
     } else {
@@ -737,12 +779,14 @@ function importLogLevelType(level) {
 }
 
 function statusType(account) {
+  if (boolValue(account.cpa_provider_deleted ?? account.cpaProviderDeleted)) return "danger";
   if (account.last_status === "valid" || account.last_status === "logged_in") return "success";
   if (account.last_status === "invalid") return "danger";
   return "info";
 }
 
 function statusText(account) {
+  if (boolValue(account.cpa_provider_deleted ?? account.cpaProviderDeleted)) return "已删除";
   if (account.last_status === "logged_in") return "已登录";
   if (account.last_status === "valid") return "正常";
   if (account.last_status === "invalid") return "失败";
@@ -921,7 +965,14 @@ onBeforeUnmount(() => {
         </div>
         <el-progress :percentage="usagePercent(overallWeeklyUsage)" :stroke-width="8" :color="usageColor(overallWeeklyUsage)" :show-text="false" />
       </div>
-      <div class="overall-usage-note">按 {{ eligibleAccountCount }} 个 7d&lt;99% 账号统计</div>
+      <div class="overall-usage-card">
+        <div>
+          <span>整体30d</span>
+          <strong>{{ usageLabel(overallMonthlyUsage) }}</strong>
+        </div>
+        <el-progress :percentage="usagePercent(overallMonthlyUsage)" :stroke-width="8" :color="usageColor(overallMonthlyUsage)" :show-text="false" />
+      </div>
+      <div class="overall-usage-note">按 {{ eligibleAccountCount }} 个正常且 7d&lt;99% 账号统计</div>
     </div>
 
     <div class="opencode-config-strip">
@@ -955,6 +1006,36 @@ onBeforeUnmount(() => {
       <div class="panel-head">
         <h2>Go 用量</h2>
         <div class="panel-actions">
+          <div class="cpa-auto-delete-control">
+            <span>30d 测试失败自动删除 CPA</span>
+            <el-switch
+              :model-value="cpaAutoDeleteEnabled"
+              :loading="savingCpaAutoDelete"
+              @change="toggleCpaAutoDelete"
+            />
+          </div>
+          <el-input
+            v-model="emailSearch"
+            size="small"
+            clearable
+            style="width: 220px"
+            placeholder="模糊搜索邮箱"
+            @clear="applyFilters"
+            @keyup.enter="applyFilters"
+          />
+          <el-select v-model="statusFilter" size="small" clearable style="width: 140px" placeholder="全部状态" @change="applyFilters">
+            <el-option label="全部状态" value="" />
+            <el-option label="正常" value="valid" />
+            <el-option label="失败" value="invalid" />
+            <el-option label="已登录" value="logged_in" />
+            <el-option label="未查询" value="never" />
+            <el-option label="已删除" value="deleted" />
+          </el-select>
+          <el-checkbox-group v-model="usageFilters" size="small" @change="applyFilters">
+            <el-checkbox value="weekly">7d ≥ 99%</el-checkbox>
+            <el-checkbox value="monthly">30d ≥ 99%</el-checkbox>
+          </el-checkbox-group>
+          <el-button size="small" :icon="Search" @click="applyFilters">搜索</el-button>
           <el-button size="small" :icon="Upload" :loading="sub2ApiBulkImporting" :disabled="!selectedImportCount" @click="openBulkSub2ApiImport">批量导入 Sub2API</el-button>
           <el-button size="small" :icon="Upload" :loading="cpaBulkImporting" :disabled="!selectedImportCount" @click="bulkImportToCpa">批量导入 CPA</el-button>
           <el-tag>{{ selectedImportCount }} 已选</el-tag>
