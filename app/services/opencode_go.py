@@ -246,10 +246,13 @@ async def apply_referral_reward(
     reference_id: str,
     args: list[Any],
     instances: tuple[str, ...] = REFERRAL_ACTION_SERVER_INSTANCES,
-) -> Any:
-    """POST 领取邀请奖励。action 的 server-instance 未知，按列表顺序回退尝试。"""
+) -> tuple[int, Any]:
+    """POST 领取邀请奖励。返回 (status_code, parsed/None)。
+    action 的 server-instance 未知，按列表顺序回退尝试；非 2xx 响应也返回（供调用方判定 200）。
+    """
     body = _serialize_server_args(args)
     errors: list[str] = []
+    last_status = 0
     for instance in instances:
         try:
             response = await client.post(
@@ -262,7 +265,14 @@ async def apply_referral_reward(
                 },
                 json=body,
             )
-            return _parse_server_reference_response(response)
+            last_status = response.status_code
+            parsed: Any = None
+            if response.status_code < 400:
+                try:
+                    parsed = _parse_server_reference_response(response)
+                except Exception:
+                    parsed = None
+            return last_status, parsed
         except Exception as exc:
             errors.append(f"{instance}: {exc}")
     raise RuntimeError("OpenCode 领取邀请奖励接口不可用: " + "; ".join(errors))
@@ -863,22 +873,49 @@ async def claim_referral_reward_for_account(
                 return _referral_invalid(
                     "未找到可领取的邀请奖励（缺少 reward id）；该账号可能没有未领取的奖励"
                 )
-            result = await apply_referral_reward(client, action_reference_id, action_args)
-            # 3) 解析领取结果：再看一次 referral 状态，或宽松判定返回非空即成功
-            reparse = parse_referral_payload(result) if result is not None else {"has_reward": None, "claimed": None, "reward": {}}
-            claimed = reparse.get("claimed")
-            if claimed is None:
-                # 返回非空 data 视为成功
-                unwrapped = _unwrap_data(result)
-                claimed = bool(unwrapped) or bool(reparse.get("reward"))
-            _log(log, "info", "opencode-go", f"OpenCode Go 领取邀请奖励结果 claimed={claimed}")
+            claim_status, result = await apply_referral_reward(client, action_reference_id, action_args)
+            # 领取成功判定：HTTP 200 即成功
+            claimed = claim_status == 200
+            reparse = parse_referral_payload(result) if result is not None else {"has_reward": None, "claimed": None, "reward": {}, "rewards": []}
+            _log(log, "info", "opencode-go", f"OpenCode Go 领取邀请奖励结果 http={claim_status} claimed={claimed}")
+            if not claimed:
+                return {
+                    "is_valid": False,
+                    "claimed": False,
+                    "message": f"领取失败（HTTP {claim_status}）" if claim_status else "领取失败",
+                    "reward": reparse.get("reward") or reward_info,
+                    "rewards": reparse.get("rewards") or reward_info_full.get("rewards"),
+                    "raw": _safe_referral_raw(result),
+                }
+            # 3) 领取成功后，再查一次 referral 状态，刷新 DB 缓存
+            refreshed_payload = None
+            refresh_errors: list[str] = []
+            for reference_id in query_reference_ids:
+                try:
+                    refreshed_payload = await query_referral(client, reference_id, workspace_id)
+                    break
+                except Exception as exc:
+                    refresh_errors.append(f"{reference_id[:8]}: {exc}")
+            if refreshed_payload is not None:
+                refreshed = parse_referral_payload(refreshed_payload)
+                _log(log, "info", "opencode-go", "OpenCode Go 领取成功后已重新查询邀请奖励状态")
+                return {
+                    "is_valid": True,
+                    "claimed": True,
+                    "message": "领取成功",
+                    "reward": refreshed.get("reward") or reparse.get("reward") or reward_info,
+                    "rewards": refreshed.get("rewards") or reparse.get("rewards") or reward_info_full.get("rewards"),
+                    "raw": _safe_referral_raw(refreshed_payload),
+                    "checked_at": utc_now(),
+                }
             return {
                 "is_valid": True,
-                "claimed": bool(claimed),
-                "message": "领取成功" if claimed else "已提交但未能确认是否领取成功",
+                "claimed": True,
+                "message": "领取成功（重新查询状态失败: " + "; ".join(refresh_errors[:2]) + "）" if refresh_errors else "领取成功",
                 "reward": reparse.get("reward") or reward_info,
                 "rewards": reparse.get("rewards") or reward_info_full.get("rewards"),
                 "raw": _safe_referral_raw(result),
+                "checked_at": utc_now(),
             }
     except Exception as exc:
         return _referral_invalid(_friendly_referral_error(exc))

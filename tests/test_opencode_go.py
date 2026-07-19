@@ -2387,8 +2387,44 @@ def test_opencode_go_referral_claim_endpoint(tmp_path, monkeypatch):
     assert account["referral_claimed"] == 1
 
 
+def test_opencode_go_referral_cache_endpoint_reads_db(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    SENT = {"is_valid": True, "has_reward": True, "claimed": False, "reward": {"referralCode": "X", "status": "available", "amount": 100},
+            "rewards": [{"id": "ref_x", "status": "available", "amount": 100}], "raw": {}, "checked_at": "2026-01-01T00:00:00Z"}
+
+    async def fake_query(account, secret_key, timeout, log, referral_query_js_url=None, referral_query_server_id=None):
+        return SENT
+
+    monkeypatch.setattr("app.main.query_referral_for_account", fake_query)
+
+    with TestClient(app) as client:
+        login(client)
+        created = client.post("/api/opencode-go/accounts", json={"name": "c@example.com", "email": "c@example.com", "password": "pw"})
+        account_id = created.json()["id"]
+        # POST 查询写入 DB 缓存
+        client.post(f"/api/opencode-go/accounts/{account_id}/referral")
+        # GET 读缓存，不再触发查询
+        resp = client.get(f"/api/opencode-go/accounts/{account_id}/referral")
+
+    body = resp.json()
+    assert resp.status_code == 200
+    assert body["referral"]["has_reward"] is True
+    assert body["referral"]["claimed"] is False
+    assert body["referral"]["rewards"][0]["status"] == "available"
+    assert body["referral"]["reward"]["status"] == "available"
+
+
 def test_opencode_go_settings_roundtrip_referral(tmp_path, monkeypatch):
     setup_test_db(tmp_path, monkeypatch)
+
+    async def fake_fetch_lite(js_url, timeout=15):
+        return "deadbeef" * 8
+
+    async def fake_fetch_key(js_url, timeout=15):
+        return "cafecafe" * 8
+
+    monkeypatch.setattr("app.main.fetch_lite_subscription_reference_id", fake_fetch_lite)
+    monkeypatch.setattr("app.main.fetch_key_list_reference_id", fake_fetch_key)
 
     with TestClient(app) as client:
         login(client)
@@ -2407,3 +2443,194 @@ def test_opencode_go_settings_roundtrip_referral(tmp_path, monkeypatch):
         # GET 回显
         got = client.get("/api/opencode-go/settings").json()["settings"]
         assert got["referral_query_server_id"] == "2a0b2fef5fd2ec9eff0cb5d4955e4ada4eece21fac85591ed4c09630168d4844"
+
+
+def test_opencode_go_accounts_filter_by_referral_status(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    unclaimed_id = db.upsert_opencode_go_account({"email": "unclaimed@example.com", "password": "secret-password"})
+    claimed_id = db.upsert_opencode_go_account({"email": "claimed@example.com", "password": "secret-password"})
+    none_id = db.upsert_opencode_go_account({"email": "none@example.com", "password": "secret-password"})
+    unknown_id = db.upsert_opencode_go_account({"email": "unknown@example.com", "password": "secret-password"})
+    db.update_opencode_go_referral(unclaimed_id, True, False, {"referralCode": "U", "status": "available"}, referral_json=[{"id": "ref_u", "status": "available"}])
+    db.update_opencode_go_referral(claimed_id, True, True, {"referralCode": "C", "status": "applied"}, referral_json=[{"id": "ref_c", "status": "applied"}])
+    db.update_opencode_go_referral(none_id, False, None, {"referralCode": "N"}, referral_json=[])
+
+    with TestClient(app) as client:
+        login(client)
+        unclaimed = client.get("/api/opencode-go/accounts", params={"referral_status": "unclaimed"})
+        claimed = client.get("/api/opencode-go/accounts", params={"referral_status": "claimed"})
+        none = client.get("/api/opencode-go/accounts", params={"referral_status": "none"})
+        has = client.get("/api/opencode-go/accounts", params={"referral_status": "has"})
+
+    def emails(resp):
+        payload = resp.json()
+        return {account["email"] for account in payload["accounts"]}
+
+    assert resp_ok(unclaimed, 200)
+    assert emails(unclaimed) == {"unclaimed@example.com"}
+    assert resp_ok(claimed, 200)
+    assert emails(claimed) == {"claimed@example.com"}
+    assert resp_ok(none, 200)
+    assert emails(none) == {"none@example.com"}
+    assert resp_ok(has, 200)
+    assert emails(has) == {"unclaimed@example.com", "claimed@example.com"}
+
+
+def resp_ok(response, status=200):
+    return response.status_code == status
+
+
+@pytest.mark.asyncio
+async def test_opencode_go_scheduler_auto_claims_referral_on_threshold(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    account_id = db.upsert_opencode_go_account({"email": "autoacclaim@example.com", "password": "secret-password", "is_enabled": True})
+
+    async def fake_refresh(*args, **kwargs):
+        return {
+            "is_valid": True,
+            "rolling_usage": {"usagePercent": 60},  # >= 50 → 自动领取
+            "weekly_usage": {"usagePercent": 10},
+            "monthly_usage": {"usagePercent": 5},
+        }
+
+    async def fake_query(account, secret_key, timeout, log, referral_query_js_url=None, referral_query_server_id=None):
+        return {"is_valid": True, "has_reward": True, "claimed": False,
+                "reward": {"referralCode": "X", "status": "available", "id": "ref_x"},
+                "rewards": [{"id": "ref_x", "status": "available", "amount": 500}], "raw": {}, "checked_at": "2026-01-01T00:00:00Z"}
+
+    claim_calls = []
+
+    async def fake_claim(account, secret_key, timeout, log, referral_query_js_url=None, referral_query_server_id=None, referral_action_server_id=None):
+        claim_calls.append(account["id"])
+        return {"is_valid": True, "claimed": True, "message": "领取成功",
+                "reward": {"referralCode": "X", "status": "applied", "id": "ref_x"},
+                "rewards": [{"id": "ref_x", "status": "applied", "amount": 500}], "raw": {}}
+
+    monkeypatch.setattr("app.services.scheduler.refresh_opencode_go_account", fake_refresh)
+    monkeypatch.setattr("app.services.scheduler.query_referral_for_account", fake_query)
+    monkeypatch.setattr("app.services.scheduler.claim_referral_reward_for_account", fake_claim)
+
+    await query_opencode_go_for_account(db, account_id)
+    assert claim_calls == [account_id]
+    account = db.get_opencode_go_account(account_id)
+    assert account["referral_claimed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_opencode_go_scheduler_skips_auto_claim_below_threshold(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    account_id = db.upsert_opencode_go_account({"email": "low@example.com", "password": "secret-password", "is_enabled": True})
+
+    async def fake_refresh(*args, **kwargs):
+        return {"is_valid": True, "rolling_usage": {"usagePercent": 10},
+                "weekly_usage": {"usagePercent": 5}, "monthly_usage": {"usagePercent": 3}}
+
+    async def fake_query(account, secret_key, timeout, log, referral_query_js_url=None, referral_query_server_id=None):
+        return {"is_valid": True, "has_reward": True, "claimed": False,
+                "reward": {"referralCode": "Y"}, "rewards": [{"id": "ref_y", "status": "available"}], "raw": {}}
+
+    claim_calls = []
+
+    async def fake_claim(account, secret_key, timeout, log, **kwargs):
+        claim_calls.append(account["id"])
+        return {"is_valid": True, "claimed": True, "message": "ok", "reward": {}, "rewards": []}
+
+    monkeypatch.setattr("app.services.scheduler.refresh_opencode_go_account", fake_refresh)
+    monkeypatch.setattr("app.services.scheduler.query_referral_for_account", fake_query)
+    monkeypatch.setattr("app.services.scheduler.claim_referral_reward_for_account", fake_claim)
+    await query_opencode_go_for_account(db, account_id)
+    assert claim_calls == []
+
+
+def test_opencode_go_referral_claim_batch_endpoint(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+
+    async def fake_claim(account, secret_key, timeout, log, referral_query_js_url=None, referral_query_server_id=None, referral_action_server_id=None):
+        return {"is_valid": True, "claimed": True, "message": "领取成功",
+                "reward": {"referralCode": "X", "status": "applied", "id": "ref_x"},
+                "rewards": [{"id": "ref_x", "status": "applied", "amount": 500}], "raw": {}}
+
+    monkeypatch.setattr("app.main.claim_referral_reward_for_account", fake_claim)
+
+    with TestClient(app) as client:
+        login(client)
+        unclaimed_id = db.upsert_opencode_go_account({"email": "batch1@example.com", "password": "pw"})
+        claimed_id = db.upsert_opencode_go_account({"email": "batch2@example.com", "password": "pw"})
+        db.update_opencode_go_referral(unclaimed_id, True, False, {"status": "available"}, referral_json=[{"id": "ref_a", "status": "available"}])
+        db.update_opencode_go_referral(claimed_id, True, True, {"status": "applied"}, referral_json=[{"id": "ref_b", "status": "applied"}])
+        response = client.post("/api/opencode-go/referral/claim-batch", json={"account_ids": [unclaimed_id, claimed_id]})
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["success"] == 1
+    assert body["skipped"] == 1
+    assert body["failed"] == 0
+    by_email = {item.get("account", {}).get("email"): item for item in body["results"]}
+    assert by_email["batch1@example.com"]["ok"] is True
+    assert by_email["batch2@example.com"]["skipped"] is True
+    assert db.get_opencode_go_account(unclaimed_id)["referral_claimed"] == 1
+
+
+def test_opencode_go_cpa_status_lists_missing_accounts(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    configure_cpa(db)
+    import_id = db.upsert_opencode_go_account(
+        {"email": "imported@example.com", "password": "pw", "api_key": "sk-imported"}
+    )
+    missing_id = db.upsert_opencode_go_account(
+        {"email": "missing@example.com", "password": "pw", "api_key": "sk-missing"}
+    )
+    nokey_id = db.upsert_opencode_go_account({"email": "nokey@example.com", "password": "pw"})
+    DummySub2ApiClient.requests = []
+    DummySub2ApiClient.responses = [
+        DummySub2ApiResponse(
+            {
+                "openai-compatibility": [
+                    {"name": "IMPORTED@example.com"},
+                    {"name": "other@example.com", "base-url": "https://other.example/v1"},
+                ]
+            }
+        ),
+    ]
+    monkeypatch.setattr("app.services.cpa_admin.httpx.AsyncClient", DummySub2ApiClient)
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.get("/api/opencode-go/cpa-status")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["total"] == 3
+    emails_missing = {account["email"] for account in body["missing"]}
+    assert emails_missing == {"missing@example.com", "nokey@example.com"}
+    # importable 子集必须排除没有 API key 的账号
+    emails_importable = {account["email"] for account in body["importable"]}
+    assert emails_importable == {"missing@example.com"}
+    # 大小写不敏感对比：imported@example.com 即使 CPA 里写成大写也算已导入
+    assert "imported@example.com" not in emails_missing
+    # 拉取 provider 请求只发了一次（GET /openai-compatibility）
+    list_requests = [req for req in DummySub2ApiClient.requests if req["url"] == "https://cpa.example/v0/management/openai-compatibility"]
+    assert len(list_requests) == 1
+    assert list_requests[0]["method"] == "GET"
+    _ = (import_id, missing_id, nokey_id)
+
+
+def test_opencode_go_cpa_status_requires_cpa_config(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    # 未配置 CPA 站点地址/Authorization
+    with TestClient(app) as client:
+        login(client)
+        response = client.get("/api/opencode-go/cpa-status")
+    assert response.status_code in (400, 503)
+
+
+def test_normalize_model_ids_filters_grok():
+    from app.services.cpa_admin import _normalize_model_ids
+
+    models = _normalize_model_ids({"data": ["gpt-5", "grok-4", "Grok-3-mini", "claude-opus", "GPT-5"]})
+    # grok 模型（大小写不敏感）被移除，其余保留
+    assert not any("grok" in m.lower() for m in models)
+    assert "grok-4" not in models
+    assert "Grok-3-mini" not in models
+    assert "gpt-5" in models and "claude-opus" in models

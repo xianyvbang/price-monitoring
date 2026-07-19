@@ -15,9 +15,13 @@ from app.services.cpa_admin import (
     cpa_admin_client_from_db,
 )
 from app.services.emailer import build_group_rate_change_email, build_reminder_email, send_email
-from app.services.opencode_go import query_referral_for_account, refresh_opencode_go_account
+from app.services.opencode_go import claim_referral_reward_for_account, query_referral_for_account, refresh_opencode_go_account
 
 OPENCODE_GO_CPA_USAGE_THRESHOLD = 99.0
+# 自动领取邀请奖励阈值：满足任一则刷新时自动领取
+OPENCODE_GO_REFERRAL_AUTOCLAIM_5H = 50.0
+OPENCODE_GO_REFERRAL_AUTOCLAIM_7D = 25.0
+OPENCODE_GO_REFERRAL_AUTOCLAIM_30D = 20.0
 
 
 class BalanceScheduler:
@@ -336,6 +340,7 @@ async def query_opencode_go_for_account(db: Database, account_id: int, *, respec
         db.add_log("info", "opencode-go", f"{account['name']} OpenCode Go 刷新成功")
         await sync_opencode_go_cpa_state(db, account, result)
         # 随用量刷新一起查询邀请奖励状态（失败不影响主刷新）
+        referral = None
         try:
             referral = await query_referral_for_account(
                 account,
@@ -351,9 +356,51 @@ async def query_opencode_go_for_account(db: Database, account_id: int, *, respec
                 referral.get("claimed"),
                 referral.get("reward") or None,
                 referral.get("invalid_message") if not referral.get("is_valid") else None,
+                referral_json=referral.get("rewards") or None,
             )
         except Exception as exc:
             db.add_log("warning", "opencode-go", f"{account['name']} OpenCode Go 邀请奖励刷新失败: {exc}")
+        # 自动领取：用量达阈值且有可领（has_reward=1 且 claimed=0）时顺带领取
+        if referral and referral.get("is_valid") and referral.get("has_reward") is True and referral.get("claimed") is False:
+            rolling = _usage_percent(result.get("rolling_usage") or result.get("rollingUsage"))
+            weekly = _usage_percent(result.get("weekly_usage") or result.get("weeklyUsage"))
+            monthly = _usage_percent(result.get("monthly_usage") or result.get("monthlyUsage"))
+            hit_5h = rolling is not None and rolling >= OPENCODE_GO_REFERRAL_AUTOCLAIM_5H
+            hit_7d = weekly is not None and weekly >= OPENCODE_GO_REFERRAL_AUTOCLAIM_7D
+            hit_30d = monthly is not None and monthly >= OPENCODE_GO_REFERRAL_AUTOCLAIM_30D
+            if hit_5h or hit_7d or hit_30d:
+                usage_text = _usage_windows_text(rolling, weekly, monthly)
+                db.add_log(
+                    "info",
+                    "opencode-go",
+                    f"{account['name']} OpenCode Go 用量 {usage_text} 达自动领取阈值，开始领取邀请奖励",
+                )
+                try:
+                    claim = await claim_referral_reward_for_account(
+                        account,
+                        db.secret_key,
+                        settings["request_timeout"],
+                        db.add_log,
+                        referral_query_js_url=db.get_setting("opencode_go_referral_query_js_url", ""),
+                        referral_query_server_id=db.get_setting("opencode_go_referral_query_server_id", ""),
+                        referral_action_server_id=db.get_setting("opencode_go_referral_action_server_id", ""),
+                    )
+                    db.update_opencode_go_referral(
+                        account_id,
+                        None,
+                        claim.get("claimed"),
+                        claim.get("reward") or None,
+                        claim.get("invalid_message") if not claim.get("is_valid") else None,
+                        referral_json=claim.get("rewards") or None,
+                    )
+                    if claim.get("is_valid") and claim.get("claimed"):
+                        db.add_log("info", "opencode-go", f"{account['name']} OpenCode Go 自动领取邀请奖励成功，领取后用量 {usage_text}")
+                    elif claim.get("is_valid"):
+                        db.add_log("info", "opencode-go", f"{account['name']} OpenCode Go 自动领取已提交但未能确认，{claim.get('message', '')}")
+                    else:
+                        db.add_log("warning", "opencode-go", f"{account['name']} OpenCode Go 自动领取邀请奖励失败: {claim.get('invalid_message') or claim.get('message') or '未知错误'}")
+                except Exception as exc:
+                    db.add_log("warning", "opencode-go", f"{account['name']} OpenCode Go 自动领取邀请奖励异常: {exc}")
     else:
         db.add_log("error", "opencode-go", f"{account['name']} OpenCode Go 刷新失败: {result.get('invalid_message') or '未知错误'}")
     return result

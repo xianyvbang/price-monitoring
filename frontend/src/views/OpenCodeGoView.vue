@@ -14,6 +14,8 @@ const pagination = reactive({ page: 1, page_size: 20, total: 0, total_pages: 1 }
 const emailSearch = ref("");
 const statusFilter = ref("");
 const usageFilters = ref([]);
+const referralStatusFilter = ref("");
+const batchClaiming = ref(false);
 const selectedAccountIds = ref([]);
 const summary = ref({ account_count: 0, last_success_at: null });
 const refreshRemaining = ref(300);
@@ -82,6 +84,9 @@ const sub2ApiBulkSelectedGroupIds = ref([]);
 const sub2ApiBulkImporting = ref(false);
 const cpaImportingId = ref(null);
 const cpaBulkImporting = ref(false);
+const cpaMissingIds = ref([]);
+const cpaMissingFilterOn = ref(false);
+const cpaMissingLoading = ref(false);
 const formRef = ref(null);
 const form = reactive(defaultForm());
 const { isMobile } = useViewport();
@@ -95,6 +100,12 @@ const overallMonthlyUsage = computed(() => usagePercentWindow(summary.value.over
 const selectedAccounts = computed(() => accounts.value.filter((account) => selectedAccountIds.value.includes(account.id)));
 const selectedImportableAccounts = computed(() => selectedAccounts.value.filter(hasApiKey));
 const selectedImportCount = computed(() => selectedImportableAccounts.value.length);
+const displayedAccounts = computed(() => {
+  if (!cpaMissingFilterOn.value || !cpaMissingIds.value.length) {
+    return accounts.value;
+  }
+  return accounts.value.filter((account) => cpaMissingIds.value.includes(account.id));
+});
 const bulkPreviewCount = computed(() => bulkText.value.split(/\r?\n/).filter((line) => line.trim()).length);
 const liteSubscriptionJsUrl = computed(() => opencodeSettings.value.lite_subscription_js_url || opencodeSettings.value.liteSubscriptionJsUrl || "");
 const liteSubscriptionServerId = computed(() => opencodeSettings.value.lite_subscription_server_id || opencodeSettings.value.liteSubscriptionServerId || "");
@@ -141,6 +152,7 @@ async function loadAccounts() {
       page_size: pagination.page_size,
       email: emailSearch.value.trim(),
       status: statusFilter.value,
+      referral_status: referralStatusFilter.value,
       weekly_usage_gte_99: usageFilters.value.includes("weekly"),
       monthly_usage_gte_99: usageFilters.value.includes("monthly"),
       sort_by: "created_at",
@@ -563,17 +575,19 @@ const referralData = ref({ has_reward: null, claimed: null, reward: {}, rewards:
 
 function openReferralDialog(account) {
   referralAccount.value = account;
+  // 直接从 DB 缓存读取，不每次都查询
   referralData.value = {
     has_reward: account.referral_has_reward ?? account.referralHasReward ?? null,
     claimed: account.referral_claimed ?? account.referralClaimed ?? null,
-    reward: {},
-    rewards: [],
+    reward: account.referral_reward ?? account.referralReward ?? {},
+    rewards: account.referral_rewards ?? account.referralRewards ?? [],
   };
   referralDialogVisible.value = true;
-  loadReferral(account);
 }
 
 async function loadReferral(account) {
+  // 主动重新查询（「重新查询」按钮 / 领取后刷新）
+  if (!account) return;
   referralLoading.value = true;
   try {
     const response = await api.opencodeGoReferral(account.id);
@@ -636,6 +650,42 @@ async function claimReferralReward() {
     ElMessage.error(error.message || "领取失败");
   } finally {
     referralClaiming.value = false;
+  }
+}
+
+async function batchClaimReferral() {
+  // 领取当前列表中「有可领」（has_reward=1 且 claimed=0）的账号；否则提示无可领
+  const eligible = accounts.value.filter((row) => {
+    const has = row.referral_has_reward ?? row.referralHasReward;
+    const claimed = row.referral_claimed ?? row.referralClaimed;
+    return has === true && !(claimed === true);
+  });
+  if (!eligible.length) {
+    ElMessage.warning("当前列表没有可领取邀请奖励的账号（需「有可领」状态，先查询刷新邀请奖励）");
+    return;
+  }
+  await ElMessageBox.confirm(`确定对 ${eligible.length} 个「有可领」账号批量领取邀请奖励吗？`, "批量领取邀请奖励", { type: "warning" });
+  batchClaiming.value = true;
+  try {
+    const response = await api.batchClaimOpencodeGoReferral(eligible.map((row) => row.id));
+    const items = response.results || [];
+    for (const item of items) {
+      if (item.account) {
+        upsertLocal(item.account);
+      }
+    }
+    ElMessage.success(`批量领取完成：成功 ${response.success ?? 0}，跳过 ${response.skipped ?? 0}，失败 ${response.failed ?? 0}`);
+  } catch (error) {
+    if (Array.isArray(error.payload?.results)) {
+      for (const item of error.payload.results) {
+        if (item.account) {
+          upsertLocal(item.account);
+        }
+      }
+    }
+    ElMessage.error(error.message || "批量领取失败");
+  } finally {
+    batchClaiming.value = false;
   }
 }
 
@@ -829,6 +879,35 @@ async function copyApiKey(account) {
   } catch (error) {
     ElMessage.error(error.message || "复制失败");
   }
+}
+
+async function loadCpaMissingStatus() {
+  cpaMissingLoading.value = true;
+  try {
+    const payload = await api.opencodeGoCpaStatus();
+    cpaMissingIds.value = (payload.missing || []).map((account) => account.id);
+    const importableCount = payload.importable_count ?? payload.importableCount ?? 0;
+    const missingCount = payload.missing_count ?? payload.missingCount ?? 0;
+    if (missingCount > 0) {
+      ElMessage.success(`对比完成：${missingCount} 个未导入 CPA，其中 ${importableCount} 个可导入`);
+    } else {
+      ElMessage.success("对比完成：所有账号均已导入 CPA");
+    }
+  } catch (error) {
+    ElMessage.error(error.message || "对比 CPA 导入状态失败");
+  } finally {
+    cpaMissingLoading.value = false;
+  }
+}
+
+async function toggleCpaMissingFilter() {
+  if (cpaMissingFilterOn.value) {
+    cpaMissingFilterOn.value = false;
+    cpaMissingIds.value = [];
+    return;
+  }
+  await loadCpaMissingStatus();
+  cpaMissingFilterOn.value = true;
 }
 
 function legacyCopyText(text) {
@@ -1182,19 +1261,33 @@ onBeforeUnmount(() => {
             <el-option label="未查询" value="never" />
             <el-option label="已删除" value="deleted" />
           </el-select>
+          <el-select v-model="referralStatusFilter" size="small" clearable style="width: 130px" placeholder="邀请奖励" @change="applyFilters">
+            <el-option label="全部奖励" value="" />
+            <el-option label="有可领" value="unclaimed" />
+            <el-option label="已领" value="claimed" />
+            <el-option label="无可领" value="none" />
+            <el-option label="有奖励" value="has" />
+          </el-select>
           <el-checkbox-group v-model="usageFilters" size="small" @change="applyFilters">
             <el-checkbox value="weekly">7d ≥ 99%</el-checkbox>
             <el-checkbox value="monthly">30d ≥ 99%</el-checkbox>
           </el-checkbox-group>
           <el-button size="small" :icon="Search" @click="applyFilters">搜索</el-button>
+          <el-button size="small" type="warning" :loading="batchClaiming" @click="batchClaimReferral">批量领取邀请奖励</el-button>
           <el-button size="small" :icon="Upload" :loading="sub2ApiBulkImporting" :disabled="!selectedImportCount" @click="openBulkSub2ApiImport">批量导入 Sub2API</el-button>
           <el-button size="small" :icon="Upload" :loading="cpaBulkImporting" :disabled="!selectedImportCount" @click="bulkImportToCpa">批量导入 CPA</el-button>
+          <el-button
+            size="small"
+            :loading="cpaMissingLoading"
+            :type="cpaMissingFilterOn ? 'primary' : 'default'"
+            @click="toggleCpaMissingFilter"
+          >筛选未导入 CPA{{ cpaMissingFilterOn ? `（${cpaMissingIds.length}）` : "" }}</el-button>
           <el-tag>{{ selectedImportCount }} 已选</el-tag>
           <el-tag>{{ pagination.total }} 个账号</el-tag>
         </div>
       </div>
       <template v-if="!isMobile">
-        <el-table :data="accounts" border stripe row-key="id" style="width: 100%" @selection-change="handleSelectionChange">
+        <el-table :data="displayedAccounts" border stripe row-key="id" style="width: 100%" @selection-change="handleSelectionChange">
           <el-table-column type="selection" width="48" :selectable="canSelectForCpa" fixed />
           <el-table-column label="Google 邮箱" min-width="220" fixed>
             <template #default="{ row }"><span class="credentials-text">{{ row.email }}</span></template>
@@ -1276,7 +1369,7 @@ onBeforeUnmount(() => {
         </el-table>
       </template>
       <div v-else class="mobile-stack">
-        <article v-for="row in accounts" :key="row.id" class="mobile-card">
+        <article v-for="row in displayedAccounts" :key="row.id" class="mobile-card">
           <div class="mobile-card-head">
             <el-checkbox v-model="selectedAccountIds" :value="row.id" :disabled="!hasApiKey(row) || cpaBulkImporting || sub2ApiBulkImporting" />
             <div class="mobile-card-title">

@@ -223,6 +223,7 @@ class Database:
                     referral_has_reward INTEGER,
                     referral_claimed INTEGER,
                     referral_reward_json TEXT,
+                    referral_rewards_json TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -512,6 +513,8 @@ class Database:
             conn.execute("ALTER TABLE opencode_go_accounts ADD COLUMN referral_claimed INTEGER")
         if "referral_reward_json" not in column_names:
             conn.execute("ALTER TABLE opencode_go_accounts ADD COLUMN referral_reward_json TEXT")
+        if "referral_rewards_json" not in column_names:
+            conn.execute("ALTER TABLE opencode_go_accounts ADD COLUMN referral_rewards_json TEXT")
 
     @staticmethod
     def _migrate_group_rate_records_monitor_group(conn: sqlite3.Connection) -> None:
@@ -1144,6 +1147,7 @@ class Database:
         sort_by: str = "name",
         sort_order: str = "asc",
         status: str = "",
+        referral_status: str = "",
     ) -> list[sqlite3.Row]:
         query = "SELECT * FROM opencode_go_accounts"
         params: list[Any] = []
@@ -1155,6 +1159,7 @@ class Database:
             conditions.append("name LIKE ? ESCAPE '\\' COLLATE NOCASE")
             params.append(f"%{escaped_email}%")
         _append_opencode_go_status_filter(conditions, params, status)
+        _append_opencode_go_referral_filter(conditions, params, referral_status)
         if weekly_usage_gte_99:
             conditions.append(_opencode_go_usage_filter("last_weekly_usage"))
         if monthly_usage_gte_99:
@@ -1188,6 +1193,7 @@ class Database:
         weekly_usage_gte_99: bool = False,
         monthly_usage_gte_99: bool = False,
         status: str = "",
+        referral_status: str = "",
     ) -> int:
         query = "SELECT COUNT(*) AS count FROM opencode_go_accounts"
         params: list[Any] = []
@@ -1199,6 +1205,7 @@ class Database:
             conditions.append("name LIKE ? ESCAPE '\\' COLLATE NOCASE")
             params.append(f"%{escaped_email}%")
         _append_opencode_go_status_filter(conditions, params, status)
+        _append_opencode_go_referral_filter(conditions, params, referral_status)
         if weekly_usage_gte_99:
             conditions.append(_opencode_go_usage_filter("last_weekly_usage"))
         if monthly_usage_gte_99:
@@ -1438,12 +1445,15 @@ class Database:
         claimed: bool | None,
         reward: Any = None,
         error: str | None = None,
+        referral_json: Any = None,
     ) -> None:
-        """更新邀请奖励查询结果列（referral_has_reward / referral_claimed / referral_reward_json）。
+        """更新邀请奖励查询结果列（referral_has_reward / referral_claimed / referral_reward_json / referral_rewards_json）。
 
         has_reward/claimed 为 None 时不改动对应列（保留未知状态），仅在明确得知时覆盖。
+        reward 为概要 dict；referral_json 为 rewards[] 完整列表，可单独刷新。
         """
         reward_json = encrypt_value(_json_dumps(reward), self.secret_key) if reward else None
+        referral_list_json = encrypt_value(_json_dumps(referral_json), self.secret_key) if referral_json else None
         with self.connect() as conn:
             conn.execute(
                 """
@@ -1451,6 +1461,7 @@ class Database:
                 SET referral_has_reward = CASE WHEN ? IS NOT NULL THEN ? ELSE referral_has_reward END,
                     referral_claimed = CASE WHEN ? IS NOT NULL THEN ? ELSE referral_claimed END,
                     referral_reward_json = ?,
+                    referral_rewards_json = COALESCE(?, referral_rewards_json),
                     last_error = ?,
                     updated_at = ?
                 WHERE id = ?
@@ -1461,6 +1472,7 @@ class Database:
                     1 if claimed else (0 if claimed is False else None),
                     1 if claimed else (0 if claimed is False else None),
                     reward_json,
+                    referral_list_json,
                     error,
                     utc_now(),
                     account_id,
@@ -2310,6 +2322,25 @@ def _append_opencode_go_status_filter(conditions: list[str], params: list[Any], 
     if value == "never":
         conditions.append("COALESCE(cpa_provider_deleted, 0) = 0")
         conditions.append("last_status NOT IN ('valid', 'invalid', 'logged_in')")
+
+
+def _append_opencode_go_referral_filter(conditions: list[str], params: list[Any], referral_status: str) -> None:
+    """邀请奖励状态筛选：
+    - unclaimed: 有可领（referral_has_reward=1 且 referral_claimed=0）
+    - claimed:   已领（referral_claimed=1）
+    - none:      无可领（referral_has_reward=0）
+    - has:       有奖励（referral_has_reward=1，含已领未领）
+    """
+    value = str(referral_status or "").strip().lower()
+    if value == "unclaimed":
+        conditions.append("referral_has_reward = 1")
+        conditions.append("COALESCE(referral_claimed, 0) = 0")
+    elif value == "claimed":
+        conditions.append("referral_claimed = 1")
+    elif value == "none":
+        conditions.append("referral_has_reward = 0")
+    elif value == "has":
+        conditions.append("referral_has_reward = 1")
 
 
 def _mask_opencode_api_key(value: str) -> str:

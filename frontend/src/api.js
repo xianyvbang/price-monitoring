@@ -78,8 +78,10 @@ export const api = {
   importOpencodeGoSession: (id, payload) => request(`/api/opencode-go/accounts/${id}/session`, { method: "POST", body: JSON.stringify(payload) }),
   refreshOpencodeGo: (id) => request(`/api/opencode-go/accounts/${id}/refresh`, { method: "POST" }),
   acquireOpencodeGo: (id) => request(`/api/opencode-go/accounts/${id}/acquire`, { method: "POST" }),
+  opencodeGoReferralCache: (id) => request(`/api/opencode-go/accounts/${id}/referral`, { method: "GET" }),
   opencodeGoReferral: (id) => request(`/api/opencode-go/accounts/${id}/referral`, { method: "POST" }),
   claimOpencodeGoReferral: (id) => request(`/api/opencode-go/accounts/${id}/referral/claim`, { method: "POST" }),
+  batchClaimOpencodeGoReferral: (ids) => request("/api/opencode-go/referral/claim-batch", { method: "POST", body: JSON.stringify({ account_ids: ids }) }),
   refreshAllOpencodeGo: () => request("/api/opencode-go/query-all", { method: "POST" }),
   opencodeGoImportLogs: (params = {}) => request(`/api/opencode-go/import-logs${queryString(params)}`),
   opencodeGoHistory: (id, params = {}) => request(`/api/opencode-go/accounts/${id}/history${queryString(params)}`),
@@ -90,6 +92,7 @@ export const api = {
   bulkImportOpencodeGoToSub2Api: (payload) => request("/api/opencode-go/accounts/import-sub2api", { method: "POST", body: JSON.stringify(payload) }),
   importOpencodeGoToCpa: (id) => request(`/api/opencode-go/accounts/${id}/import-cpa`, { method: "POST", body: JSON.stringify({}) }),
   bulkImportOpencodeGoToCpa: (payload) => request("/api/opencode-go/accounts/import-cpa", { method: "POST", body: JSON.stringify(payload) }),
+  opencodeGoCpaStatus: () => request("/api/opencode-go/cpa-status"),
   logs: (params = {}) => request(`/api/logs${queryString(params)}`),
   clearLogs: () => request("/api/logs", { method: "DELETE" })
 };

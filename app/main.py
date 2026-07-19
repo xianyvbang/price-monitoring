@@ -549,6 +549,7 @@ def public_opencode_go_account(row: Any, include_api_key: bool = False) -> dict[
     storage_state_enc = data.pop("storage_state_enc", None)
     api_key_enc = data.pop("api_key_enc", None)
     referral_reward_enc = data.pop("referral_reward_json", None)
+    referral_rewards_enc = data.pop("referral_rewards_json", None)
     email = decrypt_value(email_enc, db.secret_key) if email_enc else ""
     recovery_email = decrypt_value(recovery_email_enc, db.secret_key) if recovery_email_enc else ""
     api_key = decrypt_value(api_key_enc, db.secret_key) if include_api_key and api_key_enc else None
@@ -576,6 +577,22 @@ def public_opencode_go_account(row: Any, include_api_key: bool = False) -> dict[
     data["referralHasReward"] = data["referral_has_reward"]
     data["referral_claimed"] = None if referral_claimed is None else bool(referral_claimed)
     data["referralClaimed"] = data["referral_claimed"]
+    referral_reward_obj = None
+    if referral_reward_enc:
+        try:
+            referral_reward_obj = json.loads(decrypt_value(referral_reward_enc, db.secret_key) or "null")
+        except (json.JSONDecodeError, TypeError):
+            referral_reward_obj = None
+    referral_rewards_obj = None
+    if referral_rewards_enc:
+        try:
+            referral_rewards_obj = json.loads(decrypt_value(referral_rewards_enc, db.secret_key) or "null")
+        except (json.JSONDecodeError, TypeError):
+            referral_rewards_obj = None
+    data["referral_reward"] = referral_reward_obj if referral_reward_obj else {}
+    data["referralReward"] = data["referral_reward"]
+    data["referral_rewards"] = referral_rewards_obj if isinstance(referral_rewards_obj, list) else []
+    data["referralRewards"] = data["referral_rewards"]
     data["created_at_formatted"] = format_china_time(data.get("created_at"))
     data["createdAtFormatted"] = data["created_at_formatted"]
     data["createdAt"] = data.get("created_at")
@@ -1679,6 +1696,9 @@ async def api_opencode_go_accounts(request: Request):
         status = ""
     weekly_usage_gte_99 = _to_bool(request.query_params.get("weekly_usage_gte_99") or request.query_params.get("weeklyUsageGte99"))
     monthly_usage_gte_99 = _to_bool(request.query_params.get("monthly_usage_gte_99") or request.query_params.get("monthlyUsageGte99"))
+    referral_status = str(request.query_params.get("referral_status") or request.query_params.get("referralStatus") or "").strip().lower()
+    if referral_status not in {"unclaimed", "claimed", "none", "has"}:
+        referral_status = ""
     sort_by = str(request.query_params.get("sort_by") or request.query_params.get("sortBy") or "created_at").strip()
     sort_order = str(request.query_params.get("sort_order") or request.query_params.get("sortOrder") or "desc").strip().lower()
     if sort_by not in {"name", "created_at", "updated_at", "last_checked_at"}:
@@ -1690,6 +1710,7 @@ async def api_opencode_go_accounts(request: Request):
         status=status,
         weekly_usage_gte_99=weekly_usage_gte_99,
         monthly_usage_gte_99=monthly_usage_gte_99,
+        referral_status=referral_status,
     )
     total_pages = max(1, (total + page_size - 1) // page_size)
     page = min(page, total_pages)
@@ -1700,6 +1721,7 @@ async def api_opencode_go_accounts(request: Request):
             status=status,
             weekly_usage_gte_99=weekly_usage_gte_99,
             monthly_usage_gte_99=monthly_usage_gte_99,
+            referral_status=referral_status,
             limit=page_size,
             offset=(page - 1) * page_size,
             sort_by=sort_by,
@@ -2114,6 +2136,47 @@ async def api_bulk_import_opencode_go_to_cpa(request: Request):
     }
 
 
+@app.get("/api/opencode-go/cpa-status")
+async def api_opencode_go_cpa_status(request: Request):
+    """对比本地账号与 CPA 中已导入的 OpenAI provider，返回尚未导入 CPA 的账号列表。
+
+    仅对比邮箱（忽略大小写），并按是否已获取 API key 等条件给出可直接导入的子集。
+    """
+    require_user(request)
+    try:
+        client = cpa_admin_client()
+        cpa_emails = await client.list_cpa_provider_emails()
+    except CpaAdminError as exc:
+        db.add_log("error", "opencode-go", f"API 对比 CPA 导入状态失败: {exc}")
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=exc.status_code)
+    accounts = [public_opencode_go_account(row) for row in db.list_opencode_go_accounts()]
+    missing: list[dict[str, Any]] = []
+    importable: list[dict[str, Any]] = []
+    for account in accounts:
+        email = str(account.get("email") or "").strip()
+        if email and email.lower() in cpa_emails:
+            continue
+        missing.append(account)
+        if account.get("has_api_key") or account.get("hasApiKey"):
+            importable.append(account)
+    db.add_log(
+        "info",
+        "opencode-go",
+        f"API 对比 CPA 导入状态: 本地 {len(accounts)} 个，未导入 {len(missing)} 个，可导入 {len(importable)} 个",
+    )
+    return {
+        "ok": True,
+        "total": len(accounts),
+        "missing_count": len(missing),
+        "missingCount": len(missing),
+        "importable_count": len(importable),
+        "importableCount": len(importable),
+        "missing": missing,
+        "importable": importable,
+        "cpa_emails": sorted(cpa_emails),
+    }
+
+
 @app.get("/api/opencode-go/import-logs")
 async def api_opencode_go_import_logs(request: Request):
     require_user(request)
@@ -2257,6 +2320,27 @@ async def api_acquire_opencode_go_account(request: Request, account_id: int):
     )
 
 
+@app.get("/api/opencode-go/accounts/{account_id}/referral")
+async def api_opencode_go_referral_cache(request: Request, account_id: int):
+    """读取 DB 缓存的邀请奖励信息（不发起查询）。供「邀请奖励」按钮直接展示。"""
+    require_user(request)
+    account = db.get_opencode_go_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="OpenCode Go 账号不存在")
+    public = public_opencode_go_account(account)
+    return {
+        "ok": True,
+        "account": public_opencode_go_account(account),
+        "referral": {
+            "has_reward": public.get("referral_has_reward"),
+            "hasReward": public.get("referral_has_reward"),
+            "claimed": public.get("referral_claimed"),
+            "reward": public.get("referral_reward") or {},
+            "rewards": public.get("referral_rewards") or [],
+        },
+    }
+
+
 @app.post("/api/opencode-go/accounts/{account_id}/referral")
 async def api_opencode_go_referral(request: Request, account_id: int):
     """即时查询 OpenCode Go 邀请奖励：是否存在 / 是否已用 + reward 详情。"""
@@ -2279,6 +2363,7 @@ async def api_opencode_go_referral(request: Request, account_id: int):
         referral.get("claimed"),
         referral.get("reward") or None,
         referral.get("invalid_message") if not referral.get("is_valid") else None,
+        referral_json=referral.get("rewards") or None,
     )
     updated = db.get_opencode_go_account(account_id)
     db.add_log(
@@ -2319,19 +2404,23 @@ async def api_claim_opencode_go_referral(request: Request, account_id: int):
         referral_query_server_id=db.get_setting(OPENCODE_GO_REFERRAL_QUERY_SERVER_ID_SETTING, ""),
         referral_action_server_id=db.get_setting(OPENCODE_GO_REFERRAL_ACTION_SERVER_ID_SETTING, ""),
     )
+    status_note = result.get("invalid_message") if not result.get("is_valid") else None
+    if status_note is None and not result.get("is_valid"):
+        status_note = result.get("message")
     db.update_opencode_go_referral(
         account_id,
         None,  # 领取不改 has_reward，由结果 claimed 反推
         result.get("claimed"),
         result.get("reward") or None,
-        result.get("invalid_message") if not result.get("is_valid") else None,
+        status_note,
+        referral_json=result.get("rewards") or None,
     )
     updated = db.get_opencode_go_account(account_id)
     db.add_log(
         "info" if result.get("is_valid") else "warning",
         "opencode-go",
         f"API 领取 OpenCode Go 邀请奖励: {account['name']}"
-        + (f" - {result.get('message', '')}" if result.get("is_valid") else f" - {result.get('invalid_message', '失败')}"),
+        + (f" - {result.get('message', '')}" if result.get("is_valid") else f" - {status_note or '失败'}"),
     )
     if not result.get("is_valid"):
         return JSONResponse(
@@ -2366,6 +2455,105 @@ async def api_query_all_opencode_go(request: Request):
     require_user(request)
     db.add_log("info", "opencode-go", "API 手动刷新全部 OpenCode Go 账号")
     return {"results": [_public_opencode_go_result(result) for result in await query_all_opencode_go_accounts(db)]}
+
+
+@app.post("/api/opencode-go/referral/claim-batch")
+async def api_claim_opencode_go_referral_batch(request: Request):
+    """批量领取 OpenCode Go 邀请奖励。
+    请求体: {"account_ids": [1,2,3]} 或 {"ids": [...]}
+    仅对有可领（has_reward=1 且 claimed=0）的账号领取；其余跳过。
+    逐条领取，每条独立返回 {ok, account, referral, message}，供前端单行 upsert。
+    """
+    require_user(request)
+    payload = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    raw_ids = payload.get("account_ids", payload.get("ids", [])) if isinstance(payload, dict) else []
+    if not isinstance(raw_ids, list):
+        raise HTTPException(status_code=400, detail="account_ids 必须是数组")
+    account_ids: list[int] = []
+    for value in raw_ids:
+        try:
+            account_ids.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    # 去重保序
+    seen: set[int] = set()
+    ordered_ids: list[int] = []
+    for aid in account_ids:
+        if aid not in seen:
+            seen.add(aid)
+            ordered_ids.append(aid)
+    settings = db.get_general_settings()
+    results: list[dict[str, Any]] = []
+    success_count = 0
+    skip_count = 0
+    fail_count = 0
+    for account_id in ordered_ids:
+        account = db.get_opencode_go_account(account_id)
+        if not account:
+            results.append({"ok": False, "account_id": account_id, "message": "账号不存在", "skipped": True})
+            fail_count += 1
+            continue
+        account = row_to_dict(account)
+        # 仅对有可领（has_reward=1 且 claimed=0）的账号领取
+        has_reward = account.get("referral_has_reward")
+        claimed = account.get("referral_claimed")
+        if claimed == 1 or has_reward != 1:
+            skip_count += 1
+            results.append({
+                "ok": True,
+                "skipped": True,
+                "account": public_opencode_go_account(account),
+                "message": "无可领奖励或已领取，跳过",
+            })
+            continue
+        try:
+            result = await claim_referral_reward_for_account(
+                account,
+                db.secret_key,
+                settings["request_timeout"],
+                db.add_log,
+                referral_query_js_url=db.get_setting(OPENCODE_GO_REFERRAL_QUERY_JS_URL_SETTING, ""),
+                referral_query_server_id=db.get_setting(OPENCODE_GO_REFERRAL_QUERY_SERVER_ID_SETTING, ""),
+                referral_action_server_id=db.get_setting(OPENCODE_GO_REFERRAL_ACTION_SERVER_ID_SETTING, ""),
+            )
+        except Exception as exc:
+            fail_count += 1
+            results.append({"ok": False, "account_id": account_id, "message": f"领取异常: {exc}"})
+            db.add_log("error", "opencode-go", f"API 批量领取邀请奖励异常 {account['name']}: {exc}")
+            continue
+        status_note = result.get("invalid_message") if not result.get("is_valid") else None
+        if status_note is None and not result.get("is_valid"):
+            status_note = result.get("message")
+        db.update_opencode_go_referral(
+            account_id,
+            None,
+            result.get("claimed"),
+            result.get("reward") or None,
+            status_note,
+            referral_json=result.get("rewards") or None,
+        )
+        updated = db.get_opencode_go_account(account_id)
+        if result.get("is_valid") and result.get("claimed"):
+            success_count += 1
+        elif not result.get("is_valid"):
+            fail_count += 1
+        results.append({
+            "ok": bool(result.get("is_valid")),
+            "claimed": bool(result.get("claimed")),
+            "account": public_opencode_go_account(updated),
+            "message": result.get("message") or result.get("invalid_message") or "领取成功",
+            "referral": {
+                "claimed": result.get("claimed"),
+                "reward": result.get("reward") or {},
+                "rewards": result.get("rewards") or [],
+            },
+        })
+    db.add_log(
+        "info",
+        "opencode-go",
+        f"API 批量领取邀请奖励: 成功 {success_count}，跳过 {skip_count}，失败 {fail_count}",
+    )
+    return {"ok": True, "results": results, "success": success_count, "skipped": skip_count, "failed": fail_count}
 
 
 @app.get("/api/opencode-go/accounts/{account_id}/history")

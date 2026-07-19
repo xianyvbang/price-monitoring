@@ -140,6 +140,16 @@ class CpaAdminClient:
     async def list_openai_providers(self) -> list[dict[str, Any]]:
         return _openai_compatibility_providers(await self._request("GET", "/openai-compatibility"))
 
+    async def list_cpa_provider_emails(self) -> set[str]:
+        """返回 CPA 中所有 OpenAI 兼容 provider 的 name（邮箱）集合，用于对比哪些账号尚未导入。"""
+        providers = await self.list_openai_providers()
+        emails: set[str] = set()
+        for provider in providers:
+            name = _provider_name(provider)
+            if name:
+                emails.add(name.lower())
+        return emails
+
     async def set_openai_provider_disabled(self, email: str, disabled: bool) -> dict[str, Any]:
         email = _required_provider_email(email)
         providers = await self.list_openai_providers()
@@ -404,6 +414,9 @@ def _normalize_model_ids(payload: Any) -> list[str]:
             value = item
         model = str(value or "").strip()
         if not model or model in seen:
+            continue
+        # 导入 CPA 时过滤掉 grok 模型
+        if "grok" in model.lower():
             continue
         seen.add(model)
         result.append(model)
