@@ -14,6 +14,8 @@ from app.services.opencode_go import (
     LITE_SUBSCRIPTION_GET_REFERENCE_ID,
     extract_key_list_reference_id,
     extract_lite_subscription_reference_id,
+    extract_referral_reference_id,
+    parse_referral_payload,
     query_key_list,
     query_lite_subscription_usage,
     normalize_usage_result,
@@ -2266,3 +2268,142 @@ def test_opencode_go_bulk_import_cpa_imports_selected_accounts(tmp_path, monkeyp
     assert "sk-first-secret" not in logs.text
     assert "sk-second-secret" not in logs.text
     assert "cpa-secret" not in logs.text
+
+
+# ---------------- 邀请奖励 referral ----------------
+
+def test_parse_referral_payload_classifies_status():
+    # 已使用：rewards[] 里有 status='applied'
+    applied = {"referralCode": "GXM0E6KDFD", "hasReferral": True, "rewardAmount": 500, "rewards": [{"id": "ref_1", "source": "invitee", "status": "applied", "amount": 500, "timeCreated": "2026-07-14", "timeApplied": "2026-07-19"}]}
+    res = parse_referral_payload(applied)
+    assert res["has_reward"] is True
+    assert res["claimed"] is True
+    assert res["reward"]["referralCode"] == "GXM0E6KDFD"
+    assert res["reward"]["status"] == "applied"
+    assert res["rewards"][0]["status"] == "applied"
+    # 可领：status='available'
+    available = {"referralCode": "ABC", "hasReferral": True, "rewardAmount": 100, "rewards": [{"id": "r", "status": "available", "amount": 100}]}
+    avres = parse_referral_payload(available)
+    assert avres["has_reward"] is True
+    assert avres["claimed"] is False
+    # 无推荐：hasReferral=false
+    none = {"referralCode": "ABC", "hasReferral": False, "rewardAmount": 0, "rewards": []}
+    noneres = parse_referral_payload(none)
+    assert noneres["has_reward"] is False
+    assert noneres["claimed"] is None
+    # 未知结构
+    unknown = parse_referral_payload({"unrelated": "x"})
+    assert unknown["has_reward"] is None
+    assert unknown["claimed"] is None
+
+
+def test_parse_referral_payload_from_grid_text():
+    # 真实 server-fn grid 序列化文本（你的样本）
+    text = ';0x00000180;((self.$R=self.$R||{})["server-fn:2"]=[],($R=>$R[0]={referralCode:"GXM0E6KDFD",hasReferral:!0,rewardAmount:500,rewards:$R[1]=[$R[2]={id:"ref_01KXFJ1G1N1SR5EZ327XN2P0QZ",source:"invitee",status:"applied",email:"blythedickersongokpn@zjeb.us",amount:500,timeCreated:$R[3]=new Date("2026-07-14T05:38:58.000Z"),timeApplied:$R[4]=new Date("2026-07-19T11:09:32.000Z")}]})($R["server-fn:2"]))'
+    res = parse_referral_payload(text)
+    assert res["has_reward"] is True
+    assert res["claimed"] is True  # applied = 已使用
+    assert res["reward"]["referralCode"] == "GXM0E6KDFD"
+    assert res["reward"]["status"] == "applied"
+    assert res["reward"]["email"] == "blythedickersongokpn@zjeb.us"
+    assert res["reward"]["timeApplied"] == "2026-07-19T11:09:32.000Z"
+    assert res["rewards"][0]["amount"] == 500
+
+
+def test_extract_referral_reference_id():
+    assert extract_referral_reference_id('queryGoReferral_query = createServerReference("2a0b2fef5fd2ec9eff0cb5d4955e4ada4eece21fac85591ed4c09630168d4844"') == "2a0b2fef5fd2ec9eff0cb5d4955e4ada4eece21fac85591ed4c09630168d4844"
+    with pytest.raises(ValueError):
+        extract_referral_reference_id("no match here")
+
+
+def test_opencode_go_referral_endpoint_updates_columns(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+
+    async def fake_query(account, secret_key, timeout, log, referral_query_js_url=None, referral_query_server_id=None):
+        return {"is_valid": True, "has_reward": True, "claimed": False, "reward": {"status": "available", "amount": 10}, "raw": {}, "checked_at": "2026-01-01T00:00:00Z"}
+
+    monkeypatch.setattr("app.main.query_referral_for_account", fake_query)
+
+    with TestClient(app) as client:
+        login(client)
+        created = client.post("/api/opencode-go/accounts", json={"name": "r@example.com", "email": "r@example.com", "password": "pw"})
+        account_id = created.json()["id"]
+        response = client.post(f"/api/opencode-go/accounts/{account_id}/referral")
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["ok"] is True
+    assert body["referral"]["has_reward"] is True
+    assert body["referral"]["claimed"] is False
+    account = db.get_opencode_go_account(account_id)
+    assert account["referral_has_reward"] == 1
+    assert account["referral_claimed"] == 0
+    # reward json 已加密
+    stored = json.loads(decrypt_value(account["referral_reward_json"], "test-key"))
+    assert stored["status"] == "available"
+    assert account["last_error"] is None
+
+
+def test_opencode_go_referral_endpoint_records_error(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+
+    async def fake_query(account, secret_key, timeout, log, referral_query_js_url=None, referral_query_server_id=None):
+        return {"is_valid": False, "has_reward": None, "claimed": None, "reward": {}, "invalid_message": "登录态失效", "checked_at": "2026-01-01T00:00:00Z"}
+
+    monkeypatch.setattr("app.main.query_referral_for_account", fake_query)
+
+    with TestClient(app) as client:
+        login(client)
+        created = client.post("/api/opencode-go/accounts", json={"name": "r2@example.com", "email": "r2@example.com", "password": "pw"})
+        account_id = created.json()["id"]
+        response = client.post(f"/api/opencode-go/accounts/{account_id}/referral")
+
+    body = response.json()
+    assert body["ok"] is False
+    assert "登录态失效" in body["message"]
+    account = db.get_opencode_go_account(account_id)
+    assert account["last_error"] == "登录态失效"
+
+
+def test_opencode_go_referral_claim_endpoint(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+
+    async def fake_claim(account, secret_key, timeout, log, referral_query_js_url=None, referral_query_server_id=None, referral_action_server_id=None):
+        return {"is_valid": True, "claimed": True, "message": "领取成功", "reward": {"status": "claimed", "amount": 10}, "raw": {}}
+
+    monkeypatch.setattr("app.main.claim_referral_reward_for_account", fake_claim)
+
+    with TestClient(app) as client:
+        login(client)
+        created = client.post("/api/opencode-go/accounts", json={"name": "c@example.com", "email": "c@example.com", "password": "pw"})
+        account_id = created.json()["id"]
+        response = client.post(f"/api/opencode-go/accounts/{account_id}/referral/claim")
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["ok"] is True
+    assert body["referral"]["claimed"] is True
+    account = db.get_opencode_go_account(account_id)
+    assert account["referral_claimed"] == 1
+
+
+def test_opencode_go_settings_roundtrip_referral(tmp_path, monkeypatch):
+    setup_test_db(tmp_path, monkeypatch)
+
+    with TestClient(app) as client:
+        login(client)
+        saved = client.post(
+            "/api/opencode-go/settings",
+            json={
+                "referral_query_js_url": "",
+                "referral_query_server_id": "2a0b2fef5fd2ec9eff0cb5d4955e4ada4eece21fac85591ed4c09630168d4844",
+                "referral_action_server_id": "f386778c1b78eade3e6acff87c9284e02fcd86826463c080526143c4fe8fff23",
+            },
+        )
+        assert saved.status_code == 200
+        s = saved.json()["settings"]
+        assert s["referral_query_server_id"] == "2a0b2fef5fd2ec9eff0cb5d4955e4ada4eece21fac85591ed4c09630168d4844"
+        assert s["referral_action_server_id"] == "f386778c1b78eade3e6acff87c9284e02fcd86826463c080526143c4fe8fff23"
+        # GET 回显
+        got = client.get("/api/opencode-go/settings").json()["settings"]
+        assert got["referral_query_server_id"] == "2a0b2fef5fd2ec9eff0cb5d4955e4ada4eece21fac85591ed4c09630168d4844"

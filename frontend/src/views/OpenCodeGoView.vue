@@ -38,11 +38,22 @@ const opencodeSettings = ref({
   default_key_list_js_url: "https://opencode.ai/_build/assets/index-PbCOrg8_.js",
   default_key_list_server_id: "",
   key_list_server_instance: "server-fn:2",
+  referral_query_js_url: "",
+  referral_query_server_id: "",
+  referral_action_server_id: "",
+  default_referral_query_server_id: "",
+  default_referral_action_server_id: "",
   query_interval: 300,
   monitor_paused: false,
   cpa_auto_delete_enabled: false
 });
-const settingsForm = reactive({ lite_subscription_js_url: "", key_list_js_url: "" });
+const settingsForm = reactive({
+  lite_subscription_js_url: "",
+  key_list_js_url: "",
+  referral_query_js_url: "",
+  referral_query_server_id: "",
+  referral_action_server_id: "",
+});
 const sessionDialogVisible = ref(false);
 const importingSession = ref(false);
 const grabberReady = ref(isGrabberReady());
@@ -92,6 +103,9 @@ const serverInstance = computed(() => opencodeSettings.value.server_instance || 
 const defaultKeyListJsUrl = computed(() => opencodeSettings.value.default_key_list_js_url || opencodeSettings.value.defaultKeyListJsUrl || "https://opencode.ai/_build/assets/index-PbCOrg8_.js");
 const defaultKeyListServerId = computed(() => opencodeSettings.value.default_key_list_server_id || opencodeSettings.value.defaultKeyListServerId || "");
 const keyListJsUrl = computed(() => opencodeSettings.value.key_list_js_url || opencodeSettings.value.keyListJsUrl || defaultKeyListJsUrl.value);
+const referralQueryJsUrl = computed(() => opencodeSettings.value.referral_query_js_url || opencodeSettings.value.referralQueryJsUrl || "");
+const defaultReferralQueryServerId = computed(() => opencodeSettings.value.default_referral_query_server_id || opencodeSettings.value.defaultReferralQueryServerId || "");
+const defaultReferralActionServerId = computed(() => opencodeSettings.value.default_referral_action_server_id || opencodeSettings.value.defaultReferralActionServerId || "");
 const keyListServerId = computed(() => opencodeSettings.value.key_list_server_id || opencodeSettings.value.keyListServerId || "");
 const keyListServerInstance = computed(() => opencodeSettings.value.key_list_server_instance || opencodeSettings.value.keyListServerInstance || "server-fn:2");
 const queryInterval = computed(() => normalizedQueryInterval(opencodeSettings.value.query_interval ?? opencodeSettings.value.queryInterval));
@@ -195,6 +209,9 @@ function openBulkImport() {
 function openSettingsDialog() {
   settingsForm.lite_subscription_js_url = liteSubscriptionJsUrl.value;
   settingsForm.key_list_js_url = keyListJsUrl.value;
+  settingsForm.referral_query_js_url = referralQueryJsUrl.value;
+  settingsForm.referral_query_server_id = opencodeSettings.value.referral_query_server_id || opencodeSettings.value.referralQueryServerId || "";
+  settingsForm.referral_action_server_id = opencodeSettings.value.referral_action_server_id || opencodeSettings.value.referralActionServerId || "";
   settingsDialogVisible.value = true;
 }
 
@@ -203,7 +220,10 @@ async function saveSettings() {
   try {
     const response = await api.saveOpencodeGoSettings({
       lite_subscription_js_url: settingsForm.lite_subscription_js_url,
-      key_list_js_url: settingsForm.key_list_js_url
+      key_list_js_url: settingsForm.key_list_js_url,
+      referral_query_js_url: settingsForm.referral_query_js_url,
+      referral_query_server_id: settingsForm.referral_query_server_id,
+      referral_action_server_id: settingsForm.referral_action_server_id,
     });
     opencodeSettings.value = response.settings || {};
     resetRefreshCountdown();
@@ -533,6 +553,99 @@ async function acquireAccount(account) {
   } finally {
     account._acquiring = false;
   }
+}
+
+const referralDialogVisible = ref(false);
+const referralAccount = ref(null);
+const referralLoading = ref(false);
+const referralClaiming = ref(false);
+const referralData = ref({ has_reward: null, claimed: null, reward: {}, rewards: [] });
+
+function openReferralDialog(account) {
+  referralAccount.value = account;
+  referralData.value = {
+    has_reward: account.referral_has_reward ?? account.referralHasReward ?? null,
+    claimed: account.referral_claimed ?? account.referralClaimed ?? null,
+    reward: {},
+    rewards: [],
+  };
+  referralDialogVisible.value = true;
+  loadReferral(account);
+}
+
+async function loadReferral(account) {
+  referralLoading.value = true;
+  try {
+    const response = await api.opencodeGoReferral(account.id);
+    referralData.value = {
+      has_reward: response.referral?.has_reward ?? response.referral?.hasReward ?? null,
+      claimed: response.referral?.claimed ?? null,
+      reward: response.referral?.reward || {},
+      rewards: response.referral?.rewards || [],
+    };
+    if (response.account) {
+      upsertLocal(response.account);
+    }
+  } catch (error) {
+    if (error.payload?.account) {
+      upsertLocal(error.payload.account);
+    }
+    if (error.payload?.referral) {
+      referralData.value = {
+        has_reward: error.payload.referral.has_reward ?? null,
+        claimed: error.payload.referral.claimed ?? null,
+        reward: error.payload.referral.reward || {},
+        rewards: error.payload.referral.rewards || [],
+      };
+    }
+    ElMessage.error(error.message || "查询邀请奖励失败");
+  } finally {
+    referralLoading.value = false;
+  }
+}
+
+async function claimReferralReward() {
+  if (!referralAccount.value) return;
+  referralClaiming.value = true;
+  try {
+    const response = await api.claimOpencodeGoReferral(referralAccount.value.id);
+    if (response.referral) {
+      referralData.value = {
+        has_reward: referralData.value.has_reward,
+        claimed: response.referral.claimed ?? true,
+        reward: response.referral.reward || referralData.value.reward,
+        rewards: response.referral.rewards || referralData.value.rewards,
+      };
+    }
+    if (response.account) {
+      upsertLocal(response.account);
+    }
+    ElMessage.success(response.message || "领取成功");
+  } catch (error) {
+    if (error.payload?.account) {
+      upsertLocal(error.payload.account);
+    }
+    if (error.payload?.referral) {
+      referralData.value = {
+        has_reward: referralData.value.has_reward,
+        claimed: error.payload.referral.claimed ?? referralData.value.claimed,
+        reward: error.payload.referral.reward || referralData.value.reward,
+        rewards: error.payload.referral.rewards || referralData.value.rewards,
+      };
+    }
+    ElMessage.error(error.message || "领取失败");
+  } finally {
+    referralClaiming.value = false;
+  }
+}
+
+function referralStatusLabel(account) {
+  const has = account.referral_has_reward ?? account.referralHasReward;
+  const claimed = account.referral_claimed ?? account.referralClaimed;
+  if (claimed) return "已领";
+  if (has) return "有可领";
+  if (has === false) return "无可领";
+  return "未知";
 }
 
 async function refreshAll() {
@@ -1127,6 +1240,14 @@ onBeforeUnmount(() => {
               <span class="credentials-text">{{ row.api_key_masked || row.apiKeyMasked || "未找到" }}</span>
             </template>
           </el-table-column>
+          <el-table-column label="邀请奖励" width="90">
+            <template #default="{ row }">
+              <el-tag v-if="(row.referral_claimed ?? row.referralClaimed)" type="success" size="small">已领</el-tag>
+              <el-tag v-else-if="(row.referral_has_reward ?? row.referralHasReward) === true" type="warning" size="small">有可领</el-tag>
+              <el-tag v-else-if="(row.referral_has_reward ?? row.referralHasReward) === false" type="info" size="small">无可领</el-tag>
+              <el-tag v-else type="info" size="small">未知</el-tag>
+            </template>
+          </el-table-column>
           <el-table-column label="最近刷新" width="165">
             <template #default="{ row }">{{ formatTime(row.last_checked_at) }}</template>
           </el-table-column>
@@ -1142,6 +1263,7 @@ onBeforeUnmount(() => {
                 <el-button size="small" :icon="Edit" @click="openEdit(row)">编辑</el-button>
                 <el-button size="small" :icon="Upload" @click="openSessionImport(row)">导入登录态</el-button>
                 <el-button size="small" :icon="Document" :loading="row._acquiring" @click="acquireAccount(row)">获取 Key</el-button>
+                <el-button size="small" :icon="Link" @click="openReferralDialog(row)">邀请奖励</el-button>
                 <el-button size="small" :icon="Upload" :disabled="!hasApiKey(row)" @click="openSub2ApiImport(row)">导入 Sub2API</el-button>
                 <el-button size="small" :icon="Upload" :loading="cpaImportingId === row.id" :disabled="!hasApiKey(row) || cpaBulkImporting" @click="importToCpa(row)">导入 CPA</el-button>
                 <el-button size="small" :icon="Refresh" :loading="row._refreshing" @click="refreshAccount(row)">刷新</el-button>
@@ -1198,6 +1320,7 @@ onBeforeUnmount(() => {
             <el-button size="small" :icon="Edit" @click="openEdit(row)">编辑</el-button>
             <el-button size="small" :icon="Upload" @click="openSessionImport(row)">导入登录态</el-button>
             <el-button size="small" :icon="Document" :loading="row._acquiring" @click="acquireAccount(row)">获取 Key</el-button>
+            <el-button size="small" :icon="Link" @click="openReferralDialog(row)">邀请奖励</el-button>
             <el-button size="small" :icon="Upload" :disabled="!hasApiKey(row)" @click="openSub2ApiImport(row)">导入 Sub2API</el-button>
             <el-button size="small" :icon="Upload" :loading="cpaImportingId === row.id" :disabled="!hasApiKey(row) || cpaBulkImporting" @click="importToCpa(row)">导入 CPA</el-button>
             <el-button size="small" :icon="Refresh" :loading="row._refreshing" @click="refreshAccount(row)">刷新</el-button>
@@ -1351,6 +1474,53 @@ onBeforeUnmount(() => {
       </template>
     </el-dialog>
 
+    <el-dialog v-model="referralDialogVisible" :title="`邀请奖励 - ${referralAccount?.email || ''}`" width="560px">
+      <el-form label-position="top">
+        <el-form-item label="是否存在邀请奖励">
+          <el-tag v-if="referralData.has_reward === true" type="success">存在</el-tag>
+          <el-tag v-else-if="referralData.has_reward === false" type="info">不存在</el-tag>
+          <el-tag v-else type="warning">未知</el-tag>
+          <span class="referral-status-sub">{{ referralLoading ? "查询中…" : "" }}</span>
+        </el-form-item>
+        <el-form-item label="是否已领取 / 使用">
+          <el-tag v-if="referralData.claimed === true" type="success">已领</el-tag>
+          <el-tag v-else-if="referralData.claimed === false" type="warning">未领</el-tag>
+          <el-tag v-else type="info">未知</el-tag>
+        </el-form-item>
+        <el-form-item v-if="Object.keys(referralData.reward || {}).length" label="奖励概要">
+          <ul class="referral-detail">
+            <li v-for="(value, key) in referralData.reward" :key="key">
+              <strong>{{ key }}:</strong> <span>{{ value }}</span>
+            </li>
+          </ul>
+        </el-form-item>
+        <el-form-item v-if="(referralData.rewards || []).length" label="邀请奖励记录">
+          <ul class="referral-detail">
+            <li v-for="(reward, idx) in referralData.rewards" :key="idx">
+              <strong>状态:</strong> <span>{{ reward.status }}</span>
+              <strong style="margin-left:12px;">金额:</strong> <span>{{ reward.amount }}</span>
+              <strong style="margin-left:12px;">来源:</strong> <span>{{ reward.source }}</span>
+              <strong style="margin-left:12px;">邮箱:</strong> <span>{{ reward.email || "-" }}</span>
+              <strong style="margin-left:12px;">创建:</strong> <span>{{ reward.timeCreated || "-" }}</span>
+              <strong style="margin-left:12px;">使用:</strong> <span>{{ reward.timeApplied || "-" }}</span>
+            </li>
+          </ul>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <div class="dialog-footer">
+          <el-button :loading="referralLoading" @click="loadReferral(referralAccount)">重新查询</el-button>
+          <el-button @click="referralDialogVisible = false">关闭</el-button>
+          <el-button
+            type="primary"
+            :loading="referralClaiming"
+            :disabled="referralData.claimed === true || referralData.has_reward === false"
+            @click="claimReferralReward"
+          >领取奖励</el-button>
+        </div>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="settingsDialogVisible" title="配置 OpenCode Go JS 文件" width="720px">
       <el-form label-position="top" @submit.prevent="saveSettings">
         <el-form-item label="用量 JS 文件地址">
@@ -1367,12 +1537,26 @@ onBeforeUnmount(() => {
             autocomplete="off"
           />
         </el-form-item>
+        <el-form-item label="邀请奖励查询 JS 文件地址（可选）">
+          <el-input
+            v-model="settingsForm.referral_query_js_url"
+            placeholder="https://opencode.ai/_build/assets/index-DtPYjwk4.js"
+            autocomplete="off"
+          />
+        </el-form-item>
+        <el-form-item label="邀请奖励查询 X-Server-Id（可选，留空用上面 JS 解析或内置默认）">
+          <el-input v-model="settingsForm.referral_query_server_id" :placeholder="defaultReferralQueryServerId || '2a0b2fef5fd2...' " autocomplete="off" />
+        </el-form-item>
+        <el-form-item label="领取邀请奖励 X-Server-Id（可选，留空用内置默认）">
+          <el-input v-model="settingsForm.referral_action_server_id" :placeholder="defaultReferralActionServerId || 'f386778c1b78...' " autocomplete="off" />
+        </el-form-item>
         <div class="import-helper">
           <span>系统会下载这个 JS 文件，并从 const queryLiteSubscription_query = createServerReference(&quot;...&quot;) 中解析 X-Server-Id。</span>
           <span>用量请求固定为 /_server?id=解析到的 server id&amp;args=序列化后的 Workspace ID，X-Server-Instance 固定为 server-fn:3。</span>
           <span>当前解析到的 server id：{{ liteSubscriptionServerId || "未配置" }}；留空时会使用内置默认 server id：{{ defaultServerId || "-" }}</span>
           <span>API key 会从 listKeys_query 解析 X-Server-Id，请求固定使用 X-Server-Instance: {{ keyListServerInstance }}。</span>
           <span>当前 API key server id：{{ keyListServerId || "未配置" }}；默认 JS：{{ defaultKeyListJsUrl }}。</span>
+          <span>邀请奖励：查询从 queryGoReferral_query 解析（默认 {{ defaultReferralQueryServerId || "-" }}）；领取用 applyGoReferralReward_action（默认 {{ defaultReferralActionServerId || "-" }}）。两栏都可留空用内置默认。</span>
         </div>
       </el-form>
       <template #footer>

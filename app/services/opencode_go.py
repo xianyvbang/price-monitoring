@@ -27,6 +27,26 @@ KEY_LIST_REFERENCE_IDS = (
     KEY_LIST_GET_REFERENCE_ID,
     "def2ab20a296ef06465b1c3cf86da4ea983c0696e7a5708b9468aaed85083d6b",
 )
+# 邀请奖励 referral：从 opencode 前端 index-DtPYjwk4.js 提取的 createServerReference ID
+OPENCODE_GO_REFERRAL_QUERY_SERVER_ID_SETTING = "opencode_go_referral_query_server_id"
+OPENCODE_GO_REFERRAL_QUERY_JS_URL_SETTING = "opencode_go_referral_query_js_url"
+OPENCODE_GO_REFERRAL_ACTION_SERVER_ID_SETTING = "opencode_go_referral_action_server_id"
+REFERRAL_QUERY_GET_REFERENCE_ID = "2a0b2fef5fd2ec9eff0cb5d4955e4ada4eece21fac85591ed4c09630168d4844"
+REFERRAL_USAGE_PREVIEW_REFERENCE_ID = "46625df0aecf05f270f7ae4612cde374d11350c8abaf8649027572228b8af150"
+REFERRAL_ACTION_REFERENCE_ID = "f386778c1b78eade3e6acff87c9284e02fcd86826463c080526143c4fe8fff23"
+REFERRAL_QUERY_SERVER_INSTANCE = "server-fn:2"
+# action（mutation）的 server-instance 未知，按列表顺序回退尝试
+REFERRAL_ACTION_SERVER_INSTANCES = ("server-fn:2", "server-fn:3")
+REFERRAL_QUERY_REFERENCE_IDS = (
+    REFERRAL_QUERY_GET_REFERENCE_ID,
+    REFERRAL_USAGE_PREVIEW_REFERENCE_ID,
+)
+REFERRAL_QUERY_RE = re.compile(
+    r"queryGoReferral_query\s*=\s*createServerReference\(\s*[\"']([0-9a-f]{64})[\"']",
+    re.IGNORECASE,
+)
+REFERRAL_STATUS_CLAIMED = {"claimed", "applied", "used", "done", "received", "completed", "redeemed"}
+REFERRAL_STATUS_UNCLAIMED = {"available", "pending", "claimable", "unclaimed", "ready", "active"}
 SERVER_REFERENCE_ALIASES = {
     "session.get": ("session.get", "session", "sessionGet", "session_get", "querySessionInfo", "querySessionInfo_query"),
     "lite.subscription.get": (
@@ -40,6 +60,27 @@ SERVER_REFERENCE_ALIASES = {
         "queryLiteSubscription_query",
     ),
     "key.list": ("key.list", "keys", "keyList", "key_list", "listKeys", "listKeys_query"),
+    "referral.query": (
+        "referral.query",
+        "referral",
+        "goReferral",
+        "queryGoReferral",
+        "queryGoReferral_query",
+        "query_go_referral",
+        "queryGoReferralUsagePreview",
+        "queryGoReferralUsagePreview_query",
+        "referralQuery",
+        "referral_query",
+    ),
+    "referral.action": (
+        "referral.action",
+        "applyGoReferralReward",
+        "applyGoReferralReward_action",
+        "referralAction",
+        "referral_action",
+        "claimReferral",
+        "claimGoReferralReward",
+    ),
 }
 SERVER_REFERENCE_ID_RE = re.compile(r"[0-9a-f]{64}", re.IGNORECASE)
 LITE_SUBSCRIPTION_QUERY_RE = re.compile(
@@ -56,6 +97,24 @@ SERVER_FN_USAGE_WINDOW_RE = re.compile(
 )
 SERVER_FN_FIELD_RE = re.compile(
     r"(?P<key>status|resetInSec|usagePercent)\s*:\s*(?P<value>\"[^\"]*\"|'[^']*'|-?\d+(?:\.\d+)?)",
+    re.DOTALL,
+)
+# 邀请奖励 queryGoReferral 返回结构：顶层 referralCode/hasReferral/rewardAmount + rewards[] 数组
+REFERRAL_HAS_FIELD_RE = re.compile(r"hasReferral\s*:\s*(?P<value>!0|!1|true|false|0|1)", re.IGNORECASE)
+REFERRAL_CODE_RE = re.compile(r"referralCode\s*:\s*\"([^\"]*)\"")
+REFERRAL_AMOUNT_RE = re.compile(r"rewardAmount\s*:\s*(-?\d+(?:\.\d+)?)")
+# 每个 reward 对象（含 id/source/status/email/amount/timeCreated/timeApplied）
+REFERRAL_REWARD_OBJECT_RE = re.compile(
+    r"\{[^{}]*?\bid\b\s*:\s*\"[^\"]*\"[^{}]*?\}",
+    re.DOTALL,
+)
+REFERRAL_REWARD_FIELD_RE = re.compile(
+    r"(?P<key>id|source|status|email|amount)\s*:\s*"
+    r"(?P<value>\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*'|-?\d+(?:\.\d+)?|!0|!1|true|false|null)",
+    re.DOTALL,
+)
+REFERRAL_REWARD_TIME_RE = re.compile(
+    r"(?P<key>timeCreated|timeApplied)\s*:\s*\$R\[\d+\]\s*=\s*new Date\(\s*\"(?P<value>[^\"]*)\"\s*\)",
     re.DOTALL,
 )
 SERVER_FN_KEY_OBJECT_RE = re.compile(
@@ -75,6 +134,7 @@ DEFAULT_BROWSER_HEADERS = {
 }
 _LITE_SUBSCRIPTION_REFERENCE_CACHE: dict[str, str] = {}
 _KEY_LIST_REFERENCE_CACHE: dict[str, str] = {}
+_REFERRAL_REFERENCE_CACHE: dict[str, str] = {}
 
 
 async def refresh_opencode_go_account(
@@ -163,6 +223,51 @@ async def query_key_list(
     return _parse_server_reference_response(response)
 
 
+async def query_referral(
+    client: httpx.AsyncClient,
+    reference_id: str,
+    workspace_id: str,
+) -> Any:
+    args = json.dumps(_serialize_server_args([workspace_id]), ensure_ascii=False, separators=(",", ":"))
+    response = await client.get(
+        f"{OPENCODE_BASE_URL}/_server",
+        params={"id": reference_id, "args": args},
+        headers={
+            **DEFAULT_BROWSER_HEADERS,
+            "X-Server-Id": reference_id,
+            "X-Server-Instance": REFERRAL_QUERY_SERVER_INSTANCE,
+        },
+    )
+    return _parse_server_reference_response(response)
+
+
+async def apply_referral_reward(
+    client: httpx.AsyncClient,
+    reference_id: str,
+    args: list[Any],
+    instances: tuple[str, ...] = REFERRAL_ACTION_SERVER_INSTANCES,
+) -> Any:
+    """POST 领取邀请奖励。action 的 server-instance 未知，按列表顺序回退尝试。"""
+    body = _serialize_server_args(args)
+    errors: list[str] = []
+    for instance in instances:
+        try:
+            response = await client.post(
+                f"{OPENCODE_BASE_URL}/_server?id={reference_id}",
+                headers={
+                    **DEFAULT_BROWSER_HEADERS,
+                    "Content-Type": "application/json",
+                    "X-Server-Id": reference_id,
+                    "X-Server-Instance": instance,
+                },
+                json=body,
+            )
+            return _parse_server_reference_response(response)
+        except Exception as exc:
+            errors.append(f"{instance}: {exc}")
+    raise RuntimeError("OpenCode 领取邀请奖励接口不可用: " + "; ".join(errors))
+
+
 def extract_lite_subscription_reference_id(source: str) -> str:
     match = LITE_SUBSCRIPTION_QUERY_RE.search(source or "")
     if not match:
@@ -174,6 +279,13 @@ def extract_key_list_reference_id(source: str) -> str:
     match = KEY_LIST_QUERY_RE.search(source or "")
     if not match:
         raise ValueError("未在 JS 文件中找到 listKeys_query 的 server id")
+    return match.group(1)
+
+
+def extract_referral_reference_id(source: str) -> str:
+    match = REFERRAL_QUERY_RE.search(source or "")
+    if not match:
+        raise ValueError("未在 JS 文件中找到 queryGoReferral_query 的 server id")
     return match.group(1)
 
 
@@ -214,6 +326,54 @@ async def fetch_key_list_reference_id(js_url: str | None = None, timeout: float 
     url = validate_opencode_go_key_list_js_url(js_url)
     async with httpx.AsyncClient(headers=DEFAULT_BROWSER_HEADERS, follow_redirects=True, timeout=timeout) as client:
         return await resolve_key_list_reference_id(client, url)
+
+
+def validate_opencode_go_referral_js_url(value: str | None) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if not re.match(r"^https://opencode\.ai/_build/assets/[^?#]+\.js(?:[?#].*)?$", text, re.IGNORECASE):
+        raise ValueError("JS 文件地址必须是 https://opencode.ai/_build/assets/*.js")
+    return text
+
+
+async def fetch_referral_reference_id(js_url: str | None = None, timeout: float = 15.0) -> str:
+    url = validate_opencode_go_referral_js_url(js_url)
+    if not url:
+        return REFERRAL_QUERY_GET_REFERENCE_ID
+    async with httpx.AsyncClient(headers=DEFAULT_BROWSER_HEADERS, follow_redirects=True, timeout=timeout) as client:
+        return await resolve_referral_reference_id(client, url)
+
+
+async def resolve_referral_reference_id(
+    client: httpx.AsyncClient,
+    js_url: str | None,
+    reference_id: str | None = None,
+) -> str:
+    configured_reference_id = validate_server_reference_id(reference_id)
+    if configured_reference_id:
+        return configured_reference_id
+    url = validate_opencode_go_referral_js_url(js_url)
+    if not url:
+        return REFERRAL_QUERY_GET_REFERENCE_ID
+    cached = _REFERRAL_REFERENCE_CACHE.get(url)
+    if cached:
+        return cached
+    response = await client.get(
+        url,
+        headers={
+            **DEFAULT_BROWSER_HEADERS,
+            "Accept": "application/javascript, text/javascript, */*",
+            "Referer": f"{OPENCODE_BASE_URL}{OPENCODE_GO_PATH}",
+        },
+    )
+    response.raise_for_status()
+    try:
+        reference_id = extract_referral_reference_id(response.text)
+    except ValueError as exc:
+        raise RuntimeError(f"{exc}，OpenCode 前端接口可能已更新") from exc
+    _REFERRAL_REFERENCE_CACHE[url] = reference_id
+    return reference_id
 
 
 async def resolve_lite_subscription_reference_id(
@@ -348,6 +508,417 @@ def normalize_usage_result(subscription: Any, keys_payload: Any, workspace_id: s
         "api_key_masked": api_key_masked,
         "raw": raw,
     }
+
+
+REFERRAL_REWARD_FIELDS = (
+    "status",
+    "amount",
+    "email",
+    "source",
+    "time",
+    "id",
+    "description",
+    "action",
+    "inviteUrl",
+    "invite_url",
+    "planName",
+    "plan_name",
+    "currency",
+)
+
+
+def _find_referral_container(value: Any) -> Optional[dict[str, Any]]:
+    """递归查找含 reward / referral 字段的 dict。"""
+    if isinstance(value, dict):
+        if isinstance(value.get("reward"), dict) or any(
+            isinstance(value.get(k), dict) for k in ("referral", "goReferral", "invite", "invitation")
+        ):
+            return value
+        for key in ("data", "result", "referral", "goReferral", "invite", "invitation"):
+            found = _find_referral_container(value.get(key))
+            if found is not None:
+                return found
+        for item in value.values():
+            found = _find_referral_container(item)
+            if found is not None:
+                return found
+    if isinstance(value, list):
+        for item in value:
+            found = _find_referral_container(item)
+            if found is not None:
+                return found
+    return None
+
+
+def _extract_reward_object(container: dict[str, Any]) -> dict[str, Any]:
+    reward = container.get("reward")
+    if isinstance(reward, dict) and reward:
+        return reward
+    for k in ("referral", "goReferral", "invite", "invitation"):
+        inner = container.get(k)
+        if isinstance(inner, dict) and inner:
+            inner_reward = inner.get("reward")
+            if isinstance(inner_reward, dict) and inner_reward:
+                return inner_reward
+            return inner
+    return {}
+
+
+def _parse_referral_text(text: str) -> Optional[dict[str, Any]]:
+    """从 server-fn grid 序列化文本里提取 queryGoReferral 结构。
+
+    形如: ;0x...;((self.$R=...)[\"server-fn:2\"]=[],($R=>$R[0]={referralCode:\"...\",hasReferral:!0,
+        rewardAmount:500,rewards:$R[1]=[$R[2]={id:\"ref_...\",source:\"invitee\",status:\"applied\",
+        email:\"...\",amount:500,timeCreated:$R[3]=new Date(\"...\"),timeApplied:$R[4]=new Date(\"...\")}]})(...))
+    """
+    value = str(text or "")
+    if "referralCode" not in value and "hasReferral" not in value and "rewards:" not in value and '"reward"' not in value:
+        return None
+    has_match = REFERRAL_HAS_FIELD_RE.search(value)
+    code_match = REFERRAL_CODE_RE.search(value)
+    amount_match = REFERRAL_AMOUNT_RE.search(value)
+    if not has_match and not code_match and not amount_match and "rewards:" not in value:
+        return None
+    result: dict[str, Any] = {}
+    if code_match:
+        result["referralCode"] = code_match.group(1)
+        result["referral_code"] = code_match.group(1)
+    if has_match:
+        raw = has_match.group("value")
+        result["hasReferral"] = raw in ("!0", "true", "1")
+        result["has_referral"] = result["hasReferral"]
+    if amount_match:
+        result["rewardAmount"] = float(amount_match.group(1))
+        result["reward_amount"] = result["rewardAmount"]
+
+    rewards: list[dict[str, Any]] = []
+    # 截取 rewards:[...] 区段，按对象 {id:...} 逐个提取
+    rewards_section = value
+    rewards_idx = value.find("rewards:")
+    if rewards_idx >= 0:
+        rewards_section = value[rewards_idx:]
+    for obj_match in REFERRAL_REWARD_OBJECT_RE.finditer(rewards_section):
+        body = obj_match.group(0)
+        item: dict[str, Any] = {}
+        for field in REFERRAL_REWARD_FIELD_RE.finditer(body):
+            key = field.group("key")
+            raw_val = field.group("value")
+            item[key] = _parse_referral_scalar(raw_val)
+        for time_field in REFERRAL_REWARD_TIME_RE.finditer(body):
+            item[time_field.group("key")] = time_field.group("value")
+        if item.get("id") or item.get("status"):
+            rewards.append(item)
+    if rewards:
+        result["rewards"] = rewards
+    return result or None
+
+
+def _parse_referral_scalar(value: str) -> Any:
+    text = str(value or "").strip()
+    if text in ("!0", "true"):
+        return True
+    if text in ("!1", "false"):
+        return False
+    if text == "null":
+        return None
+    return _parse_js_scalar(text)
+
+
+def _parse_referral_struct(value: Any) -> Optional[dict[str, Any]]:
+    """从已结构化（dict / list）的返回里提取 referral 结构。"""
+    container = _find_referral_container(value)
+    if container is None and isinstance(value, dict):
+        container = value
+    if not isinstance(container, dict):
+        return None
+    # 真实结构：顶层 referralCode/hasReferral/rewardAmount + rewards[]
+    if any(k in container for k in ("referralCode", "hasReferral", "rewardAmount")) or isinstance(
+        container.get("rewards"), list
+    ):
+        result: dict[str, Any] = {}
+        if "referralCode" in container:
+            result["referralCode"] = container["referralCode"]
+            result["referral_code"] = container["referralCode"]
+        if "hasReferral" in container:
+            result["hasReferral"] = bool(container["hasReferral"])
+            result["has_referral"] = result["hasReferral"]
+        if "rewardAmount" in container:
+            result["rewardAmount"] = container["rewardAmount"]
+            result["reward_amount"] = container["rewardAmount"]
+        rewards_raw = container.get("rewards")
+        if isinstance(rewards_raw, list) and rewards_raw:
+            result["rewards"] = [r for r in rewards_raw if isinstance(r, dict)]
+        return result or None
+    return None
+
+
+def _normalize_referral(parsed: dict[str, Any]) -> dict[str, Any]:
+    """把提取到的 referral 结构归一为 {has_reward, claimed, reward}。"""
+    rewards = parsed.get("rewards") or []
+    # 是否有推荐：hasReferral 优先，否则看 rewards 是否非空
+    if "hasReferral" in parsed:
+        has_reward = bool(parsed["hasReferral"])
+    elif rewards:
+        has_reward = True
+    else:
+        has_reward = None
+    # 是否已用：任一 reward.status ∈ claimed 集合 → 已领；否则若有未领项 → 未领
+    claimed: Optional[bool] = None
+    if rewards:
+        statuses = [str(r.get("status") or "").strip().lower() for r in rewards]
+        any_claimed = any(s in REFERRAL_STATUS_CLAIMED for s in statuses)
+        if any_claimed:
+            claimed = True
+        elif any(s in REFERRAL_STATUS_UNCLAIMED for s in statuses):
+            claimed = False
+        elif any(s for s in statuses):
+            # 有状态但都不在已知集合 → 若 timeApplied 存在则视为已领
+            has_time_applied = any(bool(r.get("timeApplied")) for r in rewards)
+            claimed = True if has_time_applied else None
+    # reward 汇总：取第一个 reward 的关键字段 + 顶层 referralCode/amount
+    reward_summary: dict[str, Any] = {}
+    if "referralCode" in parsed:
+        reward_summary["referralCode"] = parsed["referralCode"]
+    if "rewardAmount" in parsed:
+        reward_summary["rewardAmount"] = parsed["rewardAmount"]
+    if rewards:
+        first = rewards[0]
+        for k in ("id", "source", "status", "email", "amount", "timeCreated", "timeApplied"):
+            if k in first:
+                reward_summary[k] = first[k]
+    if claimed is False and "has_referral" not in parsed:
+        pass
+    return {"has_reward": has_reward, "claimed": claimed, "reward": reward_summary, "rewards": rewards}
+
+
+def parse_referral_payload(payload: Any) -> dict[str, Any]:
+    """解析 server-fn queryGoReferral 返回 → {has_reward, claimed, reward, rewards}。
+
+    支持两种形态：
+    1) grid 序列化文本（self.$R=... / $R[0]={referralCode:...,rewards:[{...}]}）—— 文本正则提取。
+    2) 已结构化 dict（{referralCode, hasReferral, rewardAmount, rewards:[]}）。
+
+    状态判定：rewards[].status —— 'applied'/'claimed'/'used' 等 = 已用（已领）；
+              'available'/'pending' 等 = 未用（可领）。has_reward 来自 hasReferral。
+    """
+    parsed: Optional[dict[str, Any]] = None
+    if isinstance(payload, str):
+        parsed = _parse_referral_text(payload)
+        if not parsed:
+            # 可能是 JSON 字符串
+            try:
+                parsed = _parse_referral_struct(json.loads(payload))
+            except json.JSONDecodeError:
+                parsed = None
+    elif isinstance(payload, (dict, list)):
+        parsed = _parse_referral_struct(payload)
+    if not parsed:
+        return {"has_reward": None, "claimed": None, "reward": {}, "rewards": []}
+    return _normalize_referral(parsed)
+
+
+async def query_referral_for_account(
+    account: Any,
+    secret_key: str,
+    timeout: float,
+    log: LogCallback | None = None,
+    referral_query_js_url: str | None = None,
+    referral_query_server_id: str | None = None,
+) -> dict[str, Any]:
+    storage_state = _decrypt_json(_account_value(account, "storage_state_enc"), secret_key)
+    if not storage_state:
+        return _referral_invalid("缺少 OpenCode Go 登录态，无法查询邀请奖励")
+    timeout_s = max(10.0, min(QUERY_TIMEOUT_MS, float(timeout or QUERY_TIMEOUT_MS)))
+    try:
+        cookies = _cookies_from_storage_state(storage_state)
+        server_ids = _server_ids_from_storage_state(storage_state)
+        async with httpx.AsyncClient(cookies=cookies, headers=DEFAULT_BROWSER_HEADERS, follow_redirects=True, timeout=timeout_s) as client:
+            resp = await client.get(OPENCODE_BASE_URL)
+            resp.raise_for_status()
+            if "auth.opencode.ai" in str(resp.url) or "/auth" in str(resp.url):
+                raise RuntimeError("OpenCode 登录态已失效，请重新导入")
+            reference_ids: list[str] = []
+            configured_id = validate_server_reference_id(referral_query_server_id)
+            if configured_id:
+                reference_ids.append(configured_id)
+            for value in server_ids.get("referral.query", []):
+                _append_server_reference_ids(reference_ids, value)
+            try:
+                resolved = await resolve_referral_reference_id(client, referral_query_js_url, referral_query_server_id)
+                _append_server_reference_ids(reference_ids, resolved)
+            except Exception:
+                pass
+            for value in REFERRAL_QUERY_REFERENCE_IDS:
+                _append_server_reference_ids(reference_ids, value)
+            workspace_id = _account_value(account, "workspace_id")
+            payload = None
+            errors: list[str] = []
+            for reference_id in reference_ids:
+                try:
+                    payload = await query_referral(client, reference_id, workspace_id)
+                    break
+                except Exception as exc:
+                    errors.append(f"{reference_id[:8]}: {exc}")
+            if payload is None:
+                raise RuntimeError("OpenCode 邀请奖励查询接口不可用: " + "; ".join(errors))
+            parsed = parse_referral_payload(payload)
+            _log(log, "info", "opencode-go", f"OpenCode Go 邀请奖励查询成功 has_reward={parsed.get('has_reward')} claimed={parsed.get('claimed')}")
+            return {
+                "is_valid": True,
+                "has_reward": parsed.get("has_reward"),
+                "claimed": parsed.get("claimed"),
+                "reward": parsed.get("reward"),
+                "rewards": parsed.get("rewards"),
+                "raw": _safe_referral_raw(payload),
+                "checked_at": utc_now(),
+            }
+    except Exception as exc:
+        return _referral_invalid(_friendly_referral_error(exc))
+
+
+async def claim_referral_reward_for_account(
+    account: Any,
+    secret_key: str,
+    timeout: float,
+    log: LogCallback | None = None,
+    referral_query_js_url: str | None = None,
+    referral_query_server_id: str | None = None,
+    referral_action_server_id: str | None = None,
+) -> dict[str, Any]:
+    storage_state = _decrypt_json(_account_value(account, "storage_state_enc"), secret_key)
+    if not storage_state:
+        return _referral_invalid("缺少 OpenCode Go 登录态，无法领取邀请奖励")
+    timeout_s = max(10.0, min(QUERY_TIMEOUT_MS, float(timeout or QUERY_TIMEOUT_MS)))
+    try:
+        cookies = _cookies_from_storage_state(storage_state)
+        server_ids = _server_ids_from_storage_state(storage_state)
+        async with httpx.AsyncClient(cookies=cookies, headers=DEFAULT_BROWSER_HEADERS, follow_redirects=True, timeout=timeout_s) as client:
+            resp = await client.get(OPENCODE_BASE_URL)
+            resp.raise_for_status()
+            if "auth.opencode.ai" in str(resp.url) or "/auth" in str(resp.url):
+                raise RuntimeError("OpenCode 登录态已失效，请重新导入")
+            workspace_id = _account_value(account, "workspace_id")
+
+            # 1) 先查询拿 reward 信息，作为 action 参数
+            query_reference_ids: list[str] = []
+            configured_query = validate_server_reference_id(referral_query_server_id)
+            if configured_query:
+                query_reference_ids.append(configured_query)
+            for value in server_ids.get("referral.query", []):
+                _append_server_reference_ids(query_reference_ids, value)
+            try:
+                resolved = await resolve_referral_reference_id(client, referral_query_js_url, referral_query_server_id)
+                _append_server_reference_ids(query_reference_ids, resolved)
+            except Exception:
+                pass
+            for value in REFERRAL_QUERY_REFERENCE_IDS:
+                _append_server_reference_ids(query_reference_ids, value)
+            reward_payload = None
+            query_errors: list[str] = []
+            for reference_id in query_reference_ids:
+                try:
+                    reward_payload = await query_referral(client, reference_id, workspace_id)
+                    break
+                except Exception as exc:
+                    query_errors.append(f"{reference_id[:8]}: {exc}")
+            reward_info_full = parse_referral_payload(reward_payload) if reward_payload is not None else {}
+            reward_info = reward_info_full.get("reward") or {}
+            # 如果已领，直接返回
+            if reward_payload is not None:
+                parsed = reward_info_full
+                if parsed.get("claimed") is True:
+                    _log(log, "info", "opencode-go", "OpenCode Go 邀请奖励已领取，无需重复领取")
+                    return {
+                        "is_valid": True,
+                        "claimed": True,
+                        "message": "邀请奖励已领取，无需重复领取",
+                        "reward": parsed.get("reward"),
+                        "rewards": parsed.get("rewards"),
+                        "raw": _safe_referral_raw(reward_payload),
+                    }
+
+            # 2) 调 applyGoReferralReward_action：参数为 [workspace_id, reward_id]（两个字符串）。
+            #    从查询结果里取 reward.id（首个 reward 的 id）。
+            action_reference_id = validate_server_reference_id(referral_action_server_id) or REFERRAL_ACTION_REFERENCE_ID
+            for value in server_ids.get("referral.action", []):
+                action_candidate = _first_server_reference_id(value)
+                if action_candidate:
+                    action_reference_id = action_candidate
+                    break
+            action_args: list[Any] = [workspace_id]
+            rewards_list = reward_info_full.get("rewards") or []
+            # 优先取未领取的 reward id，避免重复 apply 已领的
+            unclaimed_reward = next(
+                (r for r in rewards_list
+                 if str(r.get("status") or "").strip().lower() in REFERRAL_STATUS_UNCLAIMED),
+                None,
+            )
+            target_reward = unclaimed_reward or (rewards_list[0] if rewards_list else None)
+            reward_id = ""
+            if target_reward and target_reward.get("id"):
+                reward_id = str(target_reward["id"])
+                action_args.append(reward_id)
+            if not reward_id:
+                # 缺少 reward id，无法领取
+                return _referral_invalid(
+                    "未找到可领取的邀请奖励（缺少 reward id）；该账号可能没有未领取的奖励"
+                )
+            result = await apply_referral_reward(client, action_reference_id, action_args)
+            # 3) 解析领取结果：再看一次 referral 状态，或宽松判定返回非空即成功
+            reparse = parse_referral_payload(result) if result is not None else {"has_reward": None, "claimed": None, "reward": {}}
+            claimed = reparse.get("claimed")
+            if claimed is None:
+                # 返回非空 data 视为成功
+                unwrapped = _unwrap_data(result)
+                claimed = bool(unwrapped) or bool(reparse.get("reward"))
+            _log(log, "info", "opencode-go", f"OpenCode Go 领取邀请奖励结果 claimed={claimed}")
+            return {
+                "is_valid": True,
+                "claimed": bool(claimed),
+                "message": "领取成功" if claimed else "已提交但未能确认是否领取成功",
+                "reward": reparse.get("reward") or reward_info,
+                "rewards": reparse.get("rewards") or reward_info_full.get("rewards"),
+                "raw": _safe_referral_raw(result),
+            }
+    except Exception as exc:
+        return _referral_invalid(_friendly_referral_error(exc))
+
+
+def _first_server_reference_id(value: Any) -> Optional[str]:
+    ids: list[str] = []
+    _append_server_reference_ids(ids, value)
+    return ids[0] if ids else None
+
+
+def _safe_referral_raw(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: ("***" if _is_opencode_referral_sensitive(str(key)) else _safe_referral_raw(item)) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_safe_referral_raw(item) for item in value]
+    return value
+
+
+def _is_opencode_referral_sensitive(key: str) -> bool:
+    normalized = key.replace("-", "_").lower()
+    return "password" in normalized or "token" in normalized or "secret" in normalized
+
+
+def _referral_invalid(message: str) -> dict[str, Any]:
+    return {
+        "is_valid": False,
+        "has_reward": None,
+        "claimed": None,
+        "reward": {},
+        "invalid_message": message,
+        "checked_at": utc_now(),
+    }
+
+
+def _friendly_referral_error(exc: Exception) -> str:
+    text = str(exc)
+    if "server runtime export changed" in text or "server reference" in text.lower() or "接口" in text:
+        return f"OpenCode 前端接口可能已更新: {text}"
+    return f"OpenCode Go 邀请奖励操作失败: {text}"
 
 
 def public_usage_window(value: Any) -> dict[str, Any]:

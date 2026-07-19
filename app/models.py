@@ -220,6 +220,9 @@ class Database:
                     cpa_reenable_pending INTEGER NOT NULL DEFAULT 0,
                     cpa_last_action_at TEXT,
                     cpa_last_action_error TEXT,
+                    referral_has_reward INTEGER,
+                    referral_claimed INTEGER,
+                    referral_reward_json TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -264,6 +267,7 @@ class Database:
             self._migrate_accounts_eliminated(conn)
             self._migrate_opencode_go_recovery_email(conn)
             self._migrate_opencode_go_cpa_state(conn)
+            self._migrate_opencode_go_referral(conn)
             self._migrate_group_rate_records_monitor_group(conn)
             conn.execute(
                 """
@@ -497,6 +501,17 @@ class Database:
             conn.execute("ALTER TABLE opencode_go_accounts ADD COLUMN cpa_last_action_at TEXT")
         if "cpa_last_action_error" not in column_names:
             conn.execute("ALTER TABLE opencode_go_accounts ADD COLUMN cpa_last_action_error TEXT")
+
+    @staticmethod
+    def _migrate_opencode_go_referral(conn: sqlite3.Connection) -> None:
+        columns = conn.execute("PRAGMA table_info(opencode_go_accounts)").fetchall()
+        column_names = {row["name"] for row in columns}
+        if "referral_has_reward" not in column_names:
+            conn.execute("ALTER TABLE opencode_go_accounts ADD COLUMN referral_has_reward INTEGER")
+        if "referral_claimed" not in column_names:
+            conn.execute("ALTER TABLE opencode_go_accounts ADD COLUMN referral_claimed INTEGER")
+        if "referral_reward_json" not in column_names:
+            conn.execute("ALTER TABLE opencode_go_accounts ADD COLUMN referral_reward_json TEXT")
 
     @staticmethod
     def _migrate_group_rate_records_monitor_group(conn: sqlite3.Connection) -> None:
@@ -1413,6 +1428,42 @@ class Database:
                     raw_json,
                     result.get("invalid_message") or result.get("error"),
                     checked_at,
+                ),
+            )
+
+    def update_opencode_go_referral(
+        self,
+        account_id: int,
+        has_reward: bool | None,
+        claimed: bool | None,
+        reward: Any = None,
+        error: str | None = None,
+    ) -> None:
+        """更新邀请奖励查询结果列（referral_has_reward / referral_claimed / referral_reward_json）。
+
+        has_reward/claimed 为 None 时不改动对应列（保留未知状态），仅在明确得知时覆盖。
+        """
+        reward_json = encrypt_value(_json_dumps(reward), self.secret_key) if reward else None
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE opencode_go_accounts
+                SET referral_has_reward = CASE WHEN ? IS NOT NULL THEN ? ELSE referral_has_reward END,
+                    referral_claimed = CASE WHEN ? IS NOT NULL THEN ? ELSE referral_claimed END,
+                    referral_reward_json = ?,
+                    last_error = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    1 if has_reward else (0 if has_reward is False else None),
+                    1 if has_reward else (0 if has_reward is False else None),
+                    1 if claimed else (0 if claimed is False else None),
+                    1 if claimed else (0 if claimed is False else None),
+                    reward_json,
+                    error,
+                    utc_now(),
+                    account_id,
                 ),
             )
 

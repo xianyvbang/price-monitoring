@@ -78,6 +78,8 @@ export const api = {
   importOpencodeGoSession: (id, payload) => request(`/api/opencode-go/accounts/${id}/session`, { method: "POST", body: JSON.stringify(payload) }),
   refreshOpencodeGo: (id) => request(`/api/opencode-go/accounts/${id}/refresh`, { method: "POST" }),
   acquireOpencodeGo: (id) => request(`/api/opencode-go/accounts/${id}/acquire`, { method: "POST" }),
+  opencodeGoReferral: (id) => request(`/api/opencode-go/accounts/${id}/referral`, { method: "POST" }),
+  claimOpencodeGoReferral: (id) => request(`/api/opencode-go/accounts/${id}/referral/claim`, { method: "POST" }),
   refreshAllOpencodeGo: () => request("/api/opencode-go/query-all", { method: "POST" }),
   opencodeGoImportLogs: (params = {}) => request(`/api/opencode-go/import-logs${queryString(params)}`),
   opencodeGoHistory: (id, params = {}) => request(`/api/opencode-go/accounts/${id}/history${queryString(params)}`),

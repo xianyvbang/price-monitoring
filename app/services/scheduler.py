@@ -15,7 +15,7 @@ from app.services.cpa_admin import (
     cpa_admin_client_from_db,
 )
 from app.services.emailer import build_group_rate_change_email, build_reminder_email, send_email
-from app.services.opencode_go import refresh_opencode_go_account
+from app.services.opencode_go import query_referral_for_account, refresh_opencode_go_account
 
 OPENCODE_GO_CPA_USAGE_THRESHOLD = 99.0
 
@@ -335,6 +335,25 @@ async def query_opencode_go_for_account(db: Database, account_id: int, *, respec
     if result.get("is_valid"):
         db.add_log("info", "opencode-go", f"{account['name']} OpenCode Go 刷新成功")
         await sync_opencode_go_cpa_state(db, account, result)
+        # 随用量刷新一起查询邀请奖励状态（失败不影响主刷新）
+        try:
+            referral = await query_referral_for_account(
+                account,
+                db.secret_key,
+                settings["request_timeout"],
+                db.add_log,
+                referral_query_js_url=db.get_setting("opencode_go_referral_query_js_url", ""),
+                referral_query_server_id=db.get_setting("opencode_go_referral_query_server_id", ""),
+            )
+            db.update_opencode_go_referral(
+                account_id,
+                referral.get("has_reward"),
+                referral.get("claimed"),
+                referral.get("reward") or None,
+                referral.get("invalid_message") if not referral.get("is_valid") else None,
+            )
+        except Exception as exc:
+            db.add_log("warning", "opencode-go", f"{account['name']} OpenCode Go 邀请奖励刷新失败: {exc}")
     else:
         db.add_log("error", "opencode-go", f"{account['name']} OpenCode Go 刷新失败: {result.get('invalid_message') or '未知错误'}")
     return result

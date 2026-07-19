@@ -725,6 +725,32 @@ a {
   font-weight: 600;
 }
 
+.referral-detail {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  width: 100%;
+}
+.referral-detail li {
+  background: var(--panel-soft);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  padding: 6px 10px;
+  word-break: break-all;
+}
+.referral-detail strong {
+  color: var(--muted);
+  margin-right: 6px;
+}
+.referral-status-sub {
+  margin-left: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .sub2api-group-picker {
   min-height: 96px;
   width: 100%;

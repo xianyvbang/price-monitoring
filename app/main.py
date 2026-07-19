@@ -46,12 +46,21 @@ from app.services.opencode_go import (
     OPENCODE_GO_KEY_LIST_SERVER_ID_SETTING,
     OPENCODE_GO_LITE_JS_URL_SETTING,
     OPENCODE_GO_LITE_SERVER_ID_SETTING,
+    OPENCODE_GO_REFERRAL_ACTION_SERVER_ID_SETTING,
+    OPENCODE_GO_REFERRAL_QUERY_JS_URL_SETTING,
+    OPENCODE_GO_REFERRAL_QUERY_SERVER_ID_SETTING,
+    REFERRAL_ACTION_REFERENCE_ID,
+    REFERRAL_QUERY_GET_REFERENCE_ID,
+    claim_referral_reward_for_account,
     fetch_key_list_reference_id,
     fetch_lite_subscription_reference_id,
+    fetch_referral_reference_id,
     mask_api_key,
     public_usage_window,
+    query_referral_for_account,
     validate_opencode_go_key_list_js_url,
     validate_opencode_go_lite_js_url,
+    validate_opencode_go_referral_js_url,
 )
 from app.services.cpa_admin import (
     CPA_AUTHORIZATION_SETTING,
@@ -539,6 +548,7 @@ def public_opencode_go_account(row: Any, include_api_key: bool = False) -> dict[
     recovery_email_enc = data.pop("recovery_email_enc", None)
     storage_state_enc = data.pop("storage_state_enc", None)
     api_key_enc = data.pop("api_key_enc", None)
+    referral_reward_enc = data.pop("referral_reward_json", None)
     email = decrypt_value(email_enc, db.secret_key) if email_enc else ""
     recovery_email = decrypt_value(recovery_email_enc, db.secret_key) if recovery_email_enc else ""
     api_key = decrypt_value(api_key_enc, db.secret_key) if include_api_key and api_key_enc else None
@@ -560,6 +570,12 @@ def public_opencode_go_account(row: Any, include_api_key: bool = False) -> dict[
     data["weekly_usage"] = public_usage_window(data.pop("last_weekly_usage", None))
     data["monthly_usage"] = public_usage_window(data.pop("last_monthly_usage", None))
     data.pop("last_raw_json", None)
+    referral_has_reward = data.pop("referral_has_reward", None)
+    referral_claimed = data.pop("referral_claimed", None)
+    data["referral_has_reward"] = None if referral_has_reward is None else bool(referral_has_reward)
+    data["referralHasReward"] = data["referral_has_reward"]
+    data["referral_claimed"] = None if referral_claimed is None else bool(referral_claimed)
+    data["referralClaimed"] = data["referral_claimed"]
     data["created_at_formatted"] = format_china_time(data.get("created_at"))
     data["createdAtFormatted"] = data["created_at_formatted"]
     data["createdAt"] = data.get("created_at")
@@ -1755,6 +1771,16 @@ async def api_opencode_go_settings(request: Request):
             "defaultKeyListServerId": KEY_LIST_GET_REFERENCE_ID,
             "key_list_server_instance": KEY_LIST_SERVER_INSTANCE,
             "keyListServerInstance": KEY_LIST_SERVER_INSTANCE,
+            "referral_query_js_url": db.get_setting(OPENCODE_GO_REFERRAL_QUERY_JS_URL_SETTING, ""),
+            "referralQueryJsUrl": db.get_setting(OPENCODE_GO_REFERRAL_QUERY_JS_URL_SETTING, ""),
+            "referral_query_server_id": db.get_setting(OPENCODE_GO_REFERRAL_QUERY_SERVER_ID_SETTING, ""),
+            "referralQueryServerId": db.get_setting(OPENCODE_GO_REFERRAL_QUERY_SERVER_ID_SETTING, ""),
+            "referral_action_server_id": db.get_setting(OPENCODE_GO_REFERRAL_ACTION_SERVER_ID_SETTING, ""),
+            "referralActionServerId": db.get_setting(OPENCODE_GO_REFERRAL_ACTION_SERVER_ID_SETTING, ""),
+            "default_referral_query_server_id": REFERRAL_QUERY_GET_REFERENCE_ID,
+            "defaultReferralQueryServerId": REFERRAL_QUERY_GET_REFERENCE_ID,
+            "default_referral_action_server_id": REFERRAL_ACTION_REFERENCE_ID,
+            "defaultReferralActionServerId": REFERRAL_ACTION_REFERENCE_ID,
         }
     }
 
@@ -1765,9 +1791,25 @@ async def api_save_opencode_go_settings(request: Request):
     payload = await request.json()
     raw_url = payload.get("lite_subscription_js_url", payload.get("liteSubscriptionJsUrl", payload.get("js_url", payload.get("jsUrl", "")))) if isinstance(payload, dict) else ""
     raw_key_url = payload.get("key_list_js_url", payload.get("keyListJsUrl", payload.get("api_key_js_url", payload.get("apiKeyJsUrl", KEY_LIST_DEFAULT_JS_URL)))) if isinstance(payload, dict) else KEY_LIST_DEFAULT_JS_URL
+    raw_referral_url = (
+        payload.get("referral_query_js_url", payload.get("referralQueryJsUrl", ""))
+        if isinstance(payload, dict)
+        else ""
+    )
+    raw_referral_query_server_id = (
+        payload.get("referral_query_server_id", payload.get("referralQueryServerId", ""))
+        if isinstance(payload, dict)
+        else ""
+    )
+    raw_referral_action_server_id = (
+        payload.get("referral_action_server_id", payload.get("referralActionServerId", ""))
+        if isinstance(payload, dict)
+        else ""
+    )
     try:
         js_url = validate_opencode_go_lite_js_url(raw_url)
         key_js_url = validate_opencode_go_key_list_js_url(raw_key_url)
+        referral_js_url = validate_opencode_go_referral_js_url(raw_referral_url)
     except ValueError as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
     server_id = ""
@@ -1780,10 +1822,21 @@ async def api_save_opencode_go_settings(request: Request):
         key_server_id = await fetch_key_list_reference_id(key_js_url, timeout=15)
     except Exception as exc:
         return JSONResponse({"ok": False, "message": f"解析 API key JS 文件失败: {exc}"}, status_code=400)
+    # 邀请奖励查询 server id：配置优先，否则解析 JS（可空），否则用硬编码默认
+    referral_query_server_id = str(raw_referral_query_server_id or "").strip()
+    if not referral_query_server_id and referral_js_url:
+        try:
+            referral_query_server_id = await fetch_referral_reference_id(referral_js_url, timeout=15)
+        except Exception as exc:
+            return JSONResponse({"ok": False, "message": f"解析邀请奖励 JS 文件失败: {exc}"}, status_code=400)
+    referral_action_server_id = str(raw_referral_action_server_id or "").strip()
     db.set_setting(OPENCODE_GO_LITE_JS_URL_SETTING, js_url)
     db.set_setting(OPENCODE_GO_LITE_SERVER_ID_SETTING, server_id)
     db.set_setting(OPENCODE_GO_KEY_LIST_JS_URL_SETTING, key_js_url)
     db.set_setting(OPENCODE_GO_KEY_LIST_SERVER_ID_SETTING, key_server_id)
+    db.set_setting(OPENCODE_GO_REFERRAL_QUERY_JS_URL_SETTING, referral_js_url)
+    db.set_setting(OPENCODE_GO_REFERRAL_QUERY_SERVER_ID_SETTING, referral_query_server_id)
+    db.set_setting(OPENCODE_GO_REFERRAL_ACTION_SERVER_ID_SETTING, referral_action_server_id)
     scheduler.notify_settings_changed()
     general_settings = db.get_general_settings()
     cpa_auto_delete_enabled = _opencode_go_cpa_auto_delete_enabled()
@@ -1815,6 +1868,16 @@ async def api_save_opencode_go_settings(request: Request):
             "defaultKeyListServerId": KEY_LIST_GET_REFERENCE_ID,
             "key_list_server_instance": KEY_LIST_SERVER_INSTANCE,
             "keyListServerInstance": KEY_LIST_SERVER_INSTANCE,
+            "referral_query_js_url": referral_js_url,
+            "referralQueryJsUrl": referral_js_url,
+            "referral_query_server_id": referral_query_server_id,
+            "referralQueryServerId": referral_query_server_id,
+            "referral_action_server_id": referral_action_server_id,
+            "referralActionServerId": referral_action_server_id,
+            "default_referral_query_server_id": REFERRAL_QUERY_GET_REFERENCE_ID,
+            "defaultReferralQueryServerId": REFERRAL_QUERY_GET_REFERENCE_ID,
+            "default_referral_action_server_id": REFERRAL_ACTION_REFERENCE_ID,
+            "defaultReferralActionServerId": REFERRAL_ACTION_REFERENCE_ID,
         },
     }
 
@@ -2192,6 +2255,110 @@ async def api_acquire_opencode_go_account(request: Request, account_id: int):
         {"ok": False, "message": error, "account": public_opencode_go_account(updated), "acquired": False},
         status_code=400,
     )
+
+
+@app.post("/api/opencode-go/accounts/{account_id}/referral")
+async def api_opencode_go_referral(request: Request, account_id: int):
+    """即时查询 OpenCode Go 邀请奖励：是否存在 / 是否已用 + reward 详情。"""
+    require_user(request)
+    account = db.get_opencode_go_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="OpenCode Go 账号不存在")
+    settings = db.get_general_settings()
+    referral = await query_referral_for_account(
+        account,
+        db.secret_key,
+        settings["request_timeout"],
+        db.add_log,
+        referral_query_js_url=db.get_setting(OPENCODE_GO_REFERRAL_QUERY_JS_URL_SETTING, ""),
+        referral_query_server_id=db.get_setting(OPENCODE_GO_REFERRAL_QUERY_SERVER_ID_SETTING, ""),
+    )
+    db.update_opencode_go_referral(
+        account_id,
+        referral.get("has_reward"),
+        referral.get("claimed"),
+        referral.get("reward") or None,
+        referral.get("invalid_message") if not referral.get("is_valid") else None,
+    )
+    updated = db.get_opencode_go_account(account_id)
+    db.add_log(
+        "info" if referral.get("is_valid") else "warning",
+        "opencode-go",
+        f"API 查询 OpenCode Go 邀请奖励: {account['name']}"
+        + ("" if referral.get("is_valid") else f" - {referral.get('invalid_message', '失败')}"),
+    )
+    return {
+        "ok": bool(referral.get("is_valid")),
+        "message": referral.get("invalid_message") or "",
+        "account": public_opencode_go_account(updated),
+        "referral": {
+            "has_reward": referral.get("has_reward"),
+            "hasReward": referral.get("has_reward"),
+            "claimed": referral.get("claimed"),
+            "reward": referral.get("reward") or {},
+            "rewards": referral.get("rewards") or [],
+            "raw": referral.get("raw"),
+        },
+    }
+
+
+@app.post("/api/opencode-go/accounts/{account_id}/referral/claim")
+async def api_claim_opencode_go_referral(request: Request, account_id: int):
+    """领取 OpenCode Go 邀请奖励：先查询拿 reward 信息，再调 applyGoReferralReward。"""
+    require_user(request)
+    account = db.get_opencode_go_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="OpenCode Go 账号不存在")
+    settings = db.get_general_settings()
+    result = await claim_referral_reward_for_account(
+        account,
+        db.secret_key,
+        settings["request_timeout"],
+        db.add_log,
+        referral_query_js_url=db.get_setting(OPENCODE_GO_REFERRAL_QUERY_JS_URL_SETTING, ""),
+        referral_query_server_id=db.get_setting(OPENCODE_GO_REFERRAL_QUERY_SERVER_ID_SETTING, ""),
+        referral_action_server_id=db.get_setting(OPENCODE_GO_REFERRAL_ACTION_SERVER_ID_SETTING, ""),
+    )
+    db.update_opencode_go_referral(
+        account_id,
+        None,  # 领取不改 has_reward，由结果 claimed 反推
+        result.get("claimed"),
+        result.get("reward") or None,
+        result.get("invalid_message") if not result.get("is_valid") else None,
+    )
+    updated = db.get_opencode_go_account(account_id)
+    db.add_log(
+        "info" if result.get("is_valid") else "warning",
+        "opencode-go",
+        f"API 领取 OpenCode Go 邀请奖励: {account['name']}"
+        + (f" - {result.get('message', '')}" if result.get("is_valid") else f" - {result.get('invalid_message', '失败')}"),
+    )
+    if not result.get("is_valid"):
+        return JSONResponse(
+            {
+                "ok": False,
+                "message": result.get("invalid_message") or "领取失败",
+                "account": public_opencode_go_account(updated),
+                "referral": {
+                    "claimed": result.get("claimed"),
+                    "reward": result.get("reward") or {},
+                    "rewards": result.get("rewards") or [],
+                    "raw": result.get("raw"),
+                },
+            },
+            status_code=400,
+        )
+    return {
+        "ok": True,
+        "message": result.get("message") or "领取成功",
+        "account": public_opencode_go_account(updated),
+        "referral": {
+            "claimed": result.get("claimed"),
+            "reward": result.get("reward") or {},
+            "rewards": result.get("rewards") or [],
+            "raw": result.get("raw"),
+        },
+    }
 
 
 @app.post("/api/opencode-go/query-all")
