@@ -759,7 +759,7 @@ async def test_opencode_go_query_all_refreshes_weekly_limit_and_manual_refreshes
     assert calls[-1] == "high@example.com"
 
 
-def test_opencode_go_accounts_summary_averages_all_eligible_accounts(tmp_path, monkeypatch):
+def test_opencode_go_accounts_summary_averages_only_normal_eligible_accounts(tmp_path, monkeypatch):
     db = setup_test_db(tmp_path, monkeypatch)
     account_ids = []
     for index in range(25):
@@ -768,11 +768,16 @@ def test_opencode_go_accounts_summary_averages_all_eligible_accounts(tmp_path, m
 
     db.update_opencode_go_result(
         account_ids[0],
-        {"is_valid": True, "rolling_usage": {"usagePercent": 10}, "weekly_usage": {"usagePercent": 20}},
+        {
+            "is_valid": True,
+            "rolling_usage": {"usagePercent": 10},
+            "weekly_usage": {"usagePercent": 20},
+            "monthly_usage": {"usagePercent": 30},
+        },
     )
     db.update_opencode_go_result(
         account_ids[1],
-        {"is_valid": True, "weekly_usage": {"usagePercent": 98.9}},
+        {"is_valid": True, "weekly_usage": {"usagePercent": 98.9}, "monthly_usage": {"usagePercent": 50}},
     )
     db.update_opencode_go_result(
         account_ids[2],
@@ -782,7 +787,23 @@ def test_opencode_go_accounts_summary_averages_all_eligible_accounts(tmp_path, m
         account_ids[3],
         {"is_valid": True, "rolling_usage": {"usagePercent": 80}, "weekly_usage": {"usagePercent": 100}},
     )
-    for account_id in account_ids[5:]:
+    db.update_opencode_go_result(
+        account_ids[4],
+        {"is_valid": True, "rolling_usage": {"usagePercent": 90}, "weekly_usage": {"usagePercent": 10}, "monthly_usage": {"usagePercent": 90}},
+    )
+    db.update_opencode_go_session(account_ids[4], {"cookies": []})
+    db.update_opencode_go_result(
+        account_ids[5],
+        {"is_valid": True, "rolling_usage": {"usagePercent": 90}, "weekly_usage": {"usagePercent": 10}, "monthly_usage": {"usagePercent": 90}},
+    )
+    db.update_opencode_go_cpa_state(account_ids[5], provider_deleted=True)
+    db.update_opencode_go_result(
+        account_ids[6],
+        {"is_valid": True, "rolling_usage": {"usagePercent": 90}, "weekly_usage": {"usagePercent": 10}, "monthly_usage": {"usagePercent": 90}},
+    )
+    with db.connect() as conn:
+        conn.execute("UPDATE opencode_go_accounts SET last_status = 'invalid' WHERE id = ?", (account_ids[6],))
+    for account_id in account_ids[7:]:
         db.update_opencode_go_result(
             account_id,
             {"is_valid": True, "rolling_usage": {"usagePercent": 90}, "weekly_usage": {"usagePercent": 100}},
@@ -810,6 +831,8 @@ def test_opencode_go_accounts_summary_averages_all_eligible_accounts(tmp_path, m
     assert summary["overallRollingUsagePercent"] == pytest.approx(5.0)
     assert summary["overall_weekly_usage_percent"] == pytest.approx(59.45)
     assert summary["overallWeeklyUsagePercent"] == pytest.approx(59.45)
+    assert summary["overall_monthly_usage_percent"] == pytest.approx(40.0)
+    assert summary["overallMonthlyUsagePercent"] == pytest.approx(40.0)
 
 
 def test_opencode_go_accounts_summary_returns_null_when_no_eligible_accounts(tmp_path, monkeypatch):
@@ -827,6 +850,7 @@ def test_opencode_go_accounts_summary_returns_null_when_no_eligible_accounts(tmp
     assert summary["eligible_account_count"] == 0
     assert summary["overall_rolling_usage_percent"] is None
     assert summary["overall_weekly_usage_percent"] is None
+    assert summary["overall_monthly_usage_percent"] is None
     assert db.get_opencode_go_account(missing_id)
 
 

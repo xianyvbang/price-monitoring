@@ -587,18 +587,24 @@ def opencode_go_overall_usage_summary(rows: list[Any]) -> dict[str, Any]:
     eligible_count = 0
     rolling_usage_sum = 0.0
     weekly_usage_sum = 0.0
+    monthly_usage_sum = 0.0
     for row in rows:
         data = row_to_dict(row)
+        if data.get("last_status") != "valid" or bool(data.get("cpa_provider_deleted")):
+            continue
         weekly_percent = _opencode_go_usage_percent(data.get("last_weekly_usage"))
         if weekly_percent is None or weekly_percent >= 99:
             continue
         rolling_percent = _opencode_go_usage_percent(data.get("last_rolling_usage")) or 0.0
+        monthly_percent = _opencode_go_usage_percent(data.get("last_monthly_usage")) or 0.0
         eligible_count += 1
         rolling_usage_sum += rolling_percent
         weekly_usage_sum += weekly_percent
+        monthly_usage_sum += monthly_percent
 
     rolling_average = rolling_usage_sum / eligible_count if eligible_count else None
     weekly_average = weekly_usage_sum / eligible_count if eligible_count else None
+    monthly_average = monthly_usage_sum / eligible_count if eligible_count else None
     return {
         "eligible_account_count": eligible_count,
         "eligibleAccountCount": eligible_count,
@@ -606,6 +612,8 @@ def opencode_go_overall_usage_summary(rows: list[Any]) -> dict[str, Any]:
         "overallRollingUsagePercent": rolling_average,
         "overall_weekly_usage_percent": weekly_average,
         "overallWeeklyUsagePercent": weekly_average,
+        "overall_monthly_usage_percent": monthly_average,
+        "overallMonthlyUsagePercent": monthly_average,
     }
 
 

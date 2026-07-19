@@ -76,6 +76,7 @@ const lastSuccessAt = computed(() => summary.value.last_success_at ?? summary.va
 const eligibleAccountCount = computed(() => summary.value.eligible_account_count ?? summary.value.eligibleAccountCount ?? 0);
 const overallRollingUsage = computed(() => usagePercentWindow(summary.value.overall_rolling_usage_percent ?? summary.value.overallRollingUsagePercent));
 const overallWeeklyUsage = computed(() => usagePercentWindow(summary.value.overall_weekly_usage_percent ?? summary.value.overallWeeklyUsagePercent));
+const overallMonthlyUsage = computed(() => usagePercentWindow(summary.value.overall_monthly_usage_percent ?? summary.value.overallMonthlyUsagePercent));
 const selectedAccounts = computed(() => accounts.value.filter((account) => selectedAccountIds.value.includes(account.id)));
 const selectedImportableAccounts = computed(() => selectedAccounts.value.filter(hasApiKey));
 const selectedImportCount = computed(() => selectedImportableAccounts.value.length);
@@ -912,7 +913,14 @@ onBeforeUnmount(() => {
         </div>
         <el-progress :percentage="usagePercent(overallWeeklyUsage)" :stroke-width="8" :color="usageColor(overallWeeklyUsage)" :show-text="false" />
       </div>
-      <div class="overall-usage-note">按 {{ eligibleAccountCount }} 个 7d&lt;99% 账号统计</div>
+      <div class="overall-usage-card">
+        <div>
+          <span>整体30d</span>
+          <strong>{{ usageLabel(overallMonthlyUsage) }}</strong>
+        </div>
+        <el-progress :percentage="usagePercent(overallMonthlyUsage)" :stroke-width="8" :color="usageColor(overallMonthlyUsage)" :show-text="false" />
+      </div>
+      <div class="overall-usage-note">按 {{ eligibleAccountCount }} 个正常且 7d&lt;99% 账号统计</div>
     </div>
 
     <div class="opencode-config-strip">

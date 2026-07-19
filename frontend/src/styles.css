@@ -344,7 +344,7 @@ a {
   border-radius: 8px;
   display: grid;
   gap: 12px;
-  grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) auto;
+  grid-template-columns: repeat(3, minmax(150px, 1fr)) auto;
   margin-bottom: 16px;
   padding: 12px 14px;
 }
@@ -917,6 +917,15 @@ a {
 @media (max-width: 1180px) {
   .stat-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .opencode-overall-strip {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .overall-usage-note {
+    grid-column: 1 / -1;
+    justify-self: start;
   }
 }
 
