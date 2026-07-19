@@ -898,6 +898,38 @@ def test_opencode_go_bulk_import_rejects_bad_lines(tmp_path, monkeypatch):
     assert "账号|密码" in response.json()["message"]
 
 
+def test_opencode_go_bulk_import_accepts_dash_separator(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+
+    def fake_acquire(email, password, recovery_email=None):
+        return {
+            "storage_state": {"cookies": [{"name": "auth", "value": "x", "domain": ".opencode.ai", "path": "/"}], "origins": []},
+            "workspace_id": "wrk_TEST",
+            "api_key": f"sk-{email.split('@')[0]}",
+            "status": "ok",
+            "error": "",
+            "info": ["fake"],
+        }
+
+    monkeypatch.setattr("app.main.acquire_opencode_go_account", fake_acquire)
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.post(
+            "/api/opencode-go/accounts/bulk",
+            json={"bulk_text": "user1@example.com----pass1----recover1@example.com\nuser2@example.com----pass2"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["count"] == 2
+    first = db.get_opencode_go_account_by_email("user1@example.com")
+    assert decrypt_value(first["password_enc"], "test-key") == "pass1"
+    assert decrypt_value(first["recovery_email_enc"], "test-key") == "recover1@example.com"
+    second = db.get_opencode_go_account_by_email("user2@example.com")
+    assert decrypt_value(second["password_enc"], "test-key") == "pass2"
+
+
 def test_opencode_go_bulk_import_skips_duplicates_and_keeps_failed(tmp_path, monkeypatch):
     db = setup_test_db(tmp_path, monkeypatch)
 

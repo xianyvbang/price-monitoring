@@ -3006,9 +3006,13 @@ async def import_bulk_opencode_go_accounts(bulk_text: str, skip_duplicates: bool
         raw_line = line.strip()
         if not raw_line:
             continue
-        parts = [part.strip() for part in raw_line.split("|")]
+        # 兼容两种分隔符：----（与 opencode_login_http.py 脚本一致）和 |。每行按先出现的分隔符切分。
+        if "----" in raw_line:
+            parts = [part.strip() for part in raw_line.split("----")]
+        else:
+            parts = [part.strip() for part in raw_line.split("|")]
         if len(parts) not in {2, 3}:
-            errors.append(f"第 {line_number} 行格式错误，请使用 账号|密码 或 账号|密码|恢复电子邮件")
+            errors.append(f"第 {line_number} 行格式错误，请使用 账号|密码 或 账号|密码|恢复电子邮件（也支持用 ---- 分隔）")
             continue
         email = parts[0]
         password = parts[1]

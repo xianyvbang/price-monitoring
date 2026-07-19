@@ -1259,7 +1259,7 @@ onBeforeUnmount(() => {
             type="textarea"
             :rows="12"
             resize="vertical"
-            placeholder="user1@example.com|password1&#10;user2@example.com|password2|recover@example.com"
+            placeholder="user1@example.com|password1&#10;user2@example.com|password2|recover@example.com&#10;（也支持用 ---- 分隔：user3@example.com----password3----recover@example.com）"
             autocomplete="off"
           />
         </el-form-item>
@@ -1267,7 +1267,7 @@ onBeforeUnmount(() => {
           <el-checkbox v-model="skipDuplicates">跳过已存在账号（重复则不重新登录获取）</el-checkbox>
         </el-form-item>
         <div class="import-helper">
-          <span>格式：账号|密码 或 账号|密码|恢复电子邮件，一行一条</span>
+          <span>格式：账号|密码 或 账号|密码|恢复电子邮件，一行一条（也支持用 ---- 分隔）</span>
           <span>导入时会逐条自动登录 opencode.ai 获取 API key 和登录态，失败也建号并标记错误状态</span>
           <span>勾选跳过时，已存在账号整行跳过、不跑浏览器；否则会对重复账号重新登录获取</span>
           <span v-if="importingBulk" class="import-tip-warn">正在逐条登录获取（每条约 15-30 秒），请勿关闭页面…</span>
