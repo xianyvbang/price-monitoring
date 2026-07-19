@@ -1128,6 +1128,7 @@ class Database:
         offset: int = 0,
         sort_by: str = "name",
         sort_order: str = "asc",
+        status: str = "",
     ) -> list[sqlite3.Row]:
         query = "SELECT * FROM opencode_go_accounts"
         params: list[Any] = []
@@ -1138,6 +1139,7 @@ class Database:
             escaped_email = email.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             conditions.append("name LIKE ? ESCAPE '\\' COLLATE NOCASE")
             params.append(f"%{escaped_email}%")
+        _append_opencode_go_status_filter(conditions, params, status)
         if weekly_usage_gte_99:
             conditions.append(_opencode_go_usage_filter("last_weekly_usage"))
         if monthly_usage_gte_99:
@@ -1170,6 +1172,7 @@ class Database:
         email: str = "",
         weekly_usage_gte_99: bool = False,
         monthly_usage_gte_99: bool = False,
+        status: str = "",
     ) -> int:
         query = "SELECT COUNT(*) AS count FROM opencode_go_accounts"
         params: list[Any] = []
@@ -1180,6 +1183,7 @@ class Database:
             escaped_email = email.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             conditions.append("name LIKE ? ESCAPE '\\' COLLATE NOCASE")
             params.append(f"%{escaped_email}%")
+        _append_opencode_go_status_filter(conditions, params, status)
         if weekly_usage_gte_99:
             conditions.append(_opencode_go_usage_filter("last_weekly_usage"))
         if monthly_usage_gte_99:
@@ -2229,6 +2233,21 @@ def _opencode_go_usage_filter(column: str) -> str:
         f"json_extract({column}, '$.usage_percent'), "
         f"json_extract({column}, '$.usagePercent')) AS REAL) END >= 99"
     )
+
+
+def _append_opencode_go_status_filter(conditions: list[str], params: list[Any], status: str) -> None:
+    value = str(status or "").strip().lower()
+    if value == "deleted":
+        conditions.append("cpa_provider_deleted = 1")
+        return
+    if value in {"valid", "invalid", "logged_in"}:
+        conditions.append("COALESCE(cpa_provider_deleted, 0) = 0")
+        conditions.append("last_status = ?")
+        params.append(value)
+        return
+    if value == "never":
+        conditions.append("COALESCE(cpa_provider_deleted, 0) = 0")
+        conditions.append("last_status NOT IN ('valid', 'invalid', 'logged_in')")
 
 
 def _mask_opencode_api_key(value: str) -> str:

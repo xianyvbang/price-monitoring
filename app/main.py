@@ -1648,6 +1648,9 @@ async def api_opencode_go_accounts(request: Request):
     page = _positive_query_int(request.query_params.get("page"), 1)
     page_size = min(_positive_query_int(request.query_params.get("page_size") or request.query_params.get("pageSize"), OPENCODE_GO_PAGE_SIZE), OPENCODE_GO_MAX_PAGE_SIZE)
     email = str(request.query_params.get("email") or "").strip()
+    status = str(request.query_params.get("status") or "").strip().lower()
+    if status not in {"valid", "invalid", "logged_in", "never", "deleted"}:
+        status = ""
     weekly_usage_gte_99 = _to_bool(request.query_params.get("weekly_usage_gte_99") or request.query_params.get("weeklyUsageGte99"))
     monthly_usage_gte_99 = _to_bool(request.query_params.get("monthly_usage_gte_99") or request.query_params.get("monthlyUsageGte99"))
     sort_by = str(request.query_params.get("sort_by") or request.query_params.get("sortBy") or "created_at").strip()
@@ -1658,6 +1661,7 @@ async def api_opencode_go_accounts(request: Request):
         sort_order = "desc"
     total = db.count_opencode_go_accounts(
         email=email,
+        status=status,
         weekly_usage_gte_99=weekly_usage_gte_99,
         monthly_usage_gte_99=monthly_usage_gte_99,
     )
@@ -1667,6 +1671,7 @@ async def api_opencode_go_accounts(request: Request):
         public_opencode_go_account(row)
         for row in db.list_opencode_go_accounts(
             email=email,
+            status=status,
             weekly_usage_gte_99=weekly_usage_gte_99,
             monthly_usage_gte_99=monthly_usage_gte_99,
             limit=page_size,

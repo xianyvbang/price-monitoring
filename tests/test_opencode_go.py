@@ -1290,6 +1290,32 @@ def test_opencode_go_accounts_support_case_insensitive_email_search(tmp_path, mo
     assert {account["email"] for account in payload["accounts"]} == {"alice@example.com", "ALICE+work@example.com"}
 
 
+def test_opencode_go_accounts_filter_by_displayed_status(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    account_ids = {
+        status: db.upsert_opencode_go_account({"email": f"{status}@example.com", "password": "secret-password"})
+        for status in ("never", "logged_in", "valid", "invalid", "deleted")
+    }
+    db.update_opencode_go_session(account_ids["logged_in"], {"cookies": []})
+    db.update_opencode_go_result(account_ids["valid"], {"is_valid": True})
+    db.update_opencode_go_result(account_ids["invalid"], {"is_valid": False, "error": "query failed"})
+    db.update_opencode_go_result(account_ids["deleted"], {"is_valid": True})
+    db.update_opencode_go_cpa_state(account_ids["deleted"], provider_deleted=True)
+
+    with TestClient(app) as client:
+        login(client)
+        responses = {
+            status: client.get("/api/opencode-go/accounts", params={"status": status})
+            for status in account_ids
+        }
+
+    for status, response in responses.items():
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["pagination"]["total"] == 1
+        assert [account["email"] for account in payload["accounts"]] == [f"{status}@example.com"]
+
+
 def test_opencode_go_accounts_filter_usage_at_least_99_percent(tmp_path, monkeypatch):
     db = setup_test_db(tmp_path, monkeypatch)
     usage_by_email = {

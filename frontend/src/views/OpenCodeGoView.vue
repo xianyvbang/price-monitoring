@@ -12,6 +12,7 @@ const refreshingAll = ref(false);
 const accounts = ref([]);
 const pagination = reactive({ page: 1, page_size: 20, total: 0, total_pages: 1 });
 const emailSearch = ref("");
+const statusFilter = ref("");
 const usageFilters = ref([]);
 const selectedAccountIds = ref([]);
 const summary = ref({ account_count: 0, last_success_at: null });
@@ -119,6 +120,7 @@ async function loadAccounts() {
       page: pagination.page,
       page_size: pagination.page_size,
       email: emailSearch.value.trim(),
+      status: statusFilter.value,
       weekly_usage_gte_99: usageFilters.value.includes("weekly"),
       monthly_usage_gte_99: usageFilters.value.includes("monthly"),
       sort_by: "created_at",
@@ -961,6 +963,14 @@ onBeforeUnmount(() => {
             @clear="applyFilters"
             @keyup.enter="applyFilters"
           />
+          <el-select v-model="statusFilter" size="small" clearable style="width: 140px" placeholder="全部状态" @change="applyFilters">
+            <el-option label="全部状态" value="" />
+            <el-option label="正常" value="valid" />
+            <el-option label="失败" value="invalid" />
+            <el-option label="已登录" value="logged_in" />
+            <el-option label="未查询" value="never" />
+            <el-option label="已删除" value="deleted" />
+          </el-select>
           <el-checkbox-group v-model="usageFilters" size="small" @change="applyFilters">
             <el-checkbox value="weekly">7d ≥ 99%</el-checkbox>
             <el-checkbox value="monthly">30d ≥ 99%</el-checkbox>
