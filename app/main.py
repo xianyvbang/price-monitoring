@@ -1984,6 +1984,33 @@ async def api_delete_opencode_go_account(request: Request, account_id: int):
     return {"ok": True}
 
 
+@app.delete("/api/opencode-go/accounts")
+async def api_bulk_delete_opencode_go_accounts(request: Request):
+    require_user(request)
+    payload = await request.json()
+    try:
+        account_ids = _opencode_go_account_ids_payload(payload)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+
+    deleted_ids = db.delete_opencode_go_accounts(account_ids)
+    deleted_id_set = set(deleted_ids)
+    missing_ids = [account_id for account_id in account_ids if account_id not in deleted_id_set]
+    if not deleted_ids:
+        raise HTTPException(status_code=404, detail="所选 OpenCode Go 账号不存在或已删除")
+
+    deleted_count = len(deleted_ids)
+    db.add_log("warning", "opencode-go", f"API 批量删除 OpenCode Go 账号: {deleted_count} 个")
+    return {
+        "ok": True,
+        "count": deleted_count,
+        "deleted_ids": deleted_ids,
+        "deletedIds": deleted_ids,
+        "missing_ids": missing_ids,
+        "missingIds": missing_ids,
+    }
+
+
 @app.post("/api/opencode-go/accounts/{account_id}/enabled")
 async def api_opencode_go_enabled(request: Request, account_id: int):
     require_user(request)

@@ -1346,6 +1346,15 @@ class Database:
         with self.connect() as conn:
             conn.execute("DELETE FROM opencode_go_accounts WHERE id = ?", (account_id,))
 
+    def delete_opencode_go_accounts(self, account_ids: list[int]) -> list[int]:
+        deleted_ids = []
+        with self.connect() as conn:
+            for account_id in dict.fromkeys(account_ids):
+                cursor = conn.execute("DELETE FROM opencode_go_accounts WHERE id = ?", (account_id,))
+                if cursor.rowcount > 0:
+                    deleted_ids.append(account_id)
+        return deleted_ids
+
     def update_opencode_go_session(
         self,
         account_id: int,

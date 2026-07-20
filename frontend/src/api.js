@@ -73,6 +73,7 @@ export const api = {
   bulkOpencodeGoAccounts: (payload) => request("/api/opencode-go/accounts/bulk", { method: "POST", body: JSON.stringify(payload) }),
   updateOpencodeGoAccount: (id, payload) => request(`/api/opencode-go/accounts/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
   deleteOpencodeGoAccount: (id) => request(`/api/opencode-go/accounts/${id}`, { method: "DELETE" }),
+  bulkDeleteOpencodeGoAccounts: (ids) => request("/api/opencode-go/accounts", { method: "DELETE", body: JSON.stringify({ account_ids: ids }) }),
   setOpencodeGoEnabled: (id, value) => request(`/api/opencode-go/accounts/${id}/enabled`, { method: "POST", body: JSON.stringify({ is_enabled: value }) }),
   opencodeGoSession: (id) => request(`/api/opencode-go/accounts/${id}/session`),
   importOpencodeGoSession: (id, payload) => request(`/api/opencode-go/accounts/${id}/session`, { method: "POST", body: JSON.stringify(payload) }),

@@ -593,6 +593,57 @@ def test_opencode_go_api_crud_and_masks_secrets(tmp_path, monkeypatch):
     assert decrypt_value(db.get_opencode_go_account(account_id)["password_enc"], "test-key") == "secret-password"
 
 
+def test_opencode_go_api_bulk_delete_accounts_and_history(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    first_id = db.upsert_opencode_go_account(
+        {"name": "first@example.com", "email": "first@example.com", "password": "first-password"}
+    )
+    second_id = db.upsert_opencode_go_account(
+        {"name": "second@example.com", "email": "second@example.com", "password": "second-password"}
+    )
+    remaining_id = db.upsert_opencode_go_account(
+        {"name": "remaining@example.com", "email": "remaining@example.com", "password": "remaining-password"}
+    )
+    db.update_opencode_go_result(first_id, {"is_valid": True, "weekly_usage": {"usagePercent": 20}})
+    missing_id = remaining_id + 1000
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.request(
+            "DELETE",
+            "/api/opencode-go/accounts",
+            json={"account_ids": [first_id, missing_id, second_id, first_id]},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["count"] == 2
+    assert response.json()["deleted_ids"] == [first_id, second_id]
+    assert response.json()["missing_ids"] == [missing_id]
+    assert db.get_opencode_go_account(first_id) is None
+    assert db.get_opencode_go_account(second_id) is None
+    assert db.get_opencode_go_account(remaining_id) is not None
+    assert db.list_opencode_go_history(first_id) == []
+    assert "批量删除 OpenCode Go 账号: 2 个" in db.list_logs(category="opencode-go")[0]["message"]
+
+
+def test_opencode_go_api_bulk_delete_validates_selection(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    account_id = db.upsert_opencode_go_account(
+        {"name": "keep@example.com", "email": "keep@example.com", "password": "keep-password"}
+    )
+
+    with TestClient(app) as client:
+        login(client)
+        empty_response = client.request("DELETE", "/api/opencode-go/accounts", json={"account_ids": []})
+        malformed_response = client.request("DELETE", "/api/opencode-go/accounts", json={"account_ids": ["bad-id"]})
+        missing_response = client.request("DELETE", "/api/opencode-go/accounts", json={"account_ids": [account_id + 1000]})
+
+    assert empty_response.status_code == 400
+    assert malformed_response.status_code == 400
+    assert missing_response.status_code == 404
+    assert db.get_opencode_go_account(account_id) is not None
+
+
 def test_opencode_go_settings_save_js_url(tmp_path, monkeypatch):
     db = setup_test_db(tmp_path, monkeypatch)
     db.update_general_settings(10, 900, 5, 60, monitor_paused=True)

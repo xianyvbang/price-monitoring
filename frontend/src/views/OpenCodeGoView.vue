@@ -17,6 +17,7 @@ const usageFilters = ref([]);
 const referralStatusFilter = ref("");
 const batchClaiming = ref(false);
 const selectedAccountIds = ref([]);
+const bulkDeleting = ref(false);
 const summary = ref({ account_count: 0, last_success_at: null });
 const refreshRemaining = ref(300);
 const refreshTimer = ref(null);
@@ -98,6 +99,7 @@ const overallRollingUsage = computed(() => usagePercentWindow(summary.value.over
 const overallWeeklyUsage = computed(() => usagePercentWindow(summary.value.overall_weekly_usage_percent ?? summary.value.overallWeeklyUsagePercent));
 const overallMonthlyUsage = computed(() => usagePercentWindow(summary.value.overall_monthly_usage_percent ?? summary.value.overallMonthlyUsagePercent));
 const selectedAccounts = computed(() => accounts.value.filter((account) => selectedAccountIds.value.includes(account.id)));
+const selectedAccountCount = computed(() => selectedAccounts.value.length);
 const selectedImportableAccounts = computed(() => selectedAccounts.value.filter(hasApiKey));
 const selectedImportCount = computed(() => selectedImportableAccounts.value.length);
 const displayedAccounts = computed(() => {
@@ -497,8 +499,42 @@ async function deleteAccount(account) {
   ElMessage.success("账号已删除");
 }
 
+async function deleteSelectedAccounts() {
+  const targets = selectedAccounts.value;
+  if (!targets.length) {
+    ElMessage.warning("请至少选择一个 OpenCode Go 账号");
+    return;
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确定删除已选的 ${targets.length} 个 OpenCode Go 账号吗？账号及其历史记录将被永久删除，此操作不可撤销。`,
+      "批量删除 OpenCode Go 账号",
+      { type: "warning", confirmButtonText: "确认删除", cancelButtonText: "取消" }
+    );
+  } catch {
+    return;
+  }
+
+  bulkDeleting.value = true;
+  try {
+    const response = await api.bulkDeleteOpencodeGoAccounts(targets.map((account) => account.id));
+    const deletedCount = response.count ?? response.deleted_ids?.length ?? response.deletedIds?.length ?? 0;
+    selectedAccountIds.value = [];
+    await loadAccounts();
+    if (deletedCount < targets.length) {
+      ElMessage.warning(`已删除 ${deletedCount} 个账号，${targets.length - deletedCount} 个账号不存在或已被删除`);
+    } else {
+      ElMessage.success(`已批量删除 ${deletedCount} 个账号`);
+    }
+  } catch (error) {
+    ElMessage.error(error.message || "批量删除失败");
+  } finally {
+    bulkDeleting.value = false;
+  }
+}
+
 function handleSelectionChange(rows) {
-  selectedAccountIds.value = rows.filter(hasApiKey).map((row) => row.id);
+  selectedAccountIds.value = rows.map((row) => row.id);
 }
 
 function handlePageChange(page) {
@@ -1086,8 +1122,8 @@ function hasApiKey(account) {
   return boolValue(account?.has_api_key ?? account?.hasApiKey);
 }
 
-function canSelectForCpa(row) {
-  return hasApiKey(row) && !cpaBulkImporting.value && !sub2ApiBulkImporting.value;
+function canSelectAccount() {
+  return !bulkDeleting.value && !cpaBulkImporting.value && !sub2ApiBulkImporting.value;
 }
 
 function normalizeAccountUsage(account) {
@@ -1276,19 +1312,20 @@ onBeforeUnmount(() => {
           <el-button size="small" type="warning" :loading="batchClaiming" @click="batchClaimReferral">批量领取邀请奖励</el-button>
           <el-button size="small" :icon="Upload" :loading="sub2ApiBulkImporting" :disabled="!selectedImportCount" @click="openBulkSub2ApiImport">批量导入 Sub2API</el-button>
           <el-button size="small" :icon="Upload" :loading="cpaBulkImporting" :disabled="!selectedImportCount" @click="bulkImportToCpa">批量导入 CPA</el-button>
+          <el-button size="small" type="danger" :icon="Delete" :loading="bulkDeleting" :disabled="!selectedAccountCount" @click="deleteSelectedAccounts">批量删除</el-button>
           <el-button
             size="small"
             :loading="cpaMissingLoading"
             :type="cpaMissingFilterOn ? 'primary' : 'default'"
             @click="toggleCpaMissingFilter"
           >筛选未导入 CPA{{ cpaMissingFilterOn ? `（${cpaMissingIds.length}）` : "" }}</el-button>
-          <el-tag>{{ selectedImportCount }} 已选</el-tag>
+          <el-tag>{{ selectedAccountCount }} 已选</el-tag>
           <el-tag>{{ pagination.total }} 个账号</el-tag>
         </div>
       </div>
       <template v-if="!isMobile">
         <el-table :data="displayedAccounts" border stripe row-key="id" style="width: 100%" @selection-change="handleSelectionChange">
-          <el-table-column type="selection" width="48" :selectable="canSelectForCpa" fixed />
+          <el-table-column type="selection" width="48" :selectable="canSelectAccount" fixed />
           <el-table-column label="Google 邮箱" min-width="220" fixed>
             <template #default="{ row }"><span class="credentials-text">{{ row.email }}</span></template>
           </el-table-column>
@@ -1371,7 +1408,7 @@ onBeforeUnmount(() => {
       <div v-else class="mobile-stack">
         <article v-for="row in displayedAccounts" :key="row.id" class="mobile-card">
           <div class="mobile-card-head">
-            <el-checkbox v-model="selectedAccountIds" :value="row.id" :disabled="!hasApiKey(row) || cpaBulkImporting || sub2ApiBulkImporting" />
+            <el-checkbox v-model="selectedAccountIds" :value="row.id" :disabled="bulkDeleting || cpaBulkImporting || sub2ApiBulkImporting" />
             <div class="mobile-card-title">
               <strong>{{ row.email }}</strong>
               <div class="mobile-card-meta">
