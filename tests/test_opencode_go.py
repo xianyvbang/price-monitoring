@@ -2481,6 +2481,37 @@ def resp_ok(response, status=200):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("has_reward", "claimed"), [(False, None), (True, False), (True, True)])
+async def test_opencode_go_refresh_skips_cached_referral_query(tmp_path, monkeypatch, has_reward, claimed):
+    db = setup_test_db(tmp_path, monkeypatch)
+    account_id = db.upsert_opencode_go_account(
+        {"email": "cached-referral@example.com", "password": "secret-password", "is_enabled": True}
+    )
+    db.update_opencode_go_referral(account_id, has_reward, claimed, {"status": "cached"})
+
+    async def fake_refresh(*args, **kwargs):
+        return {
+            "is_valid": True,
+            "rolling_usage": {"usagePercent": 10},
+            "weekly_usage": {"usagePercent": 5},
+            "monthly_usage": {"usagePercent": 3},
+        }
+
+    async def fail_query(*args, **kwargs):
+        raise AssertionError("cached referral information should not be queried during refresh")
+
+    monkeypatch.setattr("app.services.scheduler.refresh_opencode_go_account", fake_refresh)
+    monkeypatch.setattr("app.services.scheduler.query_referral_for_account", fail_query)
+
+    result = await query_opencode_go_for_account(db, account_id)
+
+    assert result["is_valid"] is True
+    account = db.get_opencode_go_account(account_id)
+    assert account["referral_has_reward"] == (1 if has_reward else 0)
+    assert account["referral_claimed"] == (None if claimed is None else int(claimed))
+
+
+@pytest.mark.asyncio
 async def test_opencode_go_scheduler_auto_claims_referral_on_threshold(tmp_path, monkeypatch):
     db = setup_test_db(tmp_path, monkeypatch)
     account_id = db.upsert_opencode_go_account({"email": "autoacclaim@example.com", "password": "secret-password", "is_enabled": True})

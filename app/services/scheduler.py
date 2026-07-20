@@ -339,27 +339,29 @@ async def query_opencode_go_for_account(db: Database, account_id: int, *, respec
     if result.get("is_valid"):
         db.add_log("info", "opencode-go", f"{account['name']} OpenCode Go 刷新成功")
         await sync_opencode_go_cpa_state(db, account, result)
-        # 随用量刷新一起查询邀请奖励状态（失败不影响主刷新）
+        # 邀请奖励已有明确结果时复用缓存，避免每次用量刷新都重复查询。
         referral = None
-        try:
-            referral = await query_referral_for_account(
-                account,
-                db.secret_key,
-                settings["request_timeout"],
-                db.add_log,
-                referral_query_js_url=db.get_setting("opencode_go_referral_query_js_url", ""),
-                referral_query_server_id=db.get_setting("opencode_go_referral_query_server_id", ""),
-            )
-            db.update_opencode_go_referral(
-                account_id,
-                referral.get("has_reward"),
-                referral.get("claimed"),
-                referral.get("reward") or None,
-                referral.get("invalid_message") if not referral.get("is_valid") else None,
-                referral_json=referral.get("rewards") or None,
-            )
-        except Exception as exc:
-            db.add_log("warning", "opencode-go", f"{account['name']} OpenCode Go 邀请奖励刷新失败: {exc}")
+        referral_status_known = account["referral_has_reward"] is not None or account["referral_claimed"] is not None
+        if not referral_status_known:
+            try:
+                referral = await query_referral_for_account(
+                    account,
+                    db.secret_key,
+                    settings["request_timeout"],
+                    db.add_log,
+                    referral_query_js_url=db.get_setting("opencode_go_referral_query_js_url", ""),
+                    referral_query_server_id=db.get_setting("opencode_go_referral_query_server_id", ""),
+                )
+                db.update_opencode_go_referral(
+                    account_id,
+                    referral.get("has_reward"),
+                    referral.get("claimed"),
+                    referral.get("reward") or None,
+                    referral.get("invalid_message") if not referral.get("is_valid") else None,
+                    referral_json=referral.get("rewards") or None,
+                )
+            except Exception as exc:
+                db.add_log("warning", "opencode-go", f"{account['name']} OpenCode Go 邀请奖励刷新失败: {exc}")
         # 自动领取：用量达阈值且有可领（has_reward=1 且 claimed=0）时顺带领取
         if referral and referral.get("is_valid") and referral.get("has_reward") is True and referral.get("claimed") is False:
             rolling = _usage_percent(result.get("rolling_usage") or result.get("rollingUsage"))
