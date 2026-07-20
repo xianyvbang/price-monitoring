@@ -85,7 +85,6 @@ const sub2ApiBulkSelectedGroupIds = ref([]);
 const sub2ApiBulkImporting = ref(false);
 const cpaImportingId = ref(null);
 const cpaBulkImporting = ref(false);
-const cpaMissingIds = ref([]);
 const cpaMissingFilterOn = ref(false);
 const cpaMissingLoading = ref(false);
 const formRef = ref(null);
@@ -102,12 +101,6 @@ const selectedAccounts = computed(() => accounts.value.filter((account) => selec
 const selectedAccountCount = computed(() => selectedAccounts.value.length);
 const selectedImportableAccounts = computed(() => selectedAccounts.value.filter(hasApiKey));
 const selectedImportCount = computed(() => selectedImportableAccounts.value.length);
-const displayedAccounts = computed(() => {
-  if (!cpaMissingFilterOn.value || !cpaMissingIds.value.length) {
-    return accounts.value;
-  }
-  return accounts.value.filter((account) => cpaMissingIds.value.includes(account.id));
-});
 const bulkPreviewCount = computed(() => bulkText.value.split(/\r?\n/).filter((line) => line.trim()).length);
 const liteSubscriptionJsUrl = computed(() => opencodeSettings.value.lite_subscription_js_url || opencodeSettings.value.liteSubscriptionJsUrl || "");
 const liteSubscriptionServerId = computed(() => opencodeSettings.value.lite_subscription_server_id || opencodeSettings.value.liteSubscriptionServerId || "");
@@ -157,6 +150,7 @@ async function loadAccounts() {
       referral_status: referralStatusFilter.value,
       weekly_usage_gte_99: usageFilters.value.includes("weekly"),
       monthly_usage_gte_99: usageFilters.value.includes("monthly"),
+      cpa_status: cpaMissingFilterOn.value ? "missing" : "",
       sort_by: "created_at",
       sort_order: "desc"
     });
@@ -168,8 +162,10 @@ async function loadAccounts() {
     pagination.total_pages = page.total_pages || page.totalPages || 1;
     summary.value = payload.summary || {};
     selectedAccountIds.value = [];
+    return true;
   } catch (error) {
     ElMessage.error(error.message || "加载 OpenCode Go 账号失败");
+    return false;
   } finally {
     loading.value = false;
   }
@@ -917,33 +913,24 @@ async function copyApiKey(account) {
   }
 }
 
-async function loadCpaMissingStatus() {
-  cpaMissingLoading.value = true;
-  try {
-    const payload = await api.opencodeGoCpaStatus();
-    cpaMissingIds.value = (payload.missing || []).map((account) => account.id);
-    const importableCount = payload.importable_count ?? payload.importableCount ?? 0;
-    const missingCount = payload.missing_count ?? payload.missingCount ?? 0;
-    if (missingCount > 0) {
-      ElMessage.success(`对比完成：${missingCount} 个未导入 CPA，其中 ${importableCount} 个可导入`);
-    } else {
-      ElMessage.success("对比完成：所有账号均已导入 CPA");
-    }
-  } catch (error) {
-    ElMessage.error(error.message || "对比 CPA 导入状态失败");
-  } finally {
-    cpaMissingLoading.value = false;
-  }
-}
-
 async function toggleCpaMissingFilter() {
-  if (cpaMissingFilterOn.value) {
-    cpaMissingFilterOn.value = false;
-    cpaMissingIds.value = [];
-    return;
+  const previousFilter = cpaMissingFilterOn.value;
+  const previousPage = pagination.page;
+  cpaMissingFilterOn.value = !previousFilter;
+  pagination.page = 1;
+  cpaMissingLoading.value = true;
+  const loaded = await loadAccounts();
+  cpaMissingLoading.value = false;
+  if (!loaded) {
+    cpaMissingFilterOn.value = previousFilter;
+    pagination.page = previousPage;
+  } else if (cpaMissingFilterOn.value) {
+    ElMessage.success(
+      pagination.total > 0
+        ? `对比完成：${pagination.total} 个未导入 CPA`
+        : "对比完成：所有账号均已导入 CPA"
+    );
   }
-  await loadCpaMissingStatus();
-  cpaMissingFilterOn.value = true;
 }
 
 function legacyCopyText(text) {
@@ -1318,13 +1305,13 @@ onBeforeUnmount(() => {
             :loading="cpaMissingLoading"
             :type="cpaMissingFilterOn ? 'primary' : 'default'"
             @click="toggleCpaMissingFilter"
-          >筛选未导入 CPA{{ cpaMissingFilterOn ? `（${cpaMissingIds.length}）` : "" }}</el-button>
+          >筛选未导入 CPA{{ cpaMissingFilterOn ? `（${pagination.total}）` : "" }}</el-button>
           <el-tag>{{ selectedAccountCount }} 已选</el-tag>
           <el-tag>{{ pagination.total }} 个账号</el-tag>
         </div>
       </div>
       <template v-if="!isMobile">
-        <el-table :data="displayedAccounts" border stripe row-key="id" style="width: 100%" @selection-change="handleSelectionChange">
+        <el-table :data="accounts" border stripe row-key="id" style="width: 100%" @selection-change="handleSelectionChange">
           <el-table-column type="selection" width="48" :selectable="canSelectAccount" fixed />
           <el-table-column label="Google 邮箱" min-width="220" fixed>
             <template #default="{ row }"><span class="credentials-text">{{ row.email }}</span></template>
@@ -1406,7 +1393,7 @@ onBeforeUnmount(() => {
         </el-table>
       </template>
       <div v-else class="mobile-stack">
-        <article v-for="row in displayedAccounts" :key="row.id" class="mobile-card">
+        <article v-for="row in accounts" :key="row.id" class="mobile-card">
           <div class="mobile-card-head">
             <el-checkbox v-model="selectedAccountIds" :value="row.id" :disabled="bulkDeleting || cpaBulkImporting || sub2ApiBulkImporting" />
             <div class="mobile-card-title">

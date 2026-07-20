@@ -1591,6 +1591,61 @@ def test_opencode_go_accounts_support_case_insensitive_email_search(tmp_path, mo
     assert {account["email"] for account in payload["accounts"]} == {"alice@example.com", "ALICE+work@example.com"}
 
 
+def test_opencode_go_accounts_filter_missing_cpa_before_pagination(tmp_path, monkeypatch):
+    db = setup_test_db(tmp_path, monkeypatch)
+    configure_cpa(db)
+    imported_emails = {f"user{index:02d}@example.com" for index in range(20)}
+    missing_emails = {f"user{index:02d}@example.com" for index in range(20, 32)}
+    for index in range(32):
+        db.upsert_opencode_go_account(
+            {
+                "email": f"user{index:02d}@example.com",
+                "password": "secret-password",
+                "api_key": f"sk-{index}",
+            }
+        )
+
+    cpa_payload = {
+        "openai-compatibility": [
+            {"name": email.upper() if index == 0 else email}
+            for index, email in enumerate(sorted(imported_emails))
+        ]
+    }
+    DummySub2ApiClient.requests = []
+    DummySub2ApiClient.responses = [
+        DummySub2ApiResponse(cpa_payload),
+        DummySub2ApiResponse(cpa_payload),
+    ]
+    monkeypatch.setattr("app.services.cpa_admin.httpx.AsyncClient", DummySub2ApiClient)
+
+    with TestClient(app) as client:
+        login(client)
+        first_page = client.get(
+            "/api/opencode-go/accounts",
+            params={"cpa_status": "missing", "page": 1, "page_size": 10},
+        )
+        second_page = client.get(
+            "/api/opencode-go/accounts",
+            params={"cpaStatus": "missing", "page": 2, "page_size": 10},
+        )
+
+    assert first_page.status_code == 200
+    assert second_page.status_code == 200
+    first_payload = first_page.json()
+    second_payload = second_page.json()
+    assert first_payload["pagination"]["total"] == 12
+    assert first_payload["pagination"]["total_pages"] == 2
+    assert first_payload["pagination"]["cpa_status"] == "missing"
+    assert first_payload["summary"]["account_count"] == 12
+    assert len(first_payload["accounts"]) == 10
+    assert len(second_payload["accounts"]) == 2
+    returned_emails = {
+        account["email"]
+        for account in first_payload["accounts"] + second_payload["accounts"]
+    }
+    assert returned_emails == missing_emails
+
+
 def test_opencode_go_accounts_filter_by_displayed_status(tmp_path, monkeypatch):
     db = setup_test_db(tmp_path, monkeypatch)
     account_ids = {
@@ -2703,8 +2758,11 @@ def test_opencode_go_cpa_status_requires_cpa_config(tmp_path, monkeypatch):
     # 未配置 CPA 站点地址/Authorization
     with TestClient(app) as client:
         login(client)
-        response = client.get("/api/opencode-go/cpa-status")
-    assert response.status_code in (400, 503)
+        status_response = client.get("/api/opencode-go/cpa-status")
+        accounts_response = client.get("/api/opencode-go/accounts", params={"cpa_status": "missing"})
+    assert status_response.status_code in (400, 503)
+    assert accounts_response.status_code in (400, 503)
+    assert "CPA 站点地址" in accounts_response.json()["message"]
 
 
 def test_normalize_model_ids_filters_grok():

@@ -618,6 +618,22 @@ def public_opencode_go_account(row: Any, include_api_key: bool = False) -> dict[
     return data
 
 
+def _opencode_go_cpa_missing_accounts(
+    accounts: list[dict[str, Any]], cpa_emails: set[str]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    normalized_cpa_emails = {str(email).strip().lower() for email in cpa_emails if str(email).strip()}
+    missing: list[dict[str, Any]] = []
+    importable: list[dict[str, Any]] = []
+    for account in accounts:
+        email = str(account.get("email") or "").strip()
+        if email and email.lower() in normalized_cpa_emails:
+            continue
+        missing.append(account)
+        if account.get("has_api_key") or account.get("hasApiKey"):
+            importable.append(account)
+    return missing, importable
+
+
 def opencode_go_overall_usage_summary(rows: list[Any]) -> dict[str, Any]:
     eligible_count = 0
     rolling_usage_sum = 0.0
@@ -1699,35 +1715,64 @@ async def api_opencode_go_accounts(request: Request):
     referral_status = str(request.query_params.get("referral_status") or request.query_params.get("referralStatus") or "").strip().lower()
     if referral_status not in {"unclaimed", "claimed", "none", "has"}:
         referral_status = ""
+    cpa_status = str(request.query_params.get("cpa_status") or request.query_params.get("cpaStatus") or "").strip().lower()
+    if cpa_status != "missing":
+        cpa_status = ""
     sort_by = str(request.query_params.get("sort_by") or request.query_params.get("sortBy") or "created_at").strip()
     sort_order = str(request.query_params.get("sort_order") or request.query_params.get("sortOrder") or "desc").strip().lower()
     if sort_by not in {"name", "created_at", "updated_at", "last_checked_at"}:
         sort_by = "created_at"
     if sort_order not in {"asc", "desc"}:
         sort_order = "desc"
-    total = db.count_opencode_go_accounts(
-        email=email,
-        status=status,
-        weekly_usage_gte_99=weekly_usage_gte_99,
-        monthly_usage_gte_99=monthly_usage_gte_99,
-        referral_status=referral_status,
-    )
-    total_pages = max(1, (total + page_size - 1) // page_size)
-    page = min(page, total_pages)
-    accounts = [
-        public_opencode_go_account(row)
-        for row in db.list_opencode_go_accounts(
+    cpa_missing_accounts: list[dict[str, Any]] | None = None
+    if cpa_status == "missing":
+        try:
+            cpa_emails = await cpa_admin_client().list_cpa_provider_emails()
+        except CpaAdminError as exc:
+            db.add_log("error", "opencode-go", f"API 筛选未导入 CPA 账号失败: {exc}")
+            return JSONResponse({"ok": False, "message": str(exc)}, status_code=exc.status_code)
+        candidate_accounts = [
+            public_opencode_go_account(row)
+            for row in db.list_opencode_go_accounts(
+                email=email,
+                status=status,
+                weekly_usage_gte_99=weekly_usage_gte_99,
+                monthly_usage_gte_99=monthly_usage_gte_99,
+                referral_status=referral_status,
+                sort_by=sort_by,
+                sort_order=sort_order,
+            )
+        ]
+        cpa_missing_accounts, _ = _opencode_go_cpa_missing_accounts(candidate_accounts, cpa_emails)
+        total = len(cpa_missing_accounts)
+    else:
+        total = db.count_opencode_go_accounts(
             email=email,
             status=status,
             weekly_usage_gte_99=weekly_usage_gte_99,
             monthly_usage_gte_99=monthly_usage_gte_99,
             referral_status=referral_status,
-            limit=page_size,
-            offset=(page - 1) * page_size,
-            sort_by=sort_by,
-            sort_order=sort_order,
         )
-    ]
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = min(page, total_pages)
+    offset = (page - 1) * page_size
+    if cpa_missing_accounts is not None:
+        accounts = cpa_missing_accounts[offset : offset + page_size]
+    else:
+        accounts = [
+            public_opencode_go_account(row)
+            for row in db.list_opencode_go_accounts(
+                email=email,
+                status=status,
+                weekly_usage_gte_99=weekly_usage_gte_99,
+                monthly_usage_gte_99=monthly_usage_gte_99,
+                referral_status=referral_status,
+                limit=page_size,
+                offset=offset,
+                sort_by=sort_by,
+                sort_order=sort_order,
+            )
+        ]
     last_success = db.latest_successful_opencode_go_checked_at()
     overall_summary = opencode_go_overall_usage_summary(db.list_opencode_go_accounts())
     return {
@@ -1747,6 +1792,8 @@ async def api_opencode_go_accounts(request: Request):
             "sortBy": sort_by,
             "sort_order": sort_order,
             "sortOrder": sort_order,
+            "cpa_status": cpa_status,
+            "cpaStatus": cpa_status,
         },
         "summary": {
             "account_count": total,
@@ -2177,15 +2224,7 @@ async def api_opencode_go_cpa_status(request: Request):
         db.add_log("error", "opencode-go", f"API 对比 CPA 导入状态失败: {exc}")
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=exc.status_code)
     accounts = [public_opencode_go_account(row) for row in db.list_opencode_go_accounts()]
-    missing: list[dict[str, Any]] = []
-    importable: list[dict[str, Any]] = []
-    for account in accounts:
-        email = str(account.get("email") or "").strip()
-        if email and email.lower() in cpa_emails:
-            continue
-        missing.append(account)
-        if account.get("has_api_key") or account.get("hasApiKey"):
-            importable.append(account)
+    missing, importable = _opencode_go_cpa_missing_accounts(accounts, cpa_emails)
     db.add_log(
         "info",
         "opencode-go",
