@@ -1339,6 +1339,11 @@ async def opencode_go_page(request: Request):
     return spa_response()
 
 
+@app.get("/platform-dispatch", response_class=HTMLResponse)
+async def platform_dispatch_page(request: Request):
+    return spa_response()
+
+
 @app.post("/accounts", response_class=HTMLResponse)
 async def save_account_form(request: Request):
     redirect = redirect_if_needed(request)
@@ -1626,6 +1631,39 @@ async def api_accounts(request: Request):
     require_user(request)
     account_filter = account_filter_from_query(request)
     return grouped_account_summaries(platform=account_filter.get("platform"), name_query=account_filter.get("name") or None)
+
+
+@app.get("/api/platform-dispatch")
+async def api_platform_dispatch(request: Request):
+    require_user(request)
+    try:
+        result = await sub2api_admin_client().platform_dispatch(recent_limit=6)
+    except Sub2ApiAdminError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=exc.status_code)
+    settings = public_sub2api_settings()
+    return {
+        "ok": True,
+        "site_url": settings["site_url"],
+        "siteUrl": settings["site_url"],
+        **result,
+    }
+
+
+@app.post("/api/platform-dispatch/accounts/{account_id}/enabled")
+async def api_platform_dispatch_account_enabled(request: Request, account_id: int):
+    require_user(request)
+    payload = await request.json()
+    if not isinstance(payload, dict) or not isinstance(
+        payload.get("is_enabled", payload.get("isEnabled", payload.get("enabled"))), bool
+    ):
+        return JSONResponse({"ok": False, "message": "is_enabled 必须是布尔值"}, status_code=400)
+    enabled = payload.get("is_enabled", payload.get("isEnabled", payload.get("enabled")))
+    try:
+        account = await sub2api_admin_client().update_account_status(account_id, enabled)
+    except Sub2ApiAdminError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=exc.status_code)
+    db.add_log("info", "platform-dispatch", f"Sub2API 账号 {account.get('name') or account_id}: {'启用' if enabled else '停用'}")
+    return {"ok": True, "account": account}
 
 
 @app.get("/api/dashboard")

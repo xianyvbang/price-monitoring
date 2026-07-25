@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -26,21 +28,173 @@ class Sub2ApiAdminClient:
             raise Sub2ApiAdminError("请先在通用配置中设置 Sub2API AdminKey")
 
     async def list_openai_groups(self) -> list[dict[str, Any]]:
-        payload = await self._request("GET", "/api/v1/admin/groups/all", params={"platform": SUB2API_OPENAI_PLATFORM})
+        groups = await self.list_groups(SUB2API_OPENAI_PLATFORM)
+        return [group for group in groups if _is_openai_group(group)]
+
+    async def list_groups(self, platform: str | None = None) -> list[dict[str, Any]]:
+        params = {"platform": platform} if platform else None
+        payload = await self._request("GET", "/api/v1/admin/groups/all", params=params)
         groups = _unwrap_sub2api_data(payload)
         if not isinstance(groups, list):
             raise Sub2ApiAdminError("Sub2API 分组响应格式不正确", status_code=502)
-        return [group for group in groups if isinstance(group, dict) and _is_openai_group(group)]
+        return [group for group in groups if isinstance(group, dict)]
 
     async def list_openai_accounts(self, group_id: int | None = None) -> list[dict[str, Any]]:
-        params: dict[str, Any] = {"platform": SUB2API_OPENAI_PLATFORM, "page": 1, "page_size": 1000}
+        return await self.list_accounts(platform=SUB2API_OPENAI_PLATFORM, group_id=group_id)
+
+    async def list_accounts(
+        self,
+        platform: str | None = None,
+        status: str | None = None,
+        search: str | None = None,
+        group_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"sort_by": "name", "sort_order": "asc"}
+        if platform:
+            params["platform"] = platform
+        if status:
+            params["status"] = status
+        if search:
+            params["search"] = search
         if group_id is not None:
+            params["group"] = int(group_id)
             params["group_id"] = int(group_id)
-        payload = await self._request("GET", "/api/v1/admin/accounts", params=params)
-        accounts = _extract_sub2api_list(payload, ("accounts", "items", "records", "rows", "list", "data"))
-        if accounts is None:
-            raise Sub2ApiAdminError("Sub2API 账号响应格式不正确", status_code=502)
-        return [account for account in accounts if isinstance(account, dict) and _is_openai_account(account)]
+        return await self._list_all_pages(
+            "/api/v1/admin/accounts",
+            params,
+            ("accounts", "items", "records", "rows", "list", "data"),
+            "Sub2API 账号响应格式不正确",
+        )
+
+    async def list_recent_usage(self, account_id: int, limit: int = 6) -> list[dict[str, Any]]:
+        payload = await self._request(
+            "GET",
+            "/api/v1/admin/usage",
+            params={
+                "account_id": int(account_id),
+                "page": 1,
+                "page_size": max(1, min(100, int(limit))),
+                "sort_by": "created_at",
+                "sort_order": "desc",
+            },
+        )
+        records = _extract_sub2api_list(payload, ("items", "records", "rows", "list", "data"))
+        if records is None:
+            raise Sub2ApiAdminError("Sub2API 使用记录响应格式不正确", status_code=502)
+        return [record for record in records if isinstance(record, dict)]
+
+    async def list_recent_errors(self, account_id: int | None = None, limit: int = 6) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {
+            "page": 1,
+            "page_size": max(1, min(100, int(limit))),
+            "time_range": "30d",
+            "sort_by": "created_at",
+            "sort_order": "desc",
+        }
+        if account_id is not None:
+            params["account_id"] = int(account_id)
+        payload = await self._request("GET", "/api/v1/admin/ops/errors", params=params)
+        records = _extract_sub2api_list(payload, ("items", "errors", "records", "rows", "list", "data"))
+        if records is None:
+            raise Sub2ApiAdminError("Sub2API 错误记录响应格式不正确", status_code=502)
+        return [record for record in records if isinstance(record, dict)]
+
+    async def platform_dispatch(self, recent_limit: int = 6) -> dict[str, Any]:
+        recent_limit = max(1, min(20, int(recent_limit)))
+        accounts, groups = await asyncio.gather(self.list_accounts(), self.list_groups())
+        warnings: list[str] = []
+
+        errors_available = True
+        try:
+            await self.list_recent_errors(limit=1)
+        except Sub2ApiAdminError as exc:
+            errors_available = False
+            warnings.append(f"Sub2API 错误记录暂不可用: {exc}")
+
+        semaphore = asyncio.Semaphore(8)
+
+        async def load_activity(account: dict[str, Any]) -> tuple[int, list[dict[str, Any]]]:
+            account_id = _positive_int(account.get("id"))
+            if account_id is None:
+                return 0, []
+            async with semaphore:
+                tasks = [self.list_recent_usage(account_id, recent_limit)]
+                if errors_available:
+                    tasks.append(self.list_recent_errors(account_id, recent_limit))
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            usage_records: list[dict[str, Any]] = []
+            error_records: list[dict[str, Any]] = []
+            usage_result = results[0]
+            if isinstance(usage_result, Exception):
+                warnings.append(f"账号 {account.get('name') or account_id} 的使用记录读取失败: {usage_result}")
+            else:
+                usage_records = usage_result
+            if errors_available:
+                error_result = results[1]
+                if isinstance(error_result, Exception):
+                    warnings.append(f"账号 {account.get('name') or account_id} 的错误记录读取失败: {error_result}")
+                else:
+                    error_records = error_result
+            return account_id, merge_recent_activity(usage_records, error_records, recent_limit)
+
+        activity_pairs = await asyncio.gather(*(load_activity(account) for account in accounts))
+        activity_by_account = {account_id: activity for account_id, activity in activity_pairs if account_id > 0}
+        public_accounts = [
+            public_dispatch_account(account, activity_by_account.get(_positive_int(account.get("id")) or 0, []))
+            for account in accounts
+        ]
+        return {
+            "accounts": public_accounts,
+            "groups": [public_dispatch_group(group) for group in groups],
+            "warnings": _unique_strings(warnings),
+            "recent_limit": recent_limit,
+            "recentLimit": recent_limit,
+        }
+
+    async def update_account_status(self, account_id: int, enabled: bool) -> dict[str, Any]:
+        payload = await self._request(
+            "PUT",
+            f"/api/v1/admin/accounts/{int(account_id)}",
+            json={"status": "active" if enabled else "inactive"},
+        )
+        account = _unwrap_sub2api_data(payload)
+        if not isinstance(account, dict):
+            raise Sub2ApiAdminError("Sub2API 账号状态响应格式不正确", status_code=502)
+        return public_dispatch_account(account, [])
+
+    async def _list_all_pages(
+        self,
+        path: str,
+        params: dict[str, Any],
+        keys: tuple[str, ...],
+        format_error: str,
+    ) -> list[dict[str, Any]]:
+        page = 1
+        page_size = 1000
+        result: list[dict[str, Any]] = []
+        while True:
+            page_params = {**params, "page": page, "page_size": page_size}
+            payload = await self._request("GET", path, params=page_params)
+            records = _extract_sub2api_list(payload, keys)
+            if records is None:
+                raise Sub2ApiAdminError(format_error, status_code=502)
+            result.extend(record for record in records if isinstance(record, dict))
+            page_data = _unwrap_sub2api_data(payload)
+            total = _positive_int(page_data.get("total")) if isinstance(page_data, dict) else None
+            pages = _positive_int(page_data.get("pages")) if isinstance(page_data, dict) else None
+            if not records:
+                break
+            if pages is not None:
+                if page >= pages:
+                    break
+            elif total is not None:
+                if len(result) >= total:
+                    break
+            elif len(records) < page_size:
+                break
+            page += 1
+        return result
 
     async def existing_openai_account_names_in_groups(self, group_ids: list[int]) -> set[str]:
         names: set[str] = set()
@@ -221,6 +375,206 @@ def _normalize_model_ids(models: list[Any]) -> list[str]:
             continue
         seen.add(text)
         result.append(text)
+    return result
+
+
+def public_dispatch_account(account: dict[str, Any], recent_activity: list[dict[str, Any]]) -> dict[str, Any]:
+    account_id = _positive_int(account.get("id")) or 0
+    status = str(account.get("status") or "inactive").strip().lower()
+    if status not in {"active", "inactive", "error"}:
+        status = "inactive"
+    group_ids = sorted(_account_group_ids(account))
+    groups = account.get("groups")
+    public_groups = [public_dispatch_group(group) for group in groups if isinstance(group, dict)] if isinstance(groups, list) else []
+    return {
+        "id": account_id,
+        "name": str(account.get("name") or f"账号 {account_id}"),
+        "notes": str(account.get("notes") or ""),
+        "platform": str(account.get("platform") or ""),
+        "type": str(account.get("type") or ""),
+        "status": status,
+        "is_enabled": status == "active",
+        "isEnabled": status == "active",
+        "error_message": str(account.get("error_message") or ""),
+        "errorMessage": str(account.get("error_message") or ""),
+        "group_ids": group_ids,
+        "groupIds": group_ids,
+        "groups": public_groups,
+        "last_used_at": account.get("last_used_at"),
+        "lastUsedAt": account.get("last_used_at"),
+        "created_at": account.get("created_at"),
+        "createdAt": account.get("created_at"),
+        "updated_at": account.get("updated_at"),
+        "updatedAt": account.get("updated_at"),
+        "recent_activity": recent_activity,
+        "recentActivity": recent_activity,
+    }
+
+
+def public_dispatch_group(group: dict[str, Any]) -> dict[str, Any]:
+    group_id = _positive_int(group.get("id")) or 0
+    return {
+        "id": group_id,
+        "name": str(group.get("name") or f"分组 {group_id}"),
+        "description": str(group.get("description") or ""),
+        "platform": str(group.get("platform") or ""),
+        "status": str(group.get("status") or ""),
+        "rate_multiplier": _optional_number(group.get("rate_multiplier")),
+        "rateMultiplier": _optional_number(group.get("rate_multiplier")),
+    }
+
+
+def normalize_sub2api_usage_record(record: dict[str, Any]) -> dict[str, Any]:
+    user = record.get("user") if isinstance(record.get("user"), dict) else {}
+    input_tokens = _non_negative_int(record.get("input_tokens"))
+    output_tokens = _non_negative_int(record.get("output_tokens"))
+    cache_creation_tokens = _non_negative_int(record.get("cache_creation_tokens"))
+    cache_read_tokens = _non_negative_int(record.get("cache_read_tokens"))
+    total_tokens = input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens
+    actual_cost = _optional_number(record.get("actual_cost"))
+    total_cost = _optional_number(record.get("total_cost"))
+    return {
+        "id": f"usage-{record.get('id')}",
+        "source_id": record.get("id"),
+        "sourceId": record.get("id"),
+        "kind": "success",
+        "is_error": False,
+        "isError": False,
+        "user_id": _positive_int(record.get("user_id")) or _positive_int(user.get("id")),
+        "userId": _positive_int(record.get("user_id")) or _positive_int(user.get("id")),
+        "user_email": str(user.get("email") or record.get("user_email") or ""),
+        "userEmail": str(user.get("email") or record.get("user_email") or ""),
+        "model": str(record.get("upstream_model") or record.get("model") or ""),
+        "requested_model": str(record.get("model") or ""),
+        "requestedModel": str(record.get("model") or ""),
+        "input_tokens": input_tokens,
+        "inputTokens": input_tokens,
+        "output_tokens": output_tokens,
+        "outputTokens": output_tokens,
+        "cache_tokens": cache_creation_tokens + cache_read_tokens,
+        "cacheTokens": cache_creation_tokens + cache_read_tokens,
+        "total_tokens": total_tokens,
+        "totalTokens": total_tokens,
+        "cost": actual_cost if actual_cost is not None else total_cost,
+        "actual_cost": actual_cost,
+        "actualCost": actual_cost,
+        "total_cost": total_cost,
+        "totalCost": total_cost,
+        "first_token_ms": _optional_number(record.get("first_token_ms")),
+        "firstTokenMs": _optional_number(record.get("first_token_ms")),
+        "duration_ms": _optional_number(record.get("duration_ms")),
+        "durationMs": _optional_number(record.get("duration_ms")),
+        "status_code": 200,
+        "statusCode": 200,
+        "message": "",
+        "created_at": record.get("created_at"),
+        "createdAt": record.get("created_at"),
+    }
+
+
+def normalize_sub2api_error_record(record: dict[str, Any]) -> dict[str, Any]:
+    model = str(record.get("requested_model") or record.get("model") or record.get("upstream_model") or "")
+    first_token_ms = _optional_number(record.get("time_to_first_token_ms", record.get("first_token_ms")))
+    duration_ms = _optional_number(
+        record.get("response_latency_ms", record.get("duration_ms", record.get("upstream_latency_ms")))
+    )
+    return {
+        "id": f"error-{record.get('id')}",
+        "source_id": record.get("id"),
+        "sourceId": record.get("id"),
+        "kind": "error",
+        "is_error": True,
+        "isError": True,
+        "user_id": _positive_int(record.get("user_id")),
+        "userId": _positive_int(record.get("user_id")),
+        "user_email": str(record.get("user_email") or ""),
+        "userEmail": str(record.get("user_email") or ""),
+        "model": model,
+        "requested_model": str(record.get("requested_model") or record.get("model") or ""),
+        "requestedModel": str(record.get("requested_model") or record.get("model") or ""),
+        "input_tokens": None,
+        "inputTokens": None,
+        "output_tokens": None,
+        "outputTokens": None,
+        "cache_tokens": None,
+        "cacheTokens": None,
+        "total_tokens": None,
+        "totalTokens": None,
+        "cost": None,
+        "actual_cost": None,
+        "actualCost": None,
+        "total_cost": None,
+        "totalCost": None,
+        "first_token_ms": first_token_ms,
+        "firstTokenMs": first_token_ms,
+        "duration_ms": duration_ms,
+        "durationMs": duration_ms,
+        "status_code": _non_negative_int(record.get("status_code")),
+        "statusCode": _non_negative_int(record.get("status_code")),
+        "message": str(record.get("message") or record.get("type") or "请求失败"),
+        "phase": str(record.get("phase") or ""),
+        "created_at": record.get("created_at"),
+        "createdAt": record.get("created_at"),
+    }
+
+
+def merge_recent_activity(
+    usage_records: list[dict[str, Any]], error_records: list[dict[str, Any]], limit: int = 6
+) -> list[dict[str, Any]]:
+    merged = [normalize_sub2api_usage_record(record) for record in usage_records]
+    merged.extend(normalize_sub2api_error_record(record) for record in error_records)
+    merged.sort(key=lambda record: _timestamp_value(record.get("created_at")), reverse=True)
+    return merged[: max(1, int(limit))]
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _non_negative_int(value: Any) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, parsed)
+
+
+def _optional_number(value: Any) -> float | None:
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _timestamp_value(value: Any) -> float:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return 0.0
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return 0.0
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _unique_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            result.append(value)
     return result
 
 

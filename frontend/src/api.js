@@ -33,6 +33,8 @@ export const api = {
   logout: () => request("/logout", { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({}) }),
   dashboard: (params = {}) => request(`/api/dashboard${queryString(params)}`),
   dashboardConsumptionSummary: (params = {}) => request(`/api/dashboard/consumption-summary${queryString(params)}`),
+  platformDispatch: () => request("/api/platform-dispatch"),
+  setPlatformDispatchEnabled: (id, value) => request(`/api/platform-dispatch/accounts/${id}/enabled`, { method: "POST", body: JSON.stringify({ is_enabled: value }) }),
   accounts: (params = {}) => request(`/api/accounts${queryString(params)}`),
   account: (id) => request(`/api/accounts/${id}`),
   createAccount: (payload) => request("/api/accounts", { method: "POST", body: JSON.stringify(payload) }),

@@ -7,6 +7,7 @@ import SettingsView from "./views/SettingsView.vue";
 import LogsView from "./views/LogsView.vue";
 import GroupRatesView from "./views/GroupRatesView.vue";
 import OpenCodeGoView from "./views/OpenCodeGoView.vue";
+import PlatformDispatchView from "./views/PlatformDispatchView.vue";
 
 const router = createRouter({
   history: createWebHistory(),
@@ -14,6 +15,7 @@ const router = createRouter({
     { path: "/login", name: "login", component: LoginView, meta: { public: true } },
     { path: "/", name: "dashboard", component: DashboardView },
     { path: "/accounts", name: "accounts", component: AccountsView },
+    { path: "/platform-dispatch", name: "platform-dispatch", component: PlatformDispatchView },
     { path: "/opencode-go", name: "opencode-go", component: OpenCodeGoView },
     { path: "/settings", name: "settings", component: SettingsView },
     { path: "/logs", name: "logs", component: LogsView },
