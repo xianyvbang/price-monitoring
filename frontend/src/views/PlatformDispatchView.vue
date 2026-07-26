@@ -1319,7 +1319,7 @@ onBeforeUnmount(() => {
         </label>
         <label class="policy-strategy">
           <el-switch v-model="policyConfig.load_factor_enabled" />
-          <span><strong>负载因子</strong><small>按健康分与成本倍率分配水位</small></span>
+          <span><strong>负载因子</strong><small>按健康分与成本倍率分配负载，并同步调整账号优先级</small></span>
         </label>
         <label class="policy-strategy">
           <el-switch v-model="policyConfig.price_protection_enabled" />
@@ -1706,6 +1706,11 @@ onBeforeUnmount(() => {
                 <span>成本倍率</span>
                 <strong>{{ account.rate_multiplier ?? account.rateMultiplier ?? "-" }}</strong>
                 <small>{{ account.schedulable === false ? "不可调度" : "可调度" }}</small>
+              </div>
+              <div>
+                <span>优先级</span>
+                <strong>{{ metricText(account.priority) }}</strong>
+                <small>数值越小越优先</small>
               </div>
               <p
                 v-if="account.decision_reason || account.decisionReason"

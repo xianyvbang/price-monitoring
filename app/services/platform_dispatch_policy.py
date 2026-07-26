@@ -1351,6 +1351,7 @@ class PlatformDispatchPolicyScheduler:
                 self.db.upsert_platform_dispatch_account_state(site_url, account_id, baseline_load_factor=baseline)
 
         now = datetime.now(timezone.utc)
+        final_targets: dict[int, int] = {}
         for account_id in eligible:
             account = accounts[account_id]
             target = base_targets[account_id]
@@ -1360,15 +1361,27 @@ class PlatformDispatchPolicyScheduler:
                 local_rates = [rate for rate in local_rates if rate is not None and rate > 0]
                 if upstream_rate is not None and upstream_rate > 0 and local_rates:
                     target = max(1, int(round(target * min(1.0, min(local_rates) / upstream_rate))))
+            final_targets[account_id] = target
             current = _effective_load_factor(account)
             self.db.upsert_platform_dispatch_account_state(site_url, account_id, target_load_factor=target)
+
+        priority_targets = _load_factor_priority_targets(final_targets)
+        for account_id in eligible:
+            account = accounts[account_id]
+            target = final_targets[account_id]
+            current = _effective_load_factor(account)
             relative = abs(target - current) * 100 / max(1, current)
             state = states.get(account_id) or {}
             last_write = _parse_datetime(state.get("last_load_factor_write_at"))
             cooling = last_write is not None and last_write > now - timedelta(seconds=int(config["load_change_cooldown_seconds"]))
             if relative < float(config["load_change_threshold_percent"]) or cooling:
                 continue
-            if await self._write_account_field(client, site_url, account, "load_factor", current, target, "负载因子调权"):
+            fields = {"load_factor": target}
+            current_priority = _optional_int(account.get("priority"))
+            target_priority = priority_targets[account_id]
+            if current_priority != target_priority:
+                fields["priority"] = target_priority
+            if await self._write_account_fields(client, site_url, account, fields, "负载因子调权"):
                 self.db.upsert_platform_dispatch_account_state(site_url, account_id, last_load_factor_write_at=utc_now())
 
     def _account_weight(self, account: dict[str, Any], health: dict[str, Any], config: dict[str, Any]) -> float:
@@ -1387,14 +1400,43 @@ class PlatformDispatchPolicyScheduler:
         new_value: Any,
         reason: str,
     ) -> bool:
+        return await self._write_account_fields(
+            client,
+            site_url,
+            account,
+            {field: new_value},
+            reason,
+        )
+
+    async def _write_account_fields(
+        self,
+        client: Sub2ApiAdminClient,
+        site_url: str,
+        account: dict[str, Any],
+        fields: dict[str, Any],
+        reason: str,
+    ) -> bool:
+        old_values = {field: account.get(field) for field in fields}
         try:
-            updated = await client.update_account_fields(int(account["id"]), {field: new_value})
+            updated = await client.update_account_fields(int(account["id"]), fields)
         except Exception as exc:
-            self._record_action(site_url, account, "adjust", field, old_value, new_value, reason, exc)
+            for field, new_value in fields.items():
+                self._record_action(
+                    site_url,
+                    account,
+                    "adjust",
+                    field,
+                    old_values[field],
+                    new_value,
+                    reason,
+                    exc,
+                )
             return False
-        account[field] = new_value
+        account.update(updated)
+        account.update(fields)
         self.db.update_platform_dispatch_cached_account(updated)
-        self._record_action(site_url, account, "adjust", field, old_value, new_value, reason)
+        for field, new_value in fields.items():
+            self._record_action(site_url, account, "adjust", field, old_values[field], new_value, reason)
         return True
 
     def _record_action(
@@ -1526,6 +1568,16 @@ def _group_availability_summary(
             }
         )
     return result
+
+
+def _load_factor_priority_targets(targets: dict[int, int]) -> dict[int, int]:
+    if not targets:
+        return {}
+    highest = max(targets.values())
+    return {
+        account_id: max(1, highest - target + 1)
+        for account_id, target in targets.items()
+    }
 
 
 def _optional_int(value: Any) -> int | None:

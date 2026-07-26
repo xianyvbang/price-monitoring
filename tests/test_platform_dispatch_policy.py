@@ -239,6 +239,7 @@ class PolicyClient:
         self.probes = []
         self.probe_models = []
         self.updates = []
+        self.field_payloads = []
         self.realtime_reads = 0
 
     async def list_accounts(self, **kwargs):
@@ -273,6 +274,7 @@ class PolicyClient:
         return dict(account)
 
     async def update_account_fields(self, account_id, fields):
+        self.field_payloads.append((account_id, dict(fields)))
         self.updates.append((account_id, next(iter(fields)), next(iter(fields.values()))))
         account = next(item for item in self.accounts if item["id"] == account_id)
         account.update(fields)
@@ -833,3 +835,55 @@ async def test_load_factor_deadband_price_protection_and_cooldown(tmp_path):
     account["load_factor"] = 52
     await scheduler._apply_load_policy(client, client.site_url, accounts, {1: healthy_state()}, {8: 1.8, 9: 1.0}, config)
     assert client.updates == []
+
+
+@pytest.mark.asyncio
+async def test_load_factor_adjustment_also_updates_priority_order(tmp_path):
+    db = make_db(tmp_path)
+    accounts = {
+        1: {
+            "id": 1,
+            "name": "higher-weight",
+            "status": "active",
+            "concurrency": 20,
+            "load_factor": 20,
+            "priority": 50,
+            "rate_multiplier": 2,
+        },
+        2: {
+            "id": 2,
+            "name": "lower-weight",
+            "status": "active",
+            "concurrency": 20,
+            "load_factor": 20,
+            "priority": 50,
+            "rate_multiplier": 1,
+        },
+    }
+    client = PolicyClient(list(accounts.values()))
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+    config = {
+        **POLICY_DEFAULTS,
+        "load_factor_enabled": True,
+        "load_factor_total": 120,
+        "account_min_load_factor": 20,
+        "load_change_threshold_percent": 0,
+    }
+
+    await scheduler._apply_load_policy(
+        client,
+        client.site_url,
+        accounts,
+        {1: healthy_state(), 2: healthy_state()},
+        {},
+        config,
+    )
+
+    payloads = dict(client.field_payloads)
+    assert set(payloads) == {1, 2}
+    assert payloads[1]["load_factor"] > payloads[2]["load_factor"]
+    assert payloads[1]["load_factor"] + payloads[2]["load_factor"] == 120
+    assert payloads[1]["priority"] == 1
+    assert payloads[2]["priority"] == payloads[1]["load_factor"] - payloads[2]["load_factor"] + 1
+    assert accounts[1]["priority"] == 1
+    assert accounts[2]["priority"] == payloads[2]["priority"]

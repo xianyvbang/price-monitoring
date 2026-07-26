@@ -290,7 +290,7 @@ class Sub2ApiAdminClient:
         return public_dispatch_account(account, [])
 
     async def update_account_fields(self, account_id: int, fields: dict[str, Any]) -> dict[str, Any]:
-        allowed = {"status", "concurrency", "load_factor"}
+        allowed = {"status", "concurrency", "load_factor", "priority"}
         payload_fields = {key: value for key, value in fields.items() if key in allowed}
         if not payload_fields:
             raise Sub2ApiAdminError("没有可更新的 Sub2API 账号字段")
@@ -655,6 +655,8 @@ def public_dispatch_account(account: dict[str, Any], recent_activity: list[dict[
         "recent_activity": recent_activity,
         "recentActivity": recent_activity,
     }
+    if "priority" in account:
+        result["priority"] = _non_negative_int(account.get("priority"))
     if "concurrency" in account:
         result["concurrency"] = _non_negative_int(account.get("concurrency"))
     if "load_factor" in account:
