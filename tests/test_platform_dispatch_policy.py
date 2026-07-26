@@ -11,6 +11,7 @@ from app.services.platform_dispatch_policy import (
     allocate_weighted_points,
     calculate_health,
     classify_activity,
+    resolve_platform_dispatch_cost_profiles,
     validate_policy_config,
 )
 
@@ -782,8 +783,8 @@ async def test_schedulable_policy_switches_only_one_account_per_round(tmp_path):
 async def test_smart_expansion_floors_low_and_preserves_above_max(tmp_path):
     db = make_db(tmp_path)
     accounts = {
-        1: {"id": 1, "name": "low", "status": "active", "concurrency": 10, "rate_multiplier": 1},
-        2: {"id": 2, "name": "high", "status": "active", "concurrency": 300, "rate_multiplier": 1},
+        1: {"id": 1, "name": "low", "status": "active", "concurrency": 10},
+        2: {"id": 2, "name": "high", "status": "active", "concurrency": 300},
     }
     client = PolicyClient(list(accounts.values()))
     scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
@@ -796,7 +797,10 @@ async def test_smart_expansion_floors_low_and_preserves_above_max(tmp_path):
         accounts,
         health,
         realtime,
-        {},
+        {
+            1: {"cost_available": True, "upstream_cost_multiplier": 1},
+            2: {"cost_available": True, "upstream_cost_multiplier": 1},
+        },
         {**POLICY_DEFAULTS, "smart_expand_enabled": True},
     )
 
@@ -805,7 +809,7 @@ async def test_smart_expansion_floors_low_and_preserves_above_max(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_load_factor_deadband_price_protection_and_cooldown(tmp_path):
+async def test_load_factor_deadband_and_cooldown_use_upstream_cost(tmp_path):
     db = make_db(tmp_path)
     account = {
         "id": 1,
@@ -813,7 +817,6 @@ async def test_load_factor_deadband_price_protection_and_cooldown(tmp_path):
         "status": "active",
         "concurrency": 100,
         "load_factor": 100,
-        "rate_multiplier": 2,
         "group_ids": [8, 9],
     }
     accounts = {1: account}
@@ -821,19 +824,20 @@ async def test_load_factor_deadband_price_protection_and_cooldown(tmp_path):
     scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
     config = {
         **POLICY_DEFAULTS,
-        "price_protection_enabled": True,
+        "load_factor_enabled": True,
+        "load_factor_total": 150,
         "load_change_threshold_percent": 10,
     }
 
-    await scheduler._apply_load_policy(client, client.site_url, accounts, {1: healthy_state()}, {8: 1.8, 9: 1.0}, config)
-    assert client.updates == [(1, "load_factor", 50)]
+    cost_profiles = {1: {"cost_available": True, "upstream_cost_multiplier": 2}}
+    await scheduler._apply_load_policy(client, client.site_url, accounts, {1: healthy_state()}, cost_profiles, config)
+    assert client.updates == [(1, "load_factor", 150)]
     state = db.get_platform_dispatch_account_state(client.site_url, 1)
-    assert state["baseline_load_factor"] == 100
-    assert state["target_load_factor"] == 50
+    assert state["target_load_factor"] == 150
 
     client.updates.clear()
-    account["load_factor"] = 52
-    await scheduler._apply_load_policy(client, client.site_url, accounts, {1: healthy_state()}, {8: 1.8, 9: 1.0}, config)
+    account["load_factor"] = 143
+    await scheduler._apply_load_policy(client, client.site_url, accounts, {1: healthy_state()}, cost_profiles, config)
     assert client.updates == []
 
 
@@ -843,21 +847,21 @@ async def test_load_factor_adjustment_also_updates_priority_order(tmp_path):
     accounts = {
         1: {
             "id": 1,
-            "name": "higher-weight",
+            "name": "lower-cost",
             "status": "active",
             "concurrency": 20,
             "load_factor": 20,
             "priority": 50,
-            "rate_multiplier": 2,
+            "rate_multiplier": 999,
         },
         2: {
             "id": 2,
-            "name": "lower-weight",
+            "name": "higher-cost",
             "status": "active",
             "concurrency": 20,
             "load_factor": 20,
             "priority": 50,
-            "rate_multiplier": 1,
+            "rate_multiplier": 0.01,
         },
     }
     client = PolicyClient(list(accounts.values()))
@@ -875,7 +879,10 @@ async def test_load_factor_adjustment_also_updates_priority_order(tmp_path):
         client.site_url,
         accounts,
         {1: healthy_state(), 2: healthy_state()},
-        {},
+        {
+            1: {"cost_available": True, "upstream_cost_multiplier": 1},
+            2: {"cost_available": True, "upstream_cost_multiplier": 2},
+        },
         config,
     )
 
@@ -887,3 +894,155 @@ async def test_load_factor_adjustment_also_updates_priority_order(tmp_path):
     assert payloads[2]["priority"] == payloads[1]["load_factor"] - payloads[2]["load_factor"] + 1
     assert accounts[1]["priority"] == 1
     assert accounts[2]["priority"] == payloads[2]["priority"]
+
+
+def test_cost_profiles_use_monitor_group_rate_recharge_ratio_and_expire(tmp_path):
+    db = make_db(tmp_path)
+    balance_account_id = db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "balance-source",
+            "base_url": "https://balance.example",
+            "api_key": "sk-test",
+            "recharge_paid_amount": 1,
+            "recharge_received_amount": 2,
+        }
+    )
+    db.replace_account_monitor_groups(
+        balance_account_id,
+        [{"group_id": "pro", "plan_name": "Pro", "effective_rate_multiplier": 2}],
+    )
+    monitor_group_id = int(db.list_monitor_groups(balance_account_id)[0]["id"])
+    now = datetime(2026, 7, 26, 8, tzinfo=timezone.utc)
+    db.update_monitor_group_snapshot(
+        monitor_group_id,
+        {"group_id": "pro", "plan_name": "Pro", "effective_rate_multiplier": 2},
+        now.isoformat(),
+    )
+    db.save_platform_dispatch_cost_binding("https://sub.example", 11, monitor_group_id)
+    accounts = {11: {"id": 11, "group_ids": [8]}}
+
+    fresh = resolve_platform_dispatch_cost_profiles(
+        db, "https://sub.example", accounts, {8: 1.1}, 10, refresh_snapshots=True, now=now
+    )[11]
+
+    assert fresh["upstream_group_rate_multiplier"] == 2
+    assert fresh["upstream_cost_multiplier"] == 1
+    assert fresh["minimum_safe_rate_multiplier"] == pytest.approx(1.1)
+    assert fresh["price_protection_status"] == "safe"
+    assert fresh["cost_available"] is True
+
+    stale_at = now - timedelta(seconds=2401)
+    db.update_monitor_group_snapshot(
+        monitor_group_id,
+        {"group_id": "pro", "plan_name": "Pro", "effective_rate_multiplier": 2},
+        stale_at.isoformat(),
+    )
+    stale = resolve_platform_dispatch_cost_profiles(
+        db, "https://sub.example", accounts, {8: 1.1}, 10, now=now
+    )[11]
+
+    assert stale["price_protection_status"] == "rate_expired"
+    assert stale["cost_available"] is False
+    assert stale["price_unsafe"] is True
+
+
+def test_cost_bindings_are_site_isolated_and_cascade_with_monitor_group(tmp_path):
+    db = make_db(tmp_path)
+    balance_account_id = db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "balance-source",
+            "base_url": "https://balance.example",
+            "api_key": "sk-test",
+        }
+    )
+    db.replace_account_monitor_groups(
+        balance_account_id,
+        [{"group_id": "pro", "effective_rate_multiplier": 1.5}],
+    )
+    monitor_group_id = int(db.list_monitor_groups(balance_account_id)[0]["id"])
+
+    db.save_platform_dispatch_cost_binding("https://one.example/", 7, monitor_group_id)
+    db.save_platform_dispatch_cost_binding("https://two.example", 7, monitor_group_id)
+
+    assert db.get_platform_dispatch_cost_binding("https://one.example", 7)["monitor_group_id"] == monitor_group_id
+    assert db.get_platform_dispatch_cost_binding("https://two.example", 7)["monitor_group_id"] == monitor_group_id
+    assert db.delete_platform_dispatch_cost_binding("https://one.example", 7) is True
+    assert db.get_platform_dispatch_cost_binding("https://two.example", 7) is not None
+
+    db.replace_account_monitor_groups(balance_account_id, [])
+    assert db.get_platform_dispatch_cost_binding("https://two.example", 7) is None
+
+
+@pytest.mark.asyncio
+async def test_price_protection_closes_all_unsafe_accounts_in_one_round(tmp_path):
+    db = make_db(tmp_path)
+    accounts = {
+        1: {"id": 1, "name": "one", "status": "active", "schedulable": True},
+        2: {"id": 2, "name": "two", "status": "active", "schedulable": True},
+    }
+    client = PolicyClient(list(accounts.values()))
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+    profiles = {
+        account_id: {
+            "price_unsafe": True,
+            "price_protection_status": "unsafe",
+            "local_min_rate_multiplier": 1,
+            "minimum_safe_rate_multiplier": 1.1,
+            "upstream_cost_multiplier": 1,
+            "cost_binding": {
+                "balance_account_name": "source",
+                "group_name": "pro",
+            },
+        }
+        for account_id in accounts
+    }
+
+    actions, unsafe_ids = await scheduler._apply_price_protection(
+        client, client.site_url, accounts, profiles
+    )
+
+    assert unsafe_ids == {1, 2}
+    assert client.updates == [(1, "schedulable", False), (2, "schedulable", False)]
+    assert len(actions) == 2
+    assert "成本来源：source / pro" in actions[0]
+
+
+@pytest.mark.asyncio
+async def test_price_safe_recovery_can_override_manual_close_but_only_once(tmp_path):
+    db = make_db(tmp_path)
+    accounts = {
+        1: {"id": 1, "name": "manual", "status": "active", "schedulable": False},
+        2: {"id": 2, "name": "system", "status": "active", "schedulable": False},
+    }
+    db.upsert_platform_dispatch_account_state(
+        "https://sub.example", 1, decision_reason="人工关闭调度"
+    )
+    client = PolicyClient(list(accounts.values()))
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+    profiles = {
+        account_id: {
+            "price_protection_status": "safe",
+            "local_min_rate_multiplier": 1.2,
+            "minimum_safe_rate_multiplier": 1.1,
+            "upstream_cost_multiplier": 1,
+            "cost_binding": {"balance_account_name": "source", "group_name": "pro"},
+        }
+        for account_id in accounts
+    }
+
+    action = await scheduler._apply_schedulable_policy(
+        client,
+        client.site_url,
+        accounts,
+        {1: healthy_state(100), 2: healthy_state(90)},
+        [],
+        {**POLICY_DEFAULTS, "enabled": True, "price_protection_enabled": True},
+        180,
+        cost_profiles=profiles,
+    )
+
+    assert client.updates == [(1, "schedulable", True)]
+    assert "成本来源：source / pro" in action
+    assert "覆盖人工关闭状态：是" in action

@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { ArrowDown, ArrowRight, Check, CircleClose, Hide, Refresh, RefreshLeft, Search, Setting, Timer, VideoPause, VideoPlay } from "@element-plus/icons-vue";
+import { ArrowDown, ArrowRight, Check, CircleClose, Delete, Hide, Link, Refresh, RefreshLeft, Search, Setting, Timer, VideoPause, VideoPlay } from "@element-plus/icons-vue";
 import { api } from "../api";
 import { formatTime } from "../utils";
 
@@ -51,6 +51,12 @@ const probingAccountIds = ref(new Set());
 const updatingProbeModelIds = ref(new Set());
 const updatingGroupProbeModelIds = ref(new Set());
 const excludingUngrouped = ref(false);
+const costBindingDialog = ref(false);
+const costBindingAccount = ref(null);
+const costSourceOptions = ref([]);
+const costSourceLoading = ref(false);
+const costBindingSaving = ref(false);
+const selectedMonitorGroupId = ref(null);
 const filters = reactive({
   search: "",
   platform: "",
@@ -89,6 +95,7 @@ const policyConfig = reactive({
   account_min_load_factor: 20,
   account_max_load_factor: 500,
   rate_weight_exponent: 1,
+  minimum_profit_margin_percent: 10,
   load_change_threshold_percent: 10,
   load_change_cooldown_seconds: 60,
   failure_window: 5,
@@ -108,6 +115,21 @@ let disposed = false;
 
 const jobActive = computed(() => isActiveJobStatus(job.value?.status));
 const jobFailed = computed(() => job.value?.status === "failed");
+const groupedCostSourceOptions = computed(() => {
+  const groupsByAccount = new Map();
+  for (const option of costSourceOptions.value) {
+    const accountId = Number(option.balance_account_id);
+    if (!groupsByAccount.has(accountId)) {
+      groupsByAccount.set(accountId, {
+        accountId,
+        label: `${option.balance_platform || "-"} / ${option.balance_account_name || accountId}`,
+        options: []
+      });
+    }
+    groupsByAccount.get(accountId).options.push(option);
+  }
+  return [...groupsByAccount.values()];
+});
 const controlsDisabled = computed(() => loading.value || startingJob.value || jobActive.value);
 const jobPercent = computed(() => {
   const direct = Number(job.value?.percent);
@@ -454,6 +476,98 @@ function applyDispatchPayload(payload) {
     include_ungrouped: refreshFilter.include_ungrouped ?? refreshFilter.includeUngrouped ?? true
   });
   loaded.value = true;
+}
+
+function costStatus(account) {
+  return account.price_protection_status || account.priceProtectionStatus || "unbound";
+}
+
+function costStatusText(account) {
+  return {
+    safe: "价格安全",
+    unsafe: "价格过低",
+    rate_expired: "倍率过期",
+    upstream_unknown: "等待上游倍率",
+    downstream_unknown: "下游倍率未知",
+    unbound: "未绑定"
+  }[costStatus(account)] || "未知";
+}
+
+function costStatusType(account) {
+  return {
+    safe: "success",
+    unsafe: "danger",
+    rate_expired: "danger",
+    upstream_unknown: "warning",
+    downstream_unknown: "warning",
+    unbound: "info"
+  }[costStatus(account)] || "info";
+}
+
+function costBindingName(account) {
+  const binding = account.cost_binding || account.costBinding;
+  if (!binding) return "未选择余额监控分组";
+  return `${binding.balance_account_name || "余额账号"} / ${binding.group_name || binding.monitor_group_id}`;
+}
+
+function costOptionLabel(option) {
+  const groupName = option.group_plan_name || option.group_name || `分组 ${option.monitor_group_id}`;
+  const rate = metricText(option.effective_rate_multiplier);
+  const cost = metricText(option.upstream_cost_multiplier ?? option.upstreamCostMultiplier);
+  return `${groupName} · 分组倍率 ${rate} · 成本 ${cost}`;
+}
+
+async function openCostBindingDialog(account) {
+  costBindingAccount.value = account;
+  selectedMonitorGroupId.value = account.cost_binding?.monitor_group_id ?? account.costBinding?.monitor_group_id ?? null;
+  costBindingDialog.value = true;
+  costSourceLoading.value = true;
+  try {
+    const payload = await api.platformDispatchCostSourceOptions();
+    costSourceOptions.value = payload.items || [];
+  } catch (error) {
+    ElMessage.error(error.message || "加载余额监控分组失败");
+  } finally {
+    costSourceLoading.value = false;
+  }
+}
+
+async function saveCostBinding() {
+  if (!costBindingAccount.value || !selectedMonitorGroupId.value) {
+    ElMessage.warning("请选择余额监控分组");
+    return;
+  }
+  costBindingSaving.value = true;
+  try {
+    const payload = await api.setPlatformDispatchCostBinding(costBindingAccount.value.id, selectedMonitorGroupId.value);
+    applyDispatchPayload(payload);
+    costBindingDialog.value = false;
+    ElMessage.success("上游成本绑定已保存");
+  } catch (error) {
+    ElMessage.error(error.message || "保存上游成本绑定失败");
+  } finally {
+    costBindingSaving.value = false;
+  }
+}
+
+async function deleteCostBinding() {
+  if (!costBindingAccount.value?.cost_binding && !costBindingAccount.value?.costBinding) return;
+  try {
+    await ElMessageBox.confirm("解除后，该账号将不参与成本调权和价格保护。", "解除上游成本绑定", { type: "warning" });
+  } catch {
+    return;
+  }
+  costBindingSaving.value = true;
+  try {
+    const payload = await api.deletePlatformDispatchCostBinding(costBindingAccount.value.id);
+    applyDispatchPayload(payload);
+    costBindingDialog.value = false;
+    ElMessage.success("上游成本绑定已解除");
+  } catch (error) {
+    ElMessage.error(error.message || "解除上游成本绑定失败");
+  } finally {
+    costBindingSaving.value = false;
+  }
 }
 
 function openRefreshDialog() {
@@ -1319,11 +1433,11 @@ onBeforeUnmount(() => {
         </label>
         <label class="policy-strategy">
           <el-switch v-model="policyConfig.load_factor_enabled" />
-          <span><strong>负载因子</strong><small>按健康分与成本倍率分配负载，并同步调整账号优先级</small></span>
+          <span><strong>负载因子</strong><small>按健康分与上游成本反向分配负载，并同步调整账号优先级</small></span>
         </label>
         <label class="policy-strategy">
           <el-switch v-model="policyConfig.price_protection_enabled" />
-          <span><strong>价格保护</strong><small>按最低有效分组倍率限制权重</small></span>
+          <span><strong>价格保护</strong><small>低于成本与最低利润线时关闭账号调度</small></span>
         </label>
       </div>
 
@@ -1335,6 +1449,8 @@ onBeforeUnmount(() => {
           <small>每组最低保障 {{ policyConfig.minimum_available_accounts }} 个 · 每组健康回池目标 {{ policyConfig.healthy_target_accounts }} 个</small>
         </div>
         <div><span>实时并发</span><strong>{{ metricText(policySummary.current_concurrency) }} / {{ metricText(policySummary.capacity) }}</strong></div>
+        <div><span>成本绑定</span><strong>{{ policySummary.cost_bound_accounts ?? 0 }} / {{ policySummary.managed_accounts ?? accounts.length }}</strong><small>未绑定 {{ policySummary.cost_unbound_accounts ?? 0 }}</small></div>
+        <div><span>价格风险</span><strong>{{ policySummary.price_unsafe_accounts ?? 0 }}</strong><small>过期 {{ policySummary.cost_expired_accounts ?? 0 }} · 下游未知 {{ policySummary.downstream_unknown_accounts ?? 0 }}</small></div>
         <div><span>最近轮次</span><strong>{{ policyRuntime.last_finished_at ? formatTime(policyRuntime.last_finished_at) : "尚未执行" }}</strong></div>
       </div>
 
@@ -1367,6 +1483,8 @@ onBeforeUnmount(() => {
               <label><span>总点数</span><el-input-number v-model="policyConfig.load_factor_total" :min="1" /></label>
               <label><span>账号下限</span><el-input-number v-model="policyConfig.account_min_load_factor" :min="1" /></label>
               <label><span>账号上限</span><el-input-number v-model="policyConfig.account_max_load_factor" :min="1" /></label>
+              <label><span>成本权重指数</span><el-input-number v-model="policyConfig.rate_weight_exponent" :min="0" :step="0.1" /></label>
+              <label><span>最低利润率 %</span><el-input-number v-model="policyConfig.minimum_profit_margin_percent" :min="0" :max="100" /></label>
               <label><span>写入死区 %</span><el-input-number v-model="policyConfig.load_change_threshold_percent" :min="0" :max="100" /></label>
             </div>
           </section>
@@ -1384,7 +1502,7 @@ onBeforeUnmount(() => {
       </details>
 
       <div class="policy-rules">
-        <p><strong>Sub2API 调度开关</strong><span>认证、余额和用量上限异常时立即关闭账号调度；最近 5 次出现 3 次异常且评分低于 60，或最近 10 次有 5 次首字超过 15 秒时也会关闭。达到回池条件时，可重新开启任何健康达标的调度关闭账号，包括人员手动关闭的账号。</span></p>
+        <p><strong>Sub2API 调度开关</strong><span>认证、余额和用量上限异常时立即关闭账号调度；价格安全且健康达标时，可重新开启系统或人员手动关闭的 active 账号。</span></p>
         <p><strong>系统计算</strong><span>短期为最新证据与前 9 次均值各 50%，最终评分为短期 70% + 最近 60 次均值 30%。</span></p>
       </div>
 
@@ -1654,7 +1772,17 @@ onBeforeUnmount(() => {
                     @click="excludeAccount(account)"
                   />
                 </el-tooltip>
-                <el-tooltip content="与 Sub2API 账号列表的调度开关一致，控制该账号是否参与请求调度">
+                <el-tooltip :content="account.cost_binding || account.costBinding ? '修改上游成本绑定' : '绑定上游成本分组'">
+                  <el-button
+                    circle
+                    text
+                    :icon="Link"
+                    :disabled="dispatchMutationDisabled || costBindingSaving"
+                    :aria-label="`设置 ${account.name} 的上游成本绑定`"
+                    @click="openCostBindingDialog(account)"
+                  />
+                </el-tooltip>
+                <el-tooltip content="自动调度开启后，价格安全且健康达标的 active 账号可能被重新开启">
                   <el-switch
                     v-model="account.schedulable"
                     inline-prompt
@@ -1703,9 +1831,20 @@ onBeforeUnmount(() => {
                 <small>目标 {{ metricText(account.target_load_factor ?? account.targetLoadFactor) }}</small>
               </div>
               <div>
-                <span>成本倍率</span>
-                <strong>{{ account.rate_multiplier ?? account.rateMultiplier ?? "-" }}</strong>
-                <small>{{ account.schedulable === false ? "不可调度" : "可调度" }}</small>
+                <span>上游成本倍率</span>
+                <strong>{{ metricText(account.upstream_cost_multiplier ?? account.upstreamCostMultiplier) }}</strong>
+                <small :title="costBindingName(account)">
+                  分组 {{ metricText(account.upstream_group_rate_multiplier ?? account.upstreamGroupRateMultiplier) }} ·
+                  {{ account.cost_binding?.recharge_paid_amount ?? account.costBinding?.recharge_paid_amount ?? 1 }}:
+                  {{ account.cost_binding?.recharge_received_amount ?? account.costBinding?.recharge_received_amount ?? 1 }}
+                </small>
+                <small>倍率时间 {{ account.upstream_cost_checked_at || account.upstreamCostCheckedAt ? formatTime(account.upstream_cost_checked_at || account.upstreamCostCheckedAt) : "-" }}</small>
+              </div>
+              <div>
+                <span>本地销售倍率</span>
+                <strong>{{ metricText(account.local_min_rate_multiplier ?? account.localMinRateMultiplier) }}</strong>
+                <small>安全线 {{ metricText(account.minimum_safe_rate_multiplier ?? account.minimumSafeRateMultiplier) }}</small>
+                <el-tag :type="costStatusType(account)" size="small" effect="plain">{{ costStatusText(account) }}</el-tag>
               </div>
               <div>
                 <span>优先级</span>
@@ -1771,6 +1910,55 @@ onBeforeUnmount(() => {
       v-else-if="loaded && !loading"
       :description="hasCache ? '没有符合条件的账号' : '暂无本地缓存数据'"
     />
+
+    <el-dialog
+      v-model="costBindingDialog"
+      :title="`上游成本绑定 · ${costBindingAccount?.name || ''}`"
+      width="min(560px, calc(100vw - 24px))"
+      destroy-on-close
+    >
+      <el-form label-position="top">
+        <el-form-item label="余额监控分组">
+          <el-select
+            v-model="selectedMonitorGroupId"
+            filterable
+            :loading="costSourceLoading"
+            :disabled="costBindingSaving"
+            placeholder="选择账号及监控分组"
+            style="width: 100%"
+          >
+            <el-option-group v-for="group in groupedCostSourceOptions" :key="group.accountId" :label="group.label">
+              <el-option
+                v-for="option in group.options"
+                :key="option.monitor_group_id"
+                :label="costOptionLabel(option)"
+                :value="option.monitor_group_id"
+              />
+            </el-option-group>
+          </el-select>
+        </el-form-item>
+        <div v-if="costBindingAccount?.cost_binding || costBindingAccount?.costBinding" class="cost-binding-current">
+          <span>当前绑定</span>
+          <strong>{{ costBindingName(costBindingAccount) }}</strong>
+          <small>最近倍率 {{ costBindingAccount.upstream_cost_checked_at || costBindingAccount.upstreamCostCheckedAt ? formatTime(costBindingAccount.upstream_cost_checked_at || costBindingAccount.upstreamCostCheckedAt) : "-" }}</small>
+        </div>
+      </el-form>
+      <template #footer>
+        <div class="dialog-footer cost-binding-footer">
+          <el-button
+            v-if="costBindingAccount?.cost_binding || costBindingAccount?.costBinding"
+            type="danger"
+            text
+            :icon="Delete"
+            :loading="costBindingSaving"
+            @click="deleteCostBinding"
+          >解除绑定</el-button>
+          <span />
+          <el-button :disabled="costBindingSaving" @click="costBindingDialog = false">取消</el-button>
+          <el-button type="primary" :icon="Check" :loading="costBindingSaving" @click="saveCostBinding">保存</el-button>
+        </div>
+      </template>
+    </el-dialog>
 
     <el-dialog
       v-model="syncDialog"
@@ -2008,7 +2196,7 @@ onBeforeUnmount(() => {
 
 .policy-runtime {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .policy-runtime > div {
@@ -2019,7 +2207,7 @@ onBeforeUnmount(() => {
   padding: 11px 16px;
 }
 
-.policy-runtime > div:last-child {
+.policy-runtime > div:nth-child(3n) {
   border-right: 0;
 }
 
@@ -2676,7 +2864,7 @@ onBeforeUnmount(() => {
   border-right: 1px solid var(--line);
 }
 
-.account-policy-metrics > div:nth-child(-n + 2) {
+.account-policy-metrics > div:not(:nth-last-child(-n + 2)) {
   border-bottom: 1px solid var(--line);
 }
 
@@ -2775,6 +2963,33 @@ onBeforeUnmount(() => {
   font-size: 12px;
 }
 
+.cost-binding-current {
+  background: var(--panel-soft);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  display: grid;
+  gap: 3px;
+  padding: 10px 12px;
+}
+
+.cost-binding-current span,
+.cost-binding-current small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.cost-binding-current strong {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.cost-binding-footer {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: auto 1fr auto auto;
+}
+
 @media (min-width: 768px) {
   .dispatch-excluded-account-grid,
   .dispatch-account-grid {
@@ -2869,6 +3084,19 @@ onBeforeUnmount(() => {
 
   .short-evidence-summary > small {
     display: none;
+  }
+
+  .cost-binding-footer {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .cost-binding-footer > span {
+    display: none;
+  }
+
+  .cost-binding-footer :deep(.el-button) {
+    margin: 0;
+    width: 100%;
   }
 
 }

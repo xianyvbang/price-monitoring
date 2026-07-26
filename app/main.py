@@ -93,6 +93,8 @@ from app.services.sub2api_admin import (
 from app.services.platform_dispatch_policy import (
     POLICY_DEFAULTS,
     PlatformDispatchPolicyScheduler,
+    public_platform_dispatch_cost_profile,
+    resolve_platform_dispatch_cost_profiles,
     validate_policy_config,
 )
 
@@ -1670,6 +1672,80 @@ async def api_platform_dispatch_policy(request: Request):
     return platform_dispatch_policy_response()
 
 
+@app.get("/api/platform-dispatch/cost-source-options")
+async def api_platform_dispatch_cost_source_options(request: Request):
+    require_user(request)
+    items = []
+    for option in db.list_platform_dispatch_cost_source_options():
+        rate = _optional_number(option.get("effective_rate_multiplier"))
+        paid = _optional_number(option.get("recharge_paid_amount")) or 1.0
+        received = _optional_number(option.get("recharge_received_amount")) or 1.0
+        cost = rate * paid / received if rate is not None and rate > 0 and paid > 0 and received > 0 else None
+        items.append(
+            {
+                **option,
+                "upstream_cost_multiplier": cost,
+                "upstreamCostMultiplier": cost,
+            }
+        )
+    return {"ok": True, "items": items}
+
+
+@app.put("/api/platform-dispatch/accounts/{account_id}/cost-binding")
+async def api_platform_dispatch_cost_binding_update(request: Request, account_id: int):
+    require_user(request)
+    if account_id <= 0:
+        return JSONResponse({"ok": False, "message": "账号 ID 必须是正整数"}, status_code=400)
+    if platform_dispatch_policy_scheduler.lock.locked() or db.has_active_platform_dispatch_job():
+        return JSONResponse({"ok": False, "message": "平台调度任务执行期间不能修改成本绑定"}, status_code=409)
+    try:
+        payload = await request.json()
+        monitor_group_id = int(payload.get("monitor_group_id", payload.get("monitorGroupId")))
+    except (AttributeError, TypeError, ValueError):
+        return JSONResponse({"ok": False, "message": "monitor_group_id 必须是正整数"}, status_code=400)
+    if monitor_group_id <= 0:
+        return JSONResponse({"ok": False, "message": "monitor_group_id 必须是正整数"}, status_code=400)
+    site_url = db.get_setting(SUB2API_SITE_URL_SETTING, "").strip().rstrip("/")
+    cache = db.get_platform_dispatch_cache()
+    if not cache or cache.get("source_site_url") != site_url:
+        return JSONResponse({"ok": False, "message": "请先同步当前站点的账号信息"}, status_code=409)
+    account = next(
+        (
+            item for item in cache.get("accounts") or []
+            if isinstance(item, dict) and _platform_dispatch_account_id(item) == account_id
+        ),
+        None,
+    )
+    if account is None:
+        return JSONResponse({"ok": False, "message": "账号不存在"}, status_code=404)
+    try:
+        binding = db.save_platform_dispatch_cost_binding(site_url, account_id, monitor_group_id)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=404)
+    db.add_log(
+        "info",
+        "platform-dispatch-policy",
+        f"{account.get('name') or account_id} 绑定上游成本分组 {binding.get('group_plan_name') or binding.get('group_name') or monitor_group_id}",
+    )
+    platform_dispatch_policy_scheduler.notify_changed(run_immediately=False)
+    return platform_dispatch_cache_response()
+
+
+@app.delete("/api/platform-dispatch/accounts/{account_id}/cost-binding")
+async def api_platform_dispatch_cost_binding_delete(request: Request, account_id: int):
+    require_user(request)
+    if account_id <= 0:
+        return JSONResponse({"ok": False, "message": "账号 ID 必须是正整数"}, status_code=400)
+    if platform_dispatch_policy_scheduler.lock.locked() or db.has_active_platform_dispatch_job():
+        return JSONResponse({"ok": False, "message": "平台调度任务执行期间不能修改成本绑定"}, status_code=409)
+    site_url = db.get_setting(SUB2API_SITE_URL_SETTING, "").strip().rstrip("/")
+    if not db.delete_platform_dispatch_cost_binding(site_url, account_id):
+        return JSONResponse({"ok": False, "message": "成本绑定不存在"}, status_code=404)
+    db.add_log("info", "platform-dispatch-policy", f"取消 Sub2API 调度账号 #{account_id} 的上游成本绑定")
+    platform_dispatch_policy_scheduler.notify_changed(run_immediately=False)
+    return platform_dispatch_cache_response()
+
+
 @app.put("/api/platform-dispatch/policy")
 async def api_platform_dispatch_policy_update(request: Request):
     require_user(request)
@@ -2068,12 +2144,22 @@ async def api_platform_dispatch_account_schedulable(request: Request, account_id
     except Sub2ApiAdminError as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=exc.status_code)
     db.update_platform_dispatch_cached_account(account)
+    site_url = db.get_setting(SUB2API_SITE_URL_SETTING, "").strip().rstrip("/")
+    db.upsert_platform_dispatch_account_state(
+        site_url,
+        account_id,
+        price_protection_blocked=0,
+        price_protection_blocked_at=None,
+        price_protection_reason="",
+        decision_reason=f"人工{'开启' if schedulable else '关闭'}调度",
+        last_action_at=utc_now(),
+    )
     db.add_log(
         "info",
         "platform-dispatch",
         f"Sub2API 账号 {account.get('name') or account_id}: {'开启' if schedulable else '关闭'}调度",
     )
-    return {"ok": True, "account": account}
+    return {"ok": True, "account": public_dispatch_account(account, [])}
 
 
 @app.get("/api/dashboard")
@@ -4680,6 +4766,48 @@ def platform_dispatch_cache_response() -> dict[str, Any]:
         activities_refreshed_at = cache["activities_refreshed_at"] or None
         refreshed_at = cache["refreshed_at"]
         source_site_url = cache["source_site_url"]
+    for account in accounts:
+        if isinstance(account, dict):
+            account.pop("rate_multiplier", None)
+            account.pop("rateMultiplier", None)
+    if source_site_url and accounts:
+        account_map = {
+            _platform_dispatch_account_id(account): account
+            for account in accounts
+            if isinstance(account, dict) and _platform_dispatch_account_id(account)
+        }
+        group_rates = {
+            _platform_dispatch_account_id(group): _optional_number(group.get("rate_multiplier"))
+            for group in groups
+            if isinstance(group, dict) and _platform_dispatch_account_id(group)
+        }
+        policy = db.get_platform_dispatch_policy(POLICY_DEFAULTS)["config"]
+        profiles = resolve_platform_dispatch_cost_profiles(
+            db,
+            source_site_url,
+            account_map,
+            group_rates,
+            float(policy["minimum_profit_margin_percent"]),
+        )
+        states = {
+            int(item["account_id"]): item
+            for item in db.list_platform_dispatch_account_states(source_site_url)
+        }
+        for account_id, account in account_map.items():
+            account.update(public_platform_dispatch_cost_profile(profiles[account_id]))
+            state = states.get(account_id) or {}
+            account["price_protection_blocked"] = bool(state.get("price_protection_blocked"))
+            account["priceProtectionBlocked"] = account["price_protection_blocked"]
+            account["price_protection_blocked_at"] = state.get("price_protection_blocked_at")
+            account["priceProtectionBlockedAt"] = account["price_protection_blocked_at"]
+            account["price_protection_reason"] = str(state.get("price_protection_reason") or "")
+            account["priceProtectionReason"] = account["price_protection_reason"]
+            if state.get("decision_reason"):
+                account["decision_reason"] = state["decision_reason"]
+                account["decisionReason"] = state["decision_reason"]
+            if state.get("last_action_at"):
+                account["last_policy_action_at"] = state["last_action_at"]
+                account["lastPolicyActionAt"] = state["last_action_at"]
     return {
         "ok": True,
         "has_cache": cache is not None,

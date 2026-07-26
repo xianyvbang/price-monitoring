@@ -288,6 +288,18 @@ class Database:
                     PRIMARY KEY (source_site_url, group_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS platform_dispatch_cost_bindings (
+                    source_site_url TEXT NOT NULL,
+                    dispatch_account_id INTEGER NOT NULL,
+                    monitor_group_id INTEGER NOT NULL REFERENCES account_monitor_groups(id) ON DELETE CASCADE,
+                    last_group_rate_multiplier REAL,
+                    last_cost_multiplier REAL,
+                    last_rate_checked_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (source_site_url, dispatch_account_id)
+                );
+
                 CREATE TABLE IF NOT EXISTS platform_dispatch_policy (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
                     config_json TEXT NOT NULL,
@@ -336,6 +348,9 @@ class Database:
                     last_concurrency_write_at TEXT,
                     last_load_factor_write_at TEXT,
                     last_action_at TEXT,
+                    price_protection_blocked INTEGER NOT NULL DEFAULT 0,
+                    price_protection_blocked_at TEXT,
+                    price_protection_reason TEXT NOT NULL DEFAULT '',
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (source_site_url, account_id)
                 );
@@ -381,6 +396,8 @@ class Database:
                 ON platform_dispatch_evidence(source_site_url, account_id, occurred_at DESC, id DESC);
                 CREATE INDEX IF NOT EXISTS idx_platform_dispatch_actions_created
                 ON platform_dispatch_actions(created_at DESC, id DESC);
+                CREATE INDEX IF NOT EXISTS idx_platform_dispatch_cost_binding_group
+                ON platform_dispatch_cost_bindings(monitor_group_id);
                 """
             )
             self._migrate_smtp_nullable(conn)
@@ -400,6 +417,7 @@ class Database:
             self._migrate_opencode_go_referral(conn)
             self._migrate_group_rate_records_monitor_group(conn)
             self._migrate_platform_dispatch_cache(conn)
+            self._migrate_platform_dispatch_account_state(conn)
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_group_rate_records_monitor_checked_at
@@ -664,6 +682,21 @@ class Database:
                 "ALTER TABLE platform_dispatch_cache ADD COLUMN refresh_include_ungrouped INTEGER NOT NULL DEFAULT 1"
             )
 
+    @staticmethod
+    def _migrate_platform_dispatch_account_state(conn: sqlite3.Connection) -> None:
+        columns = conn.execute("PRAGMA table_info(platform_dispatch_account_state)").fetchall()
+        column_names = {row["name"] for row in columns}
+        if "price_protection_blocked" not in column_names:
+            conn.execute(
+                "ALTER TABLE platform_dispatch_account_state ADD COLUMN price_protection_blocked INTEGER NOT NULL DEFAULT 0"
+            )
+        if "price_protection_blocked_at" not in column_names:
+            conn.execute("ALTER TABLE platform_dispatch_account_state ADD COLUMN price_protection_blocked_at TEXT")
+        if "price_protection_reason" not in column_names:
+            conn.execute(
+                "ALTER TABLE platform_dispatch_account_state ADD COLUMN price_protection_reason TEXT NOT NULL DEFAULT ''"
+            )
+
     def _migrate_legacy_selected_groups(self, conn: sqlite3.Connection) -> None:
         existing = conn.execute("SELECT COUNT(*) AS count FROM account_monitor_groups").fetchone()["count"]
         if existing:
@@ -897,7 +930,6 @@ class Database:
                 aliases = {
                     "concurrency": "concurrency",
                     "load_factor": "loadFactor",
-                    "rate_multiplier": "rateMultiplier",
                     "schedulable": "schedulable",
                     "current_concurrency": "currentConcurrency",
                     "waiting_in_queue": "waitingInQueue",
@@ -927,6 +959,168 @@ class Database:
                 (json.dumps(accounts, ensure_ascii=False, separators=(",", ":")),),
             )
         return True
+
+    def list_platform_dispatch_cost_source_options(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    groups.id AS monitor_group_id,
+                    groups.account_id AS balance_account_id,
+                    groups.plan_name AS group_plan_name,
+                    groups.name AS group_name,
+                    groups.effective_rate_multiplier,
+                    groups.last_checked_at,
+                    accounts.name AS balance_account_name,
+                    accounts.platform AS balance_platform,
+                    accounts.base_url,
+                    accounts.recharge_paid_amount,
+                    accounts.recharge_received_amount,
+                    accounts.is_enabled,
+                    accounts.is_visible,
+                    accounts.is_eliminated
+                FROM account_monitor_groups AS groups
+                JOIN accounts ON accounts.id = groups.account_id
+                ORDER BY accounts.platform, accounts.name COLLATE NOCASE, groups.sort_order, groups.id
+                """
+            ).fetchall()
+        return [row_to_dict(row) for row in rows]
+
+    def list_platform_dispatch_cost_bindings(self, source_site_url: str) -> list[dict[str, Any]]:
+        site_url = str(source_site_url or "").strip().rstrip("/")
+        if not site_url:
+            return []
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    bindings.*,
+                    groups.account_id AS balance_account_id,
+                    groups.plan_name AS group_plan_name,
+                    groups.name AS group_name,
+                    groups.effective_rate_multiplier,
+                    groups.last_checked_at AS group_last_checked_at,
+                    accounts.name AS balance_account_name,
+                    accounts.platform AS balance_platform,
+                    accounts.base_url,
+                    accounts.recharge_paid_amount,
+                    accounts.recharge_received_amount,
+                    accounts.is_enabled,
+                    accounts.is_visible,
+                    accounts.is_eliminated
+                FROM platform_dispatch_cost_bindings AS bindings
+                JOIN account_monitor_groups AS groups ON groups.id = bindings.monitor_group_id
+                JOIN accounts ON accounts.id = groups.account_id
+                WHERE bindings.source_site_url = ?
+                ORDER BY bindings.dispatch_account_id
+                """,
+                (site_url,),
+            ).fetchall()
+        return [row_to_dict(row) for row in rows]
+
+    def get_platform_dispatch_cost_binding(
+        self, source_site_url: str, dispatch_account_id: int
+    ) -> dict[str, Any] | None:
+        bindings = self.list_platform_dispatch_cost_bindings(source_site_url)
+        return next(
+            (item for item in bindings if int(item["dispatch_account_id"]) == int(dispatch_account_id)),
+            None,
+        )
+
+    def save_platform_dispatch_cost_binding(
+        self, source_site_url: str, dispatch_account_id: int, monitor_group_id: int
+    ) -> dict[str, Any]:
+        site_url = str(source_site_url or "").strip().rstrip("/")
+        dispatch_account_id = int(dispatch_account_id)
+        monitor_group_id = int(monitor_group_id)
+        if not site_url or dispatch_account_id <= 0 or monitor_group_id <= 0:
+            raise ValueError("成本绑定参数不正确")
+        now = utc_now()
+        with self.connect() as conn:
+            group = conn.execute(
+                """
+                SELECT groups.effective_rate_multiplier, groups.last_checked_at,
+                       accounts.recharge_paid_amount, accounts.recharge_received_amount
+                FROM account_monitor_groups AS groups
+                JOIN accounts ON accounts.id = groups.account_id
+                WHERE groups.id = ?
+                """,
+                (monitor_group_id,),
+            ).fetchone()
+            if group is None:
+                raise ValueError("余额监控分组不存在")
+            group_rate = _optional_float_or_none(group["effective_rate_multiplier"])
+            paid = _positive_float_or_default(group["recharge_paid_amount"], 1.0)
+            received = _positive_float_or_default(group["recharge_received_amount"], 1.0)
+            cost_rate = group_rate * paid / received if group_rate is not None and group_rate > 0 else None
+            checked_at = str(group["last_checked_at"] or now) if cost_rate is not None else None
+            conn.execute(
+                """
+                INSERT INTO platform_dispatch_cost_bindings (
+                    source_site_url, dispatch_account_id, monitor_group_id,
+                    last_group_rate_multiplier, last_cost_multiplier, last_rate_checked_at,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_site_url, dispatch_account_id) DO UPDATE SET
+                    monitor_group_id = excluded.monitor_group_id,
+                    last_group_rate_multiplier = excluded.last_group_rate_multiplier,
+                    last_cost_multiplier = excluded.last_cost_multiplier,
+                    last_rate_checked_at = excluded.last_rate_checked_at,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    site_url,
+                    dispatch_account_id,
+                    monitor_group_id,
+                    group_rate,
+                    cost_rate,
+                    checked_at,
+                    now,
+                    now,
+                ),
+            )
+        binding = self.get_platform_dispatch_cost_binding(site_url, dispatch_account_id)
+        if binding is None:
+            raise ValueError("成本绑定保存失败")
+        return binding
+
+    def update_platform_dispatch_cost_snapshot(
+        self,
+        source_site_url: str,
+        dispatch_account_id: int,
+        group_rate_multiplier: float,
+        cost_multiplier: float,
+        checked_at: str,
+    ) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE platform_dispatch_cost_bindings
+                SET last_group_rate_multiplier = ?, last_cost_multiplier = ?,
+                    last_rate_checked_at = ?, updated_at = ?
+                WHERE source_site_url = ? AND dispatch_account_id = ?
+                """,
+                (
+                    float(group_rate_multiplier),
+                    float(cost_multiplier),
+                    str(checked_at),
+                    utc_now(),
+                    str(source_site_url or "").strip().rstrip("/"),
+                    int(dispatch_account_id),
+                ),
+            )
+
+    def delete_platform_dispatch_cost_binding(self, source_site_url: str, dispatch_account_id: int) -> bool:
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                DELETE FROM platform_dispatch_cost_bindings
+                WHERE source_site_url = ? AND dispatch_account_id = ?
+                """,
+                (str(source_site_url or "").strip().rstrip("/"), int(dispatch_account_id)),
+            )
+        return cursor.rowcount == 1
 
     def list_platform_dispatch_excluded_groups(self, source_site_url: str) -> list[dict[str, Any]]:
         site_url = str(source_site_url or "").strip().rstrip("/")
@@ -1465,6 +1659,7 @@ class Database:
             "evidence_fresh", "latest_probe_success_at", "decision_reason", "target_concurrency",
             "target_load_factor", "baseline_load_factor", "last_concurrency_write_at",
             "last_load_factor_write_at", "last_action_at",
+            "price_protection_blocked", "price_protection_blocked_at", "price_protection_reason",
         }
         values = {key: value for key, value in fields.items() if key in allowed}
         site_url = str(source_site_url or "").strip().rstrip("/")

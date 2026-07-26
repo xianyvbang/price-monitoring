@@ -662,9 +662,6 @@ def public_dispatch_account(account: dict[str, Any], recent_activity: list[dict[
     if "load_factor" in account:
         result["load_factor"] = _positive_int(account.get("load_factor"))
         result["loadFactor"] = result["load_factor"]
-    if "rate_multiplier" in account:
-        result["rate_multiplier"] = _optional_number(account.get("rate_multiplier"))
-        result["rateMultiplier"] = result["rate_multiplier"]
     if "schedulable" in account:
         result["schedulable"] = account.get("schedulable") is not False
     return result

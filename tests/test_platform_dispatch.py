@@ -1,5 +1,6 @@
 import asyncio
 import time
+from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -183,13 +184,92 @@ def test_platform_dispatch_account_exclusion_api_updates_only_policy_and_handles
     assert excluded_again.json()["config"]["excluded_account_ids"] == [1430, 1431, 1]
     assert missing.status_code == 404
     assert invalid.status_code == 400
-    assert cached.json()["accounts"] == cached_accounts
+    assert [item["id"] for item in cached.json()["accounts"]] == [1, 2]
+    assert all(item["price_protection_status"] == "unbound" for item in cached.json()["accounts"])
     assert restored.status_code == 200
     assert restored.json()["config"]["excluded_account_ids"] == [1430, 1431]
     assert restored.json()["config"]["probe_interval_seconds"] == 125
     assert missing_restore.status_code == 404
     assert conflict_exclude.status_code == 409
     assert conflict_restore.status_code == 409
+
+
+def test_platform_dispatch_cost_binding_api_and_job_conflict(tmp_path, monkeypatch):
+    test_db = setup_test_db(tmp_path, monkeypatch)
+    test_db.set_setting("sub2api_site_url", "https://sub.example")
+    balance_account_id = test_db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "balance-source",
+            "base_url": "https://balance.example",
+            "api_key": "sk-test",
+            "recharge_paid_amount": 1,
+            "recharge_received_amount": 2,
+        }
+    )
+    test_db.replace_account_monitor_groups(
+        balance_account_id,
+        [{"group_id": "pro", "plan_name": "Pro", "effective_rate_multiplier": 2}],
+    )
+    monitor_group_id = int(test_db.list_monitor_groups(balance_account_id)[0]["id"])
+    checked_at = datetime.now(timezone.utc).isoformat()
+    test_db.update_monitor_group_snapshot(
+        monitor_group_id,
+        {"group_id": "pro", "plan_name": "Pro", "effective_rate_multiplier": 2},
+        checked_at,
+    )
+    test_db.replace_platform_dispatch_cache(
+        "https://sub.example",
+        [{"id": 1, "name": "dispatch", "status": "active", "group_ids": [8], "rate_multiplier": 99}],
+        [{"id": 8, "name": "local", "rate_multiplier": 1.2}],
+        [],
+        {"platform": "", "type": "", "status": "", "include_ungrouped": True},
+    )
+
+    with TestClient(app) as client:
+        login(client)
+        options = client.get("/api/platform-dispatch/cost-source-options")
+        bound = client.put(
+            "/api/platform-dispatch/accounts/1/cost-binding",
+            json={"monitor_group_id": monitor_group_id},
+        )
+        missing_account = client.put(
+            "/api/platform-dispatch/accounts/99/cost-binding",
+            json={"monitor_group_id": monitor_group_id},
+        )
+        invalid_group = client.put(
+            "/api/platform-dispatch/accounts/1/cost-binding",
+            json={"monitor_group_id": 99999},
+        )
+        deleted = client.delete("/api/platform-dispatch/accounts/1/cost-binding")
+        deleted_again = client.delete("/api/platform-dispatch/accounts/1/cost-binding")
+        client.put(
+            "/api/platform-dispatch/accounts/1/cost-binding",
+            json={"monitor_group_id": monitor_group_id},
+        )
+        test_db.create_platform_dispatch_job("active-cost-job", "accounts_sync", {}, "https://sub.example")
+        conflict = client.delete("/api/platform-dispatch/accounts/1/cost-binding")
+
+    assert options.status_code == 200
+    option = options.json()["items"][0]
+    assert option["monitor_group_id"] == monitor_group_id
+    assert option["upstream_cost_multiplier"] == 1
+    assert option["last_checked_at"] == checked_at
+    assert bound.status_code == 200
+    account = bound.json()["accounts"][0]
+    assert account["cost_binding"]["monitor_group_id"] == monitor_group_id
+    assert account["upstream_group_rate_multiplier"] == 2
+    assert account["upstream_cost_multiplier"] == 1
+    assert account["local_min_rate_multiplier"] == 1.2
+    assert account["price_protection_status"] == "safe"
+    assert "rate_multiplier" not in account
+    assert "rateMultiplier" not in account
+    assert missing_account.status_code == 404
+    assert invalid_group.status_code == 404
+    assert deleted.status_code == 200
+    assert deleted.json()["accounts"][0]["price_protection_status"] == "unbound"
+    assert deleted_again.status_code == 404
+    assert conflict.status_code == 409
 
 
 def test_platform_dispatch_account_probe_model_api_sets_override_and_restores_default(tmp_path, monkeypatch):
@@ -397,6 +477,8 @@ def test_public_dispatch_account_does_not_expose_credentials():
             "platform": "openai",
             "type": "apikey",
             "status": "active",
+            "rate_multiplier": 7,
+            "rateMultiplier": 8,
             "rate_limit_reset_at": "2999-01-01T00:00:00Z",
             "credentials": {"api_key": "secret"},
             "group_ids": [5],
@@ -407,6 +489,8 @@ def test_public_dispatch_account_does_not_expose_credentials():
     assert account["is_enabled"] is True
     assert account["filter_status"] == "rate_limited"
     assert account["group_ids"] == [5]
+    assert "rate_multiplier" not in account
+    assert "rateMultiplier" not in account
     assert "credentials" not in account
     assert "secret" not in str(account)
 

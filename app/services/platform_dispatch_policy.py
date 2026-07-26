@@ -39,6 +39,7 @@ POLICY_DEFAULTS: dict[str, Any] = {
     "account_min_load_factor": 20,
     "account_max_load_factor": 500,
     "rate_weight_exponent": 1.0,
+    "minimum_profit_margin_percent": 10.0,
     "load_change_threshold_percent": 10.0,
     "load_change_cooldown_seconds": 60,
     "failure_window": 5,
@@ -84,6 +85,7 @@ FLOAT_FIELDS = {
     "expand_trigger_percent",
     "expand_step_percent",
     "rate_weight_exponent",
+    "minimum_profit_margin_percent",
     "load_change_threshold_percent",
     "failure_health_threshold",
 }
@@ -120,6 +122,7 @@ def validate_policy_config(payload: Any, current: dict[str, Any] | None = None) 
         "smartExpandEnabled": "smart_expand_enabled",
         "loadFactorEnabled": "load_factor_enabled",
         "priceProtectionEnabled": "price_protection_enabled",
+        "minimumProfitMarginPercent": "minimum_profit_margin_percent",
         "defaultProbeModel": "default_probe_model",
         "groupProbeModels": "group_probe_models",
         "accountProbeModels": "account_probe_models",
@@ -203,7 +206,10 @@ def validate_policy_config(payload: Any, current: dict[str, Any] | None = None) 
                 account_models[str(account_id)] = model
         config["account_probe_models"] = account_models
 
-    for key in ("health_threshold", "failure_health_threshold", "expand_trigger_percent", "expand_step_percent", "load_change_threshold_percent"):
+    for key in (
+        "health_threshold", "failure_health_threshold", "expand_trigger_percent", "expand_step_percent",
+        "load_change_threshold_percent", "minimum_profit_margin_percent",
+    ):
         if not 0 <= float(config[key]) <= 100:
             raise ValueError(f"{key} 必须在 0 到 100 之间")
     if float(config["rate_weight_exponent"]) < 0:
@@ -385,6 +391,144 @@ def allocate_weighted_increments(
                 if int(current[account_id]) + additions[account_id] < int(maximum)
             }
     return {account_id: value for account_id, value in additions.items() if value > 0}
+
+
+def resolve_platform_dispatch_cost_profiles(
+    db: Database,
+    site_url: str,
+    accounts: dict[int, dict[str, Any]],
+    group_rates: dict[int, float | None],
+    minimum_profit_margin_percent: float,
+    *,
+    refresh_snapshots: bool = False,
+    now: datetime | None = None,
+) -> dict[int, dict[str, Any]]:
+    now = now or datetime.now(timezone.utc)
+    settings = db.get_general_settings()
+    stale_seconds = max(1, int(settings.get("group_rate_query_interval") or 1200)) * 2
+    bindings = {
+        int(item["dispatch_account_id"]): item
+        for item in db.list_platform_dispatch_cost_bindings(site_url)
+    }
+    margin = max(0.0, float(minimum_profit_margin_percent))
+    profiles: dict[int, dict[str, Any]] = {}
+    for account_id, account in accounts.items():
+        binding = bindings.get(account_id)
+        local_rates = [group_rates.get(group_id) for group_id in _account_group_ids(account)]
+        local_rates = [float(rate) for rate in local_rates if rate is not None and float(rate) > 0]
+        local_min_rate = min(local_rates) if local_rates else None
+        profile: dict[str, Any] = {
+            "cost_binding": None,
+            "upstream_group_rate_multiplier": None,
+            "upstream_cost_multiplier": None,
+            "upstream_cost_checked_at": None,
+            "local_min_rate_multiplier": local_min_rate,
+            "minimum_safe_rate_multiplier": None,
+            "price_protection_status": "unbound",
+            "cost_available": False,
+            "price_unsafe": False,
+        }
+        if binding is None:
+            profiles[account_id] = profile
+            continue
+
+        paid = _optional_float(binding.get("recharge_paid_amount")) or 1.0
+        received = _optional_float(binding.get("recharge_received_amount")) or 1.0
+        if paid <= 0:
+            paid = 1.0
+        if received <= 0:
+            received = 1.0
+        current_rate = _optional_float(binding.get("effective_rate_multiplier"))
+        current_checked_at = str(binding.get("group_last_checked_at") or "")
+        last_rate = _optional_float(binding.get("last_group_rate_multiplier"))
+        last_checked_at = str(binding.get("last_rate_checked_at") or "")
+        group_rate = current_rate if current_rate is not None and current_rate > 0 else last_rate
+        checked_at = current_checked_at if current_rate is not None and current_rate > 0 and current_checked_at else last_checked_at
+        if group_rate is not None and group_rate > 0 and not checked_at:
+            checked_at = str(binding.get("created_at") or "")
+        cost_rate = group_rate * paid / received if group_rate is not None and group_rate > 0 else None
+        minimum_safe = cost_rate * (1 + margin / 100) if cost_rate is not None else None
+        checked_time = _parse_datetime(checked_at)
+        created_time = _parse_datetime(binding.get("created_at"))
+        expired = checked_time is not None and checked_time < now - timedelta(seconds=stale_seconds)
+        pending = cost_rate is None and created_time is not None and created_time >= now - timedelta(seconds=stale_seconds)
+
+        if (
+            refresh_snapshots
+            and current_rate is not None
+            and current_rate > 0
+            and current_checked_at
+            and (
+                current_rate != last_rate
+                or current_checked_at != last_checked_at
+                or cost_rate != _optional_float(binding.get("last_cost_multiplier"))
+            )
+        ):
+            db.update_platform_dispatch_cost_snapshot(
+                site_url, account_id, current_rate, current_rate * paid / received, current_checked_at
+            )
+
+        public_binding = {
+            "monitor_group_id": int(binding["monitor_group_id"]),
+            "balance_account_id": int(binding["balance_account_id"]),
+            "balance_account_name": str(binding.get("balance_account_name") or ""),
+            "balance_platform": str(binding.get("balance_platform") or ""),
+            "group_name": str(binding.get("group_plan_name") or binding.get("group_name") or ""),
+            "recharge_paid_amount": paid,
+            "recharge_received_amount": received,
+        }
+        profile.update(
+            {
+                "cost_binding": public_binding,
+                "upstream_group_rate_multiplier": group_rate,
+                "upstream_cost_multiplier": cost_rate,
+                "upstream_cost_checked_at": checked_at or None,
+                "minimum_safe_rate_multiplier": minimum_safe,
+            }
+        )
+        if expired or (cost_rate is None and not pending):
+            profile["price_protection_status"] = "rate_expired"
+            profile["price_unsafe"] = True
+        elif cost_rate is None:
+            profile["price_protection_status"] = "upstream_unknown"
+        else:
+            profile["cost_available"] = True
+            if local_min_rate is None:
+                profile["price_protection_status"] = "downstream_unknown"
+            elif local_min_rate < minimum_safe:
+                profile["price_protection_status"] = "unsafe"
+                profile["price_unsafe"] = True
+            else:
+                profile["price_protection_status"] = "safe"
+        profiles[account_id] = profile
+    return profiles
+
+
+def public_platform_dispatch_cost_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    result = {
+        key: profile.get(key)
+        for key in (
+            "cost_binding",
+            "upstream_group_rate_multiplier",
+            "upstream_cost_multiplier",
+            "upstream_cost_checked_at",
+            "local_min_rate_multiplier",
+            "minimum_safe_rate_multiplier",
+            "price_protection_status",
+        )
+    }
+    aliases = {
+        "cost_binding": "costBinding",
+        "upstream_group_rate_multiplier": "upstreamGroupRateMultiplier",
+        "upstream_cost_multiplier": "upstreamCostMultiplier",
+        "upstream_cost_checked_at": "upstreamCostCheckedAt",
+        "local_min_rate_multiplier": "localMinRateMultiplier",
+        "minimum_safe_rate_multiplier": "minimumSafeRateMultiplier",
+        "price_protection_status": "priceProtectionStatus",
+    }
+    for source, alias in aliases.items():
+        result[alias] = result[source]
+    return result
 
 
 def _resolve_probe_model(account_id: int, account: dict[str, Any], config: dict[str, Any]) -> str | None:
@@ -805,6 +949,25 @@ class PlatformDispatchPolicyScheduler:
             for group in groups
             if isinstance(group, dict) and _optional_int(group.get("id"))
         }
+        cost_profiles = resolve_platform_dispatch_cost_profiles(
+            self.db,
+            site_url,
+            accounts,
+            group_rates,
+            float(config["minimum_profit_margin_percent"]),
+            refresh_snapshots=True,
+        )
+        for account_id, profile in cost_profiles.items():
+            name = str(accounts[account_id].get("name") or account_id)
+            status = profile["price_protection_status"]
+            if status == "unbound":
+                warnings.append(f"{name}: 未绑定上游成本分组，跳过成本调权与价格保护")
+            elif status == "upstream_unknown":
+                warnings.append(f"{name}: 尚未取得上游成本倍率，宽限期内跳过成本调权")
+            elif status == "rate_expired":
+                warnings.append(f"{name}: 上游成本倍率已过期")
+            elif status == "downstream_unknown":
+                warnings.append(f"{name}: 本地平台分组倍率未知，跳过价格比较")
 
         available_ids: list[int] = []
         if progress:
@@ -831,6 +994,7 @@ class PlatformDispatchPolicyScheduler:
                     "target_concurrency": state.get("target_concurrency"),
                     "target_load_factor": state.get("target_load_factor"),
                     "last_policy_action_at": state.get("last_action_at"),
+                    **public_platform_dispatch_cost_profile(cost_profiles[account_id]),
                 }
             )
             self.db.update_platform_dispatch_cached_account(public)
@@ -853,15 +1017,32 @@ class PlatformDispatchPolicyScheduler:
         if progress:
             progress("dispatch" if config["enabled"] else "finalizing", len(accounts), len(accounts))
         if config["enabled"]:
+            price_actions: list[str] = []
+            price_unsafe_ids: set[int] = set()
+            if config["price_protection_enabled"]:
+                price_actions, price_unsafe_ids = await self._apply_price_protection(
+                    client, site_url, accounts, cost_profiles
+                )
+                available_ids = [account_id for account_id in available_ids if account_id not in price_unsafe_ids]
             scheduling_action = await self._apply_schedulable_policy(
-                client, site_url, accounts, health, available_ids, config, ttl_seconds, group_map
+                client,
+                site_url,
+                accounts,
+                health,
+                available_ids,
+                config,
+                ttl_seconds,
+                group_map,
+                cost_profiles,
+                price_unsafe_ids,
             )
+            scheduling_action = "；".join([*price_actions, *([scheduling_action] if scheduling_action else [])])
             if config["smart_expand_enabled"] and concurrency_data is not None:
                 await self._apply_concurrency_policy(
-                    client, site_url, accounts, health, concurrency_by_id, group_rates, config
+                    client, site_url, accounts, health, concurrency_by_id, cost_profiles, config
                 )
-            if config["load_factor_enabled"] or config["price_protection_enabled"]:
-                await self._apply_load_policy(client, site_url, accounts, health, group_rates, config)
+            if config["load_factor_enabled"]:
+                await self._apply_load_policy(client, site_url, accounts, health, cost_profiles, config)
 
         total_current = sum(_optional_int(item.get("current_in_use")) or 0 for item in concurrency_by_id.values())
         total_capacity = sum(max(0, _optional_int(account.get("concurrency")) or 0) for account in accounts.values())
@@ -877,6 +1058,11 @@ class PlatformDispatchPolicyScheduler:
             "status_action": scheduling_action,
             "warnings": list(dict.fromkeys(warnings)),
             "groups": len(public_groups),
+            "cost_bound_accounts": sum(1 for item in cost_profiles.values() if item["cost_binding"] is not None),
+            "cost_unbound_accounts": sum(1 for item in cost_profiles.values() if item["price_protection_status"] == "unbound"),
+            "cost_expired_accounts": sum(1 for item in cost_profiles.values() if item["price_protection_status"] == "rate_expired"),
+            "price_unsafe_accounts": sum(1 for item in cost_profiles.values() if item["price_protection_status"] == "unsafe"),
+            "downstream_unknown_accounts": sum(1 for item in cost_profiles.values() if item["price_protection_status"] == "downstream_unknown"),
             "group_availability": _group_availability_summary(
                 accounts, available_ids, group_map, config
             ),
@@ -1138,6 +1324,66 @@ class PlatformDispatchPolicyScheduler:
         await asyncio.gather(*(probe(account_id) for account_id in due))
         return results
 
+    async def _apply_price_protection(
+        self,
+        client: Sub2ApiAdminClient,
+        site_url: str,
+        accounts: dict[int, dict[str, Any]],
+        cost_profiles: dict[int, dict[str, Any]],
+    ) -> tuple[list[str], set[int]]:
+        unsafe_ids = {
+            account_id
+            for account_id, profile in cost_profiles.items()
+            if profile.get("price_unsafe")
+        }
+        actions: list[str] = []
+        for account_id in sorted(unsafe_ids):
+            account = accounts[account_id]
+            if str(account.get("status") or "inactive") != "active" or account.get("schedulable") is False:
+                continue
+            profile = cost_profiles[account_id]
+            binding = profile.get("cost_binding") or {}
+            source = (
+                f"{binding.get('balance_account_name') or binding.get('balance_account_id') or '余额账号'} / "
+                f"{binding.get('group_name') or binding.get('monitor_group_id') or '监控分组'}"
+            )
+            if profile["price_protection_status"] == "rate_expired":
+                reason = (
+                    f"上游成本倍率 {_metric_text(profile.get('upstream_cost_multiplier'))} 超过宽限期，"
+                    f"价格保护关闭调度（本地最低倍率 {_metric_text(profile.get('local_min_rate_multiplier'))}，"
+                    f"最低安全倍率 {_metric_text(profile.get('minimum_safe_rate_multiplier'))}，成本来源：{source}）"
+                )
+            else:
+                reason = (
+                    f"本地最低倍率 {profile['local_min_rate_multiplier']:.6g} 低于最低安全倍率 "
+                    f"{profile['minimum_safe_rate_multiplier']:.6g}（上游成本 {profile['upstream_cost_multiplier']:.6g}，"
+                    f"成本来源：{source}）"
+                )
+            try:
+                updated = await client.update_account_schedulable(account_id, False)
+            except Exception as exc:
+                self._record_action(
+                    site_url, account, "disable_scheduling", "schedulable", True, False, reason, exc
+                )
+                continue
+            account.update(updated)
+            account["schedulable"] = False
+            self.db.update_platform_dispatch_cached_account(account)
+            self.db.upsert_platform_dispatch_account_state(
+                site_url,
+                account_id,
+                price_protection_blocked=1,
+                price_protection_blocked_at=utc_now(),
+                price_protection_reason=reason,
+                decision_reason=reason,
+                last_action_at=utc_now(),
+            )
+            self._record_action(
+                site_url, account, "disable_scheduling", "schedulable", True, False, reason
+            )
+            actions.append(f"关闭调度 {account.get('name') or account_id}: {reason}")
+        return actions, unsafe_ids
+
     async def _apply_schedulable_policy(
         self,
         client: Sub2ApiAdminClient,
@@ -1148,7 +1394,11 @@ class PlatformDispatchPolicyScheduler:
         config: dict[str, Any],
         ttl_seconds: int,
         group_map: dict[int, dict[str, Any]] | None = None,
+        cost_profiles: dict[int, dict[str, Any]] | None = None,
+        price_unsafe_ids: set[int] | None = None,
     ) -> str:
+        cost_profiles = cost_profiles or {}
+        price_unsafe_ids = price_unsafe_ids or set()
         fatal: list[tuple[int, str]] = []
         threshold: list[tuple[int, str]] = []
         for account_id, account in accounts.items():
@@ -1185,6 +1435,36 @@ class PlatformDispatchPolicyScheduler:
             account_id, reason = min(threshold, key=lambda pair: ((health[pair[0]]["health_score"] or 0), pair[0]))
             candidate = (account_id, False, reason)
         else:
+            price_recovery = [
+                account_id
+                for account_id, account in accounts.items()
+                if str(account.get("status") or "inactive") == "active"
+                and account.get("schedulable") is False
+                and account_id not in price_unsafe_ids
+                and (cost_profiles.get(account_id) or {}).get("price_protection_status") == "safe"
+                and health[account_id]["evidence_fresh"]
+                and (health[account_id]["health_score"] or 0) >= float(config["health_threshold"])
+            ]
+            if config["price_protection_enabled"] and price_recovery:
+                account_id = max(
+                    price_recovery,
+                    key=lambda value: (health[value]["health_score"] or 0, -value),
+                )
+                profile = cost_profiles[account_id]
+                binding = profile.get("cost_binding") or {}
+                source = (
+                    f"{binding.get('balance_account_name') or binding.get('balance_account_id') or '余额账号'} / "
+                    f"{binding.get('group_name') or binding.get('monitor_group_id') or '监控分组'}"
+                )
+                candidate = (
+                    account_id,
+                    True,
+                    f"价格已安全：本地最低倍率 {profile['local_min_rate_multiplier']:.6g}，"
+                    f"最低安全倍率 {profile['minimum_safe_rate_multiplier']:.6g}，"
+                    f"上游成本 {profile['upstream_cost_multiplier']:.6g}，成本来源：{source}",
+                )
+
+        if candidate is None:
             pools = _group_availability_summary(accounts, available_ids, group_map or {}, config)
             minimum = int(config["minimum_available_accounts"])
             deficient = {
@@ -1214,6 +1494,7 @@ class PlatformDispatchPolicyScheduler:
                     if (
                         str(account.get("status") or "inactive") == "active"
                         and account.get("schedulable") is False
+                        and account_id not in price_unsafe_ids
                         and covered
                         and item["evidence_fresh"]
                         and (item["health_score"] or 0) >= float(config["health_threshold"])
@@ -1237,6 +1518,10 @@ class PlatformDispatchPolicyScheduler:
             return ""
         account_id, schedulable, reason = candidate
         account = accounts[account_id]
+        previous_state = self.db.get_platform_dispatch_account_state(site_url, account_id) or {}
+        if schedulable:
+            manually_disabled = str(previous_state.get("decision_reason") or "").startswith("人工关闭调度")
+            reason = f"{reason}；覆盖人工关闭状态：{'是' if manually_disabled else '否'}"
         old_value = account.get("schedulable") is not False
         try:
             updated = await client.update_account_schedulable(account_id, schedulable)
@@ -1255,6 +1540,13 @@ class PlatformDispatchPolicyScheduler:
         account.update(updated)
         account["schedulable"] = schedulable
         self.db.update_platform_dispatch_cached_account(updated)
+        self.db.upsert_platform_dispatch_account_state(
+            site_url,
+            account_id,
+            price_protection_blocked=0,
+            price_protection_blocked_at=None,
+            price_protection_reason="",
+        )
         self._record_action(
             site_url,
             account,
@@ -1273,7 +1565,7 @@ class PlatformDispatchPolicyScheduler:
         accounts: dict[int, dict[str, Any]],
         health: dict[int, dict[str, Any]],
         realtime: dict[int, dict[str, Any]],
-        group_rates: dict[int, float | None],
+        cost_profiles: dict[int, dict[str, Any]],
         config: dict[str, Any],
     ) -> None:
         eligible = [
@@ -1283,6 +1575,7 @@ class PlatformDispatchPolicyScheduler:
             and account.get("schedulable") is not False
             and health[account_id]["evidence_fresh"]
             and (health[account_id]["health_score"] or 0) >= float(config["health_threshold"])
+            and bool((cost_profiles.get(account_id) or {}).get("cost_available"))
         ]
         if not eligible:
             return
@@ -1300,7 +1593,12 @@ class PlatformDispatchPolicyScheduler:
         if remaining and (load_percent >= float(config["expand_trigger_percent"]) or queue > 0):
             increment = min(remaining, max(1, math.ceil(total_capacity * float(config["expand_step_percent"]) / 100)))
             expandable = [account_id for account_id in eligible if targets[account_id] < maximum]
-            weights = {account_id: self._account_weight(accounts[account_id], health[account_id], config) for account_id in expandable}
+            weights = {
+                account_id: self._account_weight(
+                    float(cost_profiles[account_id]["upstream_cost_multiplier"]), health[account_id], config
+                )
+                for account_id in expandable
+            }
             additions = allocate_weighted_increments(targets, weights, increment, maximum)
             for account_id, addition in additions.items():
                 targets[account_id] = min(maximum, targets[account_id] + addition)
@@ -1318,7 +1616,7 @@ class PlatformDispatchPolicyScheduler:
         site_url: str,
         accounts: dict[int, dict[str, Any]],
         health: dict[int, dict[str, Any]],
-        group_rates: dict[int, float | None],
+        cost_profiles: dict[int, dict[str, Any]],
         config: dict[str, Any],
     ) -> None:
         eligible = [
@@ -1328,11 +1626,17 @@ class PlatformDispatchPolicyScheduler:
             and account.get("schedulable") is not False
             and health[account_id]["evidence_fresh"]
             and (health[account_id]["health_score"] or 0) >= float(config["health_threshold"])
+            and bool((cost_profiles.get(account_id) or {}).get("cost_available"))
         ]
         if not eligible:
             return
         states = {item["account_id"]: item for item in self.db.list_platform_dispatch_account_states(site_url)}
-        weights = {account_id: self._account_weight(accounts[account_id], health[account_id], config) for account_id in eligible}
+        weights = {
+            account_id: self._account_weight(
+                float(cost_profiles[account_id]["upstream_cost_multiplier"]), health[account_id], config
+            )
+            for account_id in eligible
+        }
         if config["load_factor_enabled"]:
             base_targets = allocate_weighted_points(
                 eligible,
@@ -1355,12 +1659,6 @@ class PlatformDispatchPolicyScheduler:
         for account_id in eligible:
             account = accounts[account_id]
             target = base_targets[account_id]
-            if config["price_protection_enabled"]:
-                upstream_rate = _optional_float(account.get("rate_multiplier"))
-                local_rates = [group_rates.get(group_id) for group_id in _account_group_ids(account)]
-                local_rates = [rate for rate in local_rates if rate is not None and rate > 0]
-                if upstream_rate is not None and upstream_rate > 0 and local_rates:
-                    target = max(1, int(round(target * min(1.0, min(local_rates) / upstream_rate))))
             final_targets[account_id] = target
             current = _effective_load_factor(account)
             self.db.upsert_platform_dispatch_account_state(site_url, account_id, target_load_factor=target)
@@ -1384,11 +1682,10 @@ class PlatformDispatchPolicyScheduler:
             if await self._write_account_fields(client, site_url, account, fields, "负载因子调权"):
                 self.db.upsert_platform_dispatch_account_state(site_url, account_id, last_load_factor_write_at=utc_now())
 
-    def _account_weight(self, account: dict[str, Any], health: dict[str, Any], config: dict[str, Any]) -> float:
+    def _account_weight(self, cost_multiplier: float, health: dict[str, Any], config: dict[str, Any]) -> float:
         score = max(0.0, float(health.get("health_score") or 0))
-        rate = _optional_float(account.get("rate_multiplier"))
-        rate = rate if rate is not None and rate > 0 else 1.0
-        return score * (rate ** float(config["rate_weight_exponent"]))
+        cost = max(float(cost_multiplier), 1e-9)
+        return score / (cost ** float(config["rate_weight_exponent"]))
 
     async def _write_account_field(
         self,
@@ -1596,6 +1893,11 @@ def _optional_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _metric_text(value: Any) -> str:
+    number = _optional_float(value)
+    return f"{number:.6g}" if number is not None else "未知"
 
 
 def _parse_datetime(value: Any) -> datetime | None:
