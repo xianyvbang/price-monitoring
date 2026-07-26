@@ -296,19 +296,21 @@ class Sub2ApiAdminClient:
             raise Sub2ApiAdminError("Sub2API 账号更新响应格式不正确", status_code=502)
         return public_dispatch_account(account, [])
 
-    async def probe_account(self, account_id: int) -> dict[str, Any]:
+    async def probe_account(self, account_id: int, model: str | None = None) -> dict[str, Any]:
         headers = {
             "x-api-key": self.admin_key,
             "Accept": "text/event-stream",
             "Content-Type": "application/json",
         }
+        probe_model = str(model or "").strip()
+        request_body = {"model": probe_model} if probe_model else {}
         try:
             async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True) as client:
                 response = await client.request(
                     "POST",
                     f"{self.site_url}/api/v1/admin/accounts/{int(account_id)}/test",
                     headers=headers,
-                    json={},
+                    json=request_body,
                 )
         except httpx.TimeoutException:
             return {"success": False, "is_timeout": True, "message": "账号探活超时"}

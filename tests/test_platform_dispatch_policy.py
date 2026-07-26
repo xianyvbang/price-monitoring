@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -59,6 +60,27 @@ def test_health_classification_and_formula():
 
 
 def test_config_validation_and_deterministic_allocators():
+    assert validate_policy_config({"autoScoringEnabled": False})["auto_scoring_enabled"] is False
+    probe_models = validate_policy_config(
+        {
+            "defaultProbeModel": " default-model ",
+            "groupProbeModels": {"4": " group-model ", "5": ""},
+            "accountProbeModels": {"2": " custom-model ", "3": ""},
+        }
+    )
+    assert probe_models["default_probe_model"] == "default-model"
+    assert probe_models["group_probe_models"] == {"4": "group-model"}
+    assert probe_models["account_probe_models"] == {"2": "custom-model"}
+    with pytest.raises(ValueError, match="字符串"):
+        validate_policy_config({"default_probe_model": 123})
+    with pytest.raises(ValueError, match="正整数"):
+        validate_policy_config({"account_probe_models": {"bad": "model"}})
+    with pytest.raises(ValueError, match="分组 ID"):
+        validate_policy_config({"group_probe_models": {"bad": "model"}})
+    with pytest.raises(ValueError, match="200"):
+        validate_policy_config({"account_probe_models": {"1": "x" * 201}})
+    with pytest.raises(ValueError, match="自动评分"):
+        validate_policy_config({"enabled": True, "auto_scoring_enabled": False})
     with pytest.raises(ValueError):
         validate_policy_config({"account_min_concurrency": 251, "account_max_concurrency": 250})
     with pytest.raises(ValueError):
@@ -99,12 +121,123 @@ def test_evidence_deduplicates_and_keeps_latest_60(tmp_path):
     assert {record["source_id"] for record in records}.isdisjoint({"0", "1", "2", "3", "4"})
 
 
+def test_recent_probe_records_are_grouped_and_limited_per_account(tmp_path):
+    db = make_db(tmp_path)
+    site = "https://sub.example"
+    for account_id in (1, 2):
+        for index in range(20):
+            db.add_platform_dispatch_evidence(
+                site,
+                {
+                    "account_id": account_id,
+                    "source_kind": "probe",
+                    "source_id": f"{account_id}-{index}",
+                    "category": "healthy",
+                    "score": 100,
+                    "is_probe_success": True,
+                    "occurred_at": f"2026-07-26T08:{index:02d}:00+00:00",
+                },
+            )
+    usage_start = datetime(2026, 7, 26, 9, tzinfo=timezone.utc)
+    for index in range(65):
+        db.add_platform_dispatch_evidence(
+            site,
+            {
+                "account_id": 1,
+                "source_kind": "usage",
+                "source_id": f"usage-{index}",
+                "category": "healthy",
+                "score": 100,
+                "occurred_at": (usage_start + timedelta(seconds=index)).isoformat(),
+            },
+        )
+
+    grouped = db.list_recent_platform_dispatch_probes(site, 15)
+
+    assert set(grouped) == {1, 2}
+    assert len(grouped[1]) == 15
+    assert len(grouped[2]) == 15
+    assert grouped[1][0]["source_id"] == "1-19"
+    assert grouped[1][-1]["source_id"] == "1-5"
+    assert len(db.list_platform_dispatch_evidence(site, 1)) == 60
+
+
+def test_short_evidence_filters_usage_and_errors_after_ranking_latest_ten(tmp_path):
+    db = make_db(tmp_path)
+    site = "https://sub.example"
+    started_at = datetime(2026, 7, 26, 8, tzinfo=timezone.utc)
+
+    account_one = [
+        ("error", "older-error"),
+        ("usage", "included-usage"),
+        ("error", "included-error"),
+        *(("probe", f"probe-{index}") for index in range(8)),
+    ]
+    for index, (source_kind, source_id) in enumerate(account_one):
+        db.add_platform_dispatch_evidence(
+            site,
+            {
+                "account_id": 1,
+                "source_kind": source_kind,
+                "source_id": source_id,
+                "category": "healthy" if source_kind != "error" else "upstream_error",
+                "score": 100 if source_kind != "error" else 40,
+                "occurred_at": (started_at + timedelta(minutes=index)).isoformat(),
+            },
+        )
+
+    db.add_platform_dispatch_evidence(
+        site,
+        {
+            "account_id": 2,
+            "source_kind": "usage",
+            "source_id": "older-usage",
+            "category": "healthy",
+            "score": 100,
+            "occurred_at": started_at.isoformat(),
+        },
+    )
+    for index in range(10):
+        db.add_platform_dispatch_evidence(
+            site,
+            {
+                "account_id": 2,
+                "source_kind": "probe",
+                "source_id": f"all-probe-{index}",
+                "category": "healthy",
+                "score": 100,
+                "occurred_at": (started_at + timedelta(minutes=index + 1)).isoformat(),
+            },
+        )
+
+    for index, source_kind in enumerate(("usage", "error")):
+        db.add_platform_dispatch_evidence(
+            site,
+            {
+                "account_id": 3,
+                "source_kind": source_kind,
+                "source_id": f"few-{source_kind}",
+                "category": "healthy" if source_kind == "usage" else "upstream_error",
+                "score": 100 if source_kind == "usage" else 40,
+                "occurred_at": (started_at + timedelta(minutes=index)).isoformat(),
+            },
+        )
+
+    grouped = db.list_short_platform_dispatch_evidence(site)
+
+    assert [item["source_id"] for item in grouped[1]] == ["included-error", "included-usage"]
+    assert "older-error" not in {item["source_id"] for item in grouped[1]}
+    assert 2 not in grouped
+    assert [item["source_id"] for item in grouped[3]] == ["few-error", "few-usage"]
+
+
 class PolicyClient:
     site_url = "https://sub.example"
 
     def __init__(self, accounts):
         self.accounts = accounts
         self.probes = []
+        self.probe_models = []
         self.updates = []
         self.realtime_reads = 0
 
@@ -120,8 +253,9 @@ class PolicyClient:
     async def list_recent_errors(self, account_id, limit):
         return []
 
-    async def probe_account(self, account_id):
+    async def probe_account(self, account_id, model=None):
         self.probes.append(account_id)
+        self.probe_models.append((account_id, model))
         return {"success": True, "message": "ok"}
 
     async def get_concurrency_stats(self, platform=None):
@@ -167,6 +301,96 @@ async def test_master_off_only_collects_and_never_probes_or_writes(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_automatic_scoring_can_be_disabled_without_blocking_manual_run(tmp_path):
+    db = make_db(tmp_path)
+    accounts = [{"id": 1, "name": "one", "status": "inactive", "concurrency": 10}]
+    prepare_cache(db, accounts)
+    db.save_platform_dispatch_policy(
+        {**POLICY_DEFAULTS, "enabled": False, "auto_scoring_enabled": False},
+        "https://sub.example",
+    )
+    client = PolicyClient(accounts)
+    factory_calls = 0
+
+    def client_factory():
+        nonlocal factory_calls
+        factory_calls += 1
+        return client
+
+    scheduler = PlatformDispatchPolicyScheduler(db, client_factory)
+
+    skipped = await scheduler.run_once(automatic=True)
+    manual = await scheduler.run_once()
+
+    assert skipped == {"skipped": True, "message": "自动评分已关闭"}
+    assert factory_calls == 1
+    assert manual["managed_accounts"] == 1
+    assert client.probes == []
+    assert client.updates == []
+
+
+@pytest.mark.asyncio
+async def test_disabling_automatic_scoring_cancels_active_round_and_keeps_scheduler_alive(tmp_path):
+    db = make_db(tmp_path)
+    accounts = [{"id": 1, "name": "one", "status": "inactive", "concurrency": 10}]
+    prepare_cache(db, accounts)
+    db.save_platform_dispatch_policy(
+        {**POLICY_DEFAULTS, "enabled": False, "auto_scoring_enabled": True},
+        "https://sub.example",
+    )
+
+    class BlockingPolicyClient(PolicyClient):
+        def __init__(self, client_accounts):
+            super().__init__(client_accounts)
+            self.first_read_started = asyncio.Event()
+            self.first_read_cancelled = asyncio.Event()
+            self.account_reads = 0
+
+        async def list_accounts(self, **kwargs):
+            self.account_reads += 1
+            if self.account_reads == 1:
+                self.first_read_started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    self.first_read_cancelled.set()
+                    raise
+            return await super().list_accounts(**kwargs)
+
+    client = BlockingPolicyClient(accounts)
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+    scheduler.start()
+    try:
+        await asyncio.wait_for(client.first_read_started.wait(), timeout=1)
+        automatic_run_task = scheduler._automatic_run_task
+        assert automatic_run_task is not None
+
+        db.save_platform_dispatch_policy(
+            {**POLICY_DEFAULTS, "enabled": False, "auto_scoring_enabled": False},
+            "https://sub.example",
+        )
+        scheduler.notify_changed()
+
+        with pytest.raises(asyncio.CancelledError):
+            await automatic_run_task
+        await asyncio.wait_for(client.first_read_cancelled.wait(), timeout=1)
+
+        policy = db.get_platform_dispatch_policy(POLICY_DEFAULTS)
+        assert scheduler.lock.locked() is False
+        assert scheduler._task is not None and not scheduler._task.done()
+        assert policy["runtime"]["status"] == "idle"
+        assert policy["runtime"]["summary"] == {"message": "自动评分已关闭"}
+        assert db.list_platform_dispatch_evidence("https://sub.example", 1) == []
+        assert db.list_platform_dispatch_account_states("https://sub.example") == []
+
+        manual = await scheduler.run_once()
+        assert manual["managed_accounts"] == 1
+        assert client.account_reads == 2
+    finally:
+        await scheduler.stop()
+
+
+@pytest.mark.asyncio
 async def test_minimum_pool_recovers_with_all_subpolicies_off(tmp_path):
     db = make_db(tmp_path)
     accounts = [{"id": 1, "name": "one", "status": "inactive", "concurrency": 20}]
@@ -180,6 +404,39 @@ async def test_minimum_pool_recovers_with_all_subpolicies_off(tmp_path):
     assert client.probes == [1]
     assert client.updates == [(1, "status", "active")]
     assert summary["status_action"].startswith("启用 one")
+
+
+@pytest.mark.asyncio
+async def test_probe_model_prefers_account_then_group_then_default(tmp_path):
+    db = make_db(tmp_path)
+    accounts = [
+        {"id": 1, "name": "default", "status": "active", "concurrency": 20, "group_ids": [30]},
+        {"id": 2, "name": "account", "status": "active", "concurrency": 20, "group_ids": [10]},
+        {"id": 3, "name": "group", "status": "active", "concurrency": 20, "group_ids": [20]},
+        {"id": 4, "name": "multi-group", "status": "active", "concurrency": 20, "group_ids": [20, 10]},
+    ]
+    prepare_cache(db, accounts)
+    db.save_platform_dispatch_policy(
+        {
+            **POLICY_DEFAULTS,
+            "enabled": True,
+            "default_probe_model": "default-model",
+            "group_probe_models": {"10": "group-ten", "20": "group-twenty"},
+            "account_probe_models": {"2": "custom-model"},
+        },
+        "https://sub.example",
+    )
+    client = PolicyClient(accounts)
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+
+    await scheduler.run_once()
+
+    assert client.probe_models == [
+        (1, "default-model"),
+        (2, "custom-model"),
+        (3, "group-twenty"),
+        (4, "group-ten"),
+    ]
 
 
 @pytest.mark.asyncio

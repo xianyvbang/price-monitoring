@@ -904,6 +904,7 @@ class Database:
                     "health_score": "healthScore",
                     "health_short_score": "healthShortScore",
                     "health_long_score": "healthLongScore",
+                    "health_evidence_count": "healthEvidenceCount",
                     "health_evidence_at": "healthEvidenceAt",
                     "health_evidence_fresh": "healthEvidenceFresh",
                     "decision_reason": "decisionReason",
@@ -1007,6 +1008,36 @@ class Database:
                 (site_url, int(group_id)),
             )
         return cursor.rowcount == 1
+
+    def exclude_platform_dispatch_ungrouped_accounts(self, source_site_url: str) -> bool:
+        site_url = str(source_site_url or "").strip().rstrip("/")
+        if not site_url:
+            return False
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT accounts_json FROM platform_dispatch_cache WHERE id = 1 AND source_site_url = ?",
+                (site_url,),
+            ).fetchone()
+            if row is None:
+                return False
+            accounts = [
+                account
+                for account in _json_list(row["accounts_json"])
+                if isinstance(account, dict) and _platform_dispatch_account_group_ids(account)
+            ]
+            conn.execute(
+                """
+                UPDATE platform_dispatch_cache
+                SET accounts_json = ?, refresh_include_ungrouped = 0
+                WHERE id = 1 AND source_site_url = ?
+                """,
+                (
+                    json.dumps(accounts, ensure_ascii=False, separators=(",", ":")),
+                    site_url,
+                ),
+            )
+        return True
 
     def refresh_platform_dispatch_excluded_group_metadata(
         self,
@@ -1286,9 +1317,13 @@ class Database:
                         SELECT id FROM platform_dispatch_evidence
                         WHERE source_site_url = ? AND account_id = ?
                         ORDER BY occurred_at DESC, id DESC LIMIT 60
+                    ) AND id NOT IN (
+                        SELECT id FROM platform_dispatch_evidence
+                        WHERE source_site_url = ? AND account_id = ? AND source_kind = 'probe'
+                        ORDER BY occurred_at DESC, id DESC LIMIT 15
                     )
                     """,
-                    (site_url, account_id, site_url, account_id),
+                    (site_url, account_id, site_url, account_id, site_url, account_id),
                 )
         return cursor.rowcount == 1
 
@@ -1305,6 +1340,117 @@ class Database:
                 (str(source_site_url or "").strip().rstrip("/"), int(account_id), max(1, min(60, int(limit)))),
             ).fetchall()
         return [row_to_dict(row) for row in rows]
+
+    def replace_platform_dispatch_evidence_source(
+        self,
+        source_site_url: str,
+        account_id: int,
+        source_kind: str,
+        evidence: list[dict[str, Any]],
+    ) -> None:
+        site_url = str(source_site_url or "").strip().rstrip("/")
+        account_id = int(account_id)
+        source_kind = str(source_kind or "")
+        now = utc_now()
+        with self.connect() as conn:
+            conn.execute(
+                "DELETE FROM platform_dispatch_evidence WHERE source_site_url = ? AND account_id = ? AND source_kind = ?",
+                (site_url, account_id, source_kind),
+            )
+            for item in evidence:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO platform_dispatch_evidence (
+                        source_site_url, account_id, source_kind, source_id, category, score,
+                        status_code, first_token_ms, is_timeout, is_probe_success,
+                        message, occurred_at, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        site_url,
+                        account_id,
+                        source_kind,
+                        str(item.get("source_id") or ""),
+                        str(item.get("category") or "unknown"),
+                        float(item.get("score") or 0),
+                        item.get("status_code"),
+                        item.get("first_token_ms"),
+                        1 if item.get("is_timeout") else 0,
+                        1 if item.get("is_probe_success") else 0,
+                        str(item.get("message") or ""),
+                        str(item.get("occurred_at") or now),
+                        now,
+                    ),
+                )
+            conn.execute(
+                """
+                DELETE FROM platform_dispatch_evidence
+                WHERE source_site_url = ? AND account_id = ? AND id NOT IN (
+                    SELECT id FROM platform_dispatch_evidence
+                    WHERE source_site_url = ? AND account_id = ?
+                    ORDER BY occurred_at DESC, id DESC LIMIT 60
+                ) AND id NOT IN (
+                    SELECT id FROM platform_dispatch_evidence
+                    WHERE source_site_url = ? AND account_id = ? AND source_kind = 'probe'
+                    ORDER BY occurred_at DESC, id DESC LIMIT 15
+                )
+                """,
+                (site_url, account_id, site_url, account_id, site_url, account_id),
+            )
+
+    def list_recent_platform_dispatch_probes(
+        self, source_site_url: str, per_account: int = 15
+    ) -> dict[int, list[dict[str, Any]]]:
+        limit = max(1, min(60, int(per_account)))
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                WITH ranked AS (
+                    SELECT *, ROW_NUMBER() OVER (
+                        PARTITION BY account_id ORDER BY occurred_at DESC, id DESC
+                    ) AS row_number
+                    FROM platform_dispatch_evidence
+                    WHERE source_site_url = ? AND source_kind = 'probe'
+                )
+                SELECT * FROM ranked
+                WHERE row_number <= ?
+                ORDER BY account_id, occurred_at DESC, id DESC
+                """,
+                (str(source_site_url or "").strip().rstrip("/"), limit),
+            ).fetchall()
+        grouped: dict[int, list[dict[str, Any]]] = {}
+        for row in rows:
+            item = row_to_dict(row)
+            item.pop("row_number", None)
+            grouped.setdefault(int(item["account_id"]), []).append(item)
+        return grouped
+
+    def list_short_platform_dispatch_evidence(
+        self, source_site_url: str, per_account: int = 10
+    ) -> dict[int, list[dict[str, Any]]]:
+        limit = max(1, min(10, int(per_account)))
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                WITH ranked AS (
+                    SELECT *, ROW_NUMBER() OVER (
+                        PARTITION BY account_id ORDER BY occurred_at DESC, id DESC
+                    ) AS row_number
+                    FROM platform_dispatch_evidence
+                    WHERE source_site_url = ?
+                )
+                SELECT * FROM ranked
+                WHERE row_number <= ? AND source_kind IN ('usage', 'error')
+                ORDER BY account_id, occurred_at DESC, id DESC
+                """,
+                (str(source_site_url or "").strip().rstrip("/"), limit),
+            ).fetchall()
+        grouped: dict[int, list[dict[str, Any]]] = {}
+        for row in rows:
+            item = row_to_dict(row)
+            item.pop("row_number", None)
+            grouped.setdefault(int(item["account_id"]), []).append(item)
+        return grouped
 
     def upsert_platform_dispatch_account_state(self, source_site_url: str, account_id: int, **fields: Any) -> None:
         allowed = {

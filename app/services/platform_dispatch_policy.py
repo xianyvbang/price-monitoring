@@ -20,6 +20,7 @@ from app.services.sub2api_admin import (
 
 POLICY_DEFAULTS: dict[str, Any] = {
     "enabled": False,
+    "auto_scoring_enabled": True,
     "return_pool_enabled": False,
     "smart_expand_enabled": False,
     "load_factor_enabled": False,
@@ -46,11 +47,15 @@ POLICY_DEFAULTS: dict[str, Any] = {
     "slow_window": 10,
     "slow_first_token_ms": 15000,
     "slow_threshold": 5,
+    "default_probe_model": "",
+    "group_probe_models": {},
+    "account_probe_models": {},
     "excluded_account_ids": [1430, 1431],
 }
 
 BOOL_FIELDS = {
     "enabled",
+    "auto_scoring_enabled",
     "return_pool_enabled",
     "smart_expand_enabled",
     "load_factor_enabled",
@@ -109,10 +114,14 @@ def validate_policy_config(payload: Any, current: dict[str, Any] | None = None) 
     if current:
         config.update(current)
     aliases = {
+        "autoScoringEnabled": "auto_scoring_enabled",
         "returnPoolEnabled": "return_pool_enabled",
         "smartExpandEnabled": "smart_expand_enabled",
         "loadFactorEnabled": "load_factor_enabled",
         "priceProtectionEnabled": "price_protection_enabled",
+        "defaultProbeModel": "default_probe_model",
+        "groupProbeModels": "group_probe_models",
+        "accountProbeModels": "account_probe_models",
         "excludedAccountIds": "excluded_account_ids",
     }
     normalized = {aliases.get(key, key): value for key, value in payload.items()}
@@ -156,6 +165,42 @@ def validate_policy_config(payload: Any, current: dict[str, Any] | None = None) 
             if account_id not in ids:
                 ids.append(account_id)
         config["excluded_account_ids"] = ids
+    if "default_probe_model" in normalized:
+        config["default_probe_model"] = _validated_probe_model(
+            normalized["default_probe_model"], "默认探活模型"
+        )
+    if "group_probe_models" in normalized:
+        raw_models = normalized["group_probe_models"]
+        if not isinstance(raw_models, dict):
+            raise ValueError("group_probe_models 必须是对象")
+        group_models: dict[str, str] = {}
+        for raw_group_id, raw_model in raw_models.items():
+            try:
+                group_id = int(raw_group_id)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("探活模型分组 ID 必须是正整数") from exc
+            if group_id <= 0:
+                raise ValueError("探活模型分组 ID 必须是正整数")
+            model = _validated_probe_model(raw_model, f"分组 {group_id} 探活模型")
+            if model:
+                group_models[str(group_id)] = model
+        config["group_probe_models"] = group_models
+    if "account_probe_models" in normalized:
+        raw_models = normalized["account_probe_models"]
+        if not isinstance(raw_models, dict):
+            raise ValueError("account_probe_models 必须是对象")
+        account_models: dict[str, str] = {}
+        for raw_account_id, raw_model in raw_models.items():
+            try:
+                account_id = int(raw_account_id)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("探活模型账号 ID 必须是正整数") from exc
+            if account_id <= 0:
+                raise ValueError("探活模型账号 ID 必须是正整数")
+            model = _validated_probe_model(raw_model, f"账号 {account_id} 探活模型")
+            if model:
+                account_models[str(account_id)] = model
+        config["account_probe_models"] = account_models
 
     for key in ("health_threshold", "failure_health_threshold", "expand_trigger_percent", "expand_step_percent", "load_change_threshold_percent"):
         if not 0 <= float(config[key]) <= 100:
@@ -172,7 +217,20 @@ def validate_policy_config(payload: Any, current: dict[str, Any] | None = None) 
         raise ValueError("异常次数不能大于异常窗口")
     if config["slow_threshold"] > config["slow_window"]:
         raise ValueError("慢首字次数不能大于慢首字窗口")
+    if config["enabled"] and not config["auto_scoring_enabled"]:
+        raise ValueError("开启自动调度时必须同时开启自动评分")
     return config
+
+
+def _validated_probe_model(value: Any, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} 必须是字符串")
+    model = value.strip()
+    if len(model) > 200:
+        raise ValueError(f"{field_name}不能超过 200 个字符")
+    if any(ord(character) < 32 for character in model):
+        raise ValueError(f"{field_name}不能包含换行或控制字符")
+    return model
 
 
 def classify_activity(activity: dict[str, Any], *, probe: bool = False) -> dict[str, Any]:
@@ -329,6 +387,7 @@ class PlatformDispatchPolicyScheduler:
         self.client_factory = client_factory
         self.lock = asyncio.Lock()
         self._task: asyncio.Task[None] | None = None
+        self._automatic_run_task: asyncio.Task[dict[str, Any]] | None = None
         self._stopped = asyncio.Event()
         self._changed = asyncio.Event()
 
@@ -337,43 +396,163 @@ class PlatformDispatchPolicyScheduler:
             self.lock = asyncio.Lock()
             self._stopped = asyncio.Event()
             self._changed = asyncio.Event()
+            self._automatic_run_task = None
             self._task = asyncio.create_task(self._run_loop())
 
     async def stop(self) -> None:
         self._stopped.set()
         self._changed.set()
+        automatic_run_task = self._automatic_run_task
+        automatic_run_was_running = bool(automatic_run_task and not automatic_run_task.done())
+        if automatic_run_was_running and automatic_run_task:
+            automatic_run_task.cancel()
         if self._task:
             self._task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._task
             self._task = None
+        if automatic_run_was_running and automatic_run_task:
+            with suppress(asyncio.CancelledError, Exception):
+                await automatic_run_task
+        self._automatic_run_task = None
 
     def notify_changed(self) -> None:
         self._changed.set()
+        config = self.db.get_platform_dispatch_policy(POLICY_DEFAULTS)["config"]
+        automatic_run_task = self._automatic_run_task
+        if (
+            not config.get("auto_scoring_enabled", True)
+            and automatic_run_task
+            and not automatic_run_task.done()
+        ):
+            automatic_run_task.cancel()
 
     async def _run_loop(self) -> None:
         while not self._stopped.is_set():
+            self._changed.clear()
+            automatic_run_task = asyncio.create_task(self.run_once(automatic=True))
+            self._automatic_run_task = automatic_run_task
             try:
-                await self.run_once()
+                await automatic_run_task
             except asyncio.CancelledError:
-                raise
+                if self._stopped.is_set():
+                    raise
             except Exception as exc:
                 self.db.add_log("error", "platform-dispatch-policy", f"自动调度循环失败: {exc}")
+            finally:
+                if self._automatic_run_task is automatic_run_task:
+                    self._automatic_run_task = None
             policy = self.db.get_platform_dispatch_policy(POLICY_DEFAULTS)["config"]
             timeout = max(5, int(policy.get("probe_interval_seconds") or 60))
-            self._changed.clear()
             try:
                 await asyncio.wait_for(self._changed.wait(), timeout=timeout)
             except asyncio.TimeoutError:
                 pass
 
-    async def run_once(self) -> dict[str, Any]:
+    async def run_once(self, *, automatic: bool = False) -> dict[str, Any]:
+        if automatic:
+            config = self.db.get_platform_dispatch_policy(POLICY_DEFAULTS)["config"]
+            if not config.get("auto_scoring_enabled", True):
+                return {"skipped": True, "message": "自动评分已关闭"}
         if self.db.has_active_platform_dispatch_job():
             return {"skipped": True, "message": "平台调度同步任务正在执行"}
         if self.lock.locked():
             raise Sub2ApiAdminError("平台调度策略正在执行", status_code=409)
         async with self.lock:
-            return await self._run_once_locked()
+            try:
+                return await self._run_once_locked()
+            except asyncio.CancelledError:
+                if automatic:
+                    self.db.update_platform_dispatch_policy_runtime(
+                        POLICY_DEFAULTS,
+                        status="idle",
+                        last_finished_at=utc_now(),
+                        last_error="",
+                        summary={"message": "自动评分已关闭"},
+                    )
+                raise
+
+    async def refresh_health_evidence(
+        self,
+        client: Sub2ApiAdminClient,
+        cache: dict[str, Any],
+        progress: Callable[[str, int, int], None] | None = None,
+    ) -> dict[str, Any]:
+        site_url = client.site_url
+        if cache.get("source_site_url") != site_url:
+            raise Sub2ApiAdminError("平台调度缓存与当前 Sub2API 站点不一致", status_code=409)
+        accounts = {
+            int(account["id"]): account
+            for account in cache.get("accounts") or []
+            if isinstance(account, dict) and _optional_int(account.get("id"))
+        }
+        if not accounts:
+            raise Sub2ApiAdminError("请先同步账号信息", status_code=409)
+
+        config = validate_policy_config({}, self.db.get_platform_dispatch_policy(POLICY_DEFAULTS)["config"])
+        ttl_seconds = int(config["probe_interval_seconds"]) * int(config["evidence_ttl_multiplier"])
+        warnings = await self._refresh_evidence(
+            client,
+            site_url,
+            accounts,
+            force_full=True,
+            progress=progress,
+        )
+        now = datetime.now(timezone.utc)
+        health = {
+            account_id: calculate_health(
+                self.db.list_platform_dispatch_evidence(site_url, account_id), now, ttl_seconds
+            )
+            for account_id in accounts
+        }
+        await self._probe_due_accounts(
+            client,
+            site_url,
+            accounts,
+            health,
+            config,
+            ttl_seconds,
+            force=True,
+            progress=progress,
+        )
+
+        now = datetime.now(timezone.utc)
+        evidence_total = 0
+        for account_id, account in accounts.items():
+            item = calculate_health(
+                self.db.list_platform_dispatch_evidence(site_url, account_id), now, ttl_seconds
+            )
+            evidence_total += int(item["evidence_count"])
+            public = public_dispatch_account(account, _cached_activity(cache, account_id))
+            public.update(
+                {
+                    "health_score": _round_score(item["health_score"]),
+                    "health_short_score": _round_score(item["short_score"]),
+                    "health_long_score": _round_score(item["long_score"]),
+                    "health_evidence_count": item["evidence_count"],
+                    "health_evidence_at": item["evidence_at"] or None,
+                    "health_evidence_fresh": bool(item["evidence_fresh"]),
+                }
+            )
+            self.db.update_platform_dispatch_cached_account(public)
+            self.db.upsert_platform_dispatch_account_state(
+                site_url,
+                account_id,
+                name=str(account.get("name") or ""),
+                health_score=item["health_score"],
+                short_score=item["short_score"],
+                long_score=item["long_score"],
+                evidence_count=item["evidence_count"],
+                evidence_at=item["evidence_at"] or None,
+                evidence_fresh=1 if item["evidence_fresh"] else 0,
+                latest_probe_success_at=item["latest_probe_success_at"] or None,
+            )
+        return {
+            "refreshed_accounts": len(accounts),
+            "evidence_count": evidence_total,
+            "probe_count": len(accounts),
+            "warnings": list(dict.fromkeys(warnings)),
+        }
 
     async def _run_once_locked(self) -> dict[str, Any]:
         started_at = utc_now()
@@ -444,7 +623,7 @@ class PlatformDispatchPolicyScheduler:
         }
 
         if config["enabled"]:
-            await self._probe_due_accounts(client, site_url, accounts, health, ttl_seconds)
+            await self._probe_due_accounts(client, site_url, accounts, health, config, ttl_seconds)
             health = {
                 account_id: calculate_health(
                     self.db.list_platform_dispatch_evidence(site_url, account_id), now, ttl_seconds
@@ -495,6 +674,7 @@ class PlatformDispatchPolicyScheduler:
                     "health_score": _round_score(item["health_score"]),
                     "health_short_score": _round_score(item["short_score"]),
                     "health_long_score": _round_score(item["long_score"]),
+                    "health_evidence_count": item["evidence_count"],
                     "health_evidence_at": item["evidence_at"] or None,
                     "health_evidence_fresh": bool(item["evidence_fresh"]),
                     "decision_reason": str(state.get("decision_reason") or ""),
@@ -546,15 +726,22 @@ class PlatformDispatchPolicyScheduler:
         return summary
 
     async def _refresh_evidence(
-        self, client: Sub2ApiAdminClient, site_url: str, accounts: dict[int, dict[str, Any]]
+        self,
+        client: Sub2ApiAdminClient,
+        site_url: str,
+        accounts: dict[int, dict[str, Any]],
+        *,
+        force_full: bool = False,
+        progress: Callable[[str, int, int], None] | None = None,
     ) -> list[str]:
         semaphore = asyncio.Semaphore(8)
         warnings: list[str] = []
+        completed = 0
 
         async def load_source(
             account_id: int, source_kind: str
         ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
-            cursor = self.db.get_platform_dispatch_cursor(site_url, account_id, source_kind)
+            cursor = None if force_full else self.db.get_platform_dispatch_cursor(site_url, account_id, source_kind)
             cursor_id = str((cursor or {}).get("latest_source_id") or "")
             records: list[dict[str, Any]] = []
             page = 1
@@ -608,6 +795,7 @@ class PlatformDispatchPolicyScheduler:
             return records, newest
 
         async def load(account_id: int) -> None:
+            nonlocal completed
             async with semaphore:
                 usage, errors = await asyncio.gather(
                     load_source(account_id, "usage"),
@@ -619,18 +807,23 @@ class PlatformDispatchPolicyScheduler:
                 warnings.append(f"账号 {name} 使用记录读取失败: {usage}")
             else:
                 usage_records, usage_newest = usage
+                usage_evidence: list[dict[str, Any]] = []
                 for raw in usage_records:
                     activity = normalize_sub2api_usage_record(raw)
                     classified = classify_activity(activity)
-                    self.db.add_platform_dispatch_evidence(
-                        site_url,
-                        {
-                            "account_id": account_id,
-                            "source_kind": "usage",
-                            "source_id": str(activity.get("source_id")),
-                            "occurred_at": activity.get("created_at") or utc_now(),
-                            **classified,
-                        },
+                    item = {
+                        "account_id": account_id,
+                        "source_kind": "usage",
+                        "source_id": str(activity.get("source_id")),
+                        "occurred_at": activity.get("created_at") or utc_now(),
+                        **classified,
+                    }
+                    usage_evidence.append(item)
+                    if not force_full:
+                        self.db.add_platform_dispatch_evidence(site_url, item)
+                if force_full:
+                    self.db.replace_platform_dispatch_evidence_source(
+                        site_url, account_id, "usage", usage_evidence
                     )
                 if usage_newest is not None:
                     self.db.save_platform_dispatch_cursor(
@@ -644,18 +837,23 @@ class PlatformDispatchPolicyScheduler:
                 warnings.append(f"账号 {name} 错误记录读取失败: {errors}")
             else:
                 error_records, error_newest = errors
+                error_evidence: list[dict[str, Any]] = []
                 for raw in error_records:
                     activity = normalize_sub2api_error_record(raw)
                     classified = classify_activity(activity)
-                    self.db.add_platform_dispatch_evidence(
-                        site_url,
-                        {
-                            "account_id": account_id,
-                            "source_kind": "error",
-                            "source_id": str(activity.get("source_id")),
-                            "occurred_at": activity.get("created_at") or utc_now(),
-                            **classified,
-                        },
+                    item = {
+                        "account_id": account_id,
+                        "source_kind": "error",
+                        "source_id": str(activity.get("source_id")),
+                        "occurred_at": activity.get("created_at") or utc_now(),
+                        **classified,
+                    }
+                    error_evidence.append(item)
+                    if not force_full:
+                        self.db.add_platform_dispatch_evidence(site_url, item)
+                if force_full:
+                    self.db.replace_platform_dispatch_evidence_source(
+                        site_url, account_id, "error", error_evidence
                     )
                 if error_newest is not None:
                     self.db.save_platform_dispatch_cursor(
@@ -665,6 +863,9 @@ class PlatformDispatchPolicyScheduler:
                         str(error_newest.get("id") or ""),
                         str(error_newest.get("created_at") or ""),
                     )
+            completed += 1
+            if progress:
+                progress("evidence", completed, len(accounts))
 
         await asyncio.gather(*(load(account_id) for account_id in accounts))
         return warnings
@@ -675,15 +876,35 @@ class PlatformDispatchPolicyScheduler:
         site_url: str,
         accounts: dict[int, dict[str, Any]],
         health: dict[int, dict[str, Any]],
+        config: dict[str, Any],
         ttl_seconds: int,
+        *,
+        force: bool = False,
+        progress: Callable[[str, int, int], None] | None = None,
     ) -> None:
         semaphore = asyncio.Semaphore(8)
         now = datetime.now(timezone.utc)
+        completed = 0
 
         async def probe(account_id: int) -> None:
+            nonlocal completed
+            account_models = config.get("account_probe_models") or {}
+            account_model = str(account_models.get(str(account_id), account_models.get(account_id, "")) or "").strip()
+            group_models = config.get("group_probe_models") or {}
+            group_model = ""
+            if not account_model:
+                group_ids = public_dispatch_account(accounts[account_id], []).get("group_ids") or []
+                for group_id in group_ids:
+                    group_model = str(
+                        group_models.get(str(group_id), group_models.get(group_id, "")) or ""
+                    ).strip()
+                    if group_model:
+                        break
+            default_model = str(config.get("default_probe_model") or "").strip()
+            probe_model = account_model or group_model or default_model
             try:
                 async with semaphore:
-                    result = await client.probe_account(account_id)
+                    result = await client.probe_account(account_id, model=probe_model or None)
             except Exception as exc:
                 result = {"success": False, "is_timeout": False, "message": f"账号探活失败: {exc}"}
             activity = {
@@ -706,13 +927,16 @@ class PlatformDispatchPolicyScheduler:
                     **classified,
                 },
             )
+            completed += 1
+            if progress:
+                progress("probe", completed, len(due))
 
         due: list[int] = []
         for account_id, account in accounts.items():
             item = health[account_id]
             latest = _parse_datetime(item.get("evidence_at"))
             inactive = str(account.get("status") or "inactive") != "active"
-            if inactive or latest is None or latest < now - timedelta(seconds=max(1, ttl_seconds // 3)):
+            if force or inactive or latest is None or latest < now - timedelta(seconds=max(1, ttl_seconds // 3)):
                 due.append(account_id)
         await asyncio.gather(*(probe(account_id) for account_id in due))
 

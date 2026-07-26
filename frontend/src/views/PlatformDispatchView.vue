@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { ArrowDown, ArrowRight, Check, CircleClose, Hide, Refresh, RefreshLeft, Search, Timer, VideoPlay } from "@element-plus/icons-vue";
+import { ArrowDown, ArrowRight, Check, CircleClose, Hide, Refresh, RefreshLeft, Search, Setting, Timer, VideoPlay } from "@element-plus/icons-vue";
 import { api } from "../api";
 import { formatTime } from "../utils";
 
@@ -41,11 +41,15 @@ const excludedGroups = ref([]);
 const warnings = ref([]);
 const siteUrl = ref("");
 const refreshedAt = ref("");
-const activitiesRefreshedAt = ref("");
+const evidenceRefreshedAt = ref("");
 const job = ref(null);
 const collapsedGroups = ref(new Set());
 const updatingIds = ref(new Set());
 const updatingGroupIds = ref(new Set());
+const updatingExcludedAccountIds = ref(new Set());
+const updatingProbeModelIds = ref(new Set());
+const updatingGroupProbeModelIds = ref(new Set());
+const excludingUngrouped = ref(false);
 const filters = reactive({
   search: "",
   platform: "",
@@ -63,6 +67,7 @@ const policyActions = ref([]);
 const excludedAccountText = ref("1430, 1431");
 const policyConfig = reactive({
   enabled: false,
+  auto_scoring_enabled: true,
   return_pool_enabled: false,
   smart_expand_enabled: false,
   load_factor_enabled: false,
@@ -89,9 +94,13 @@ const policyConfig = reactive({
   slow_window: 10,
   slow_first_token_ms: 15000,
   slow_threshold: 5,
+  default_probe_model: "",
+  group_probe_models: {},
+  account_probe_models: {},
   excluded_account_ids: [1430, 1431]
 });
 let jobPollTimer = null;
+let policyPollTimer = null;
 let disposed = false;
 
 const jobActive = computed(() => isActiveJobStatus(job.value?.status));
@@ -107,7 +116,8 @@ const jobPercent = computed(() => {
   }
   return 0;
 });
-const jobTitle = computed(() => job.value?.kind === "activity_refresh" ? "刷新运行情况" : "同步账号");
+const evidenceJob = computed(() => ["evidence_refresh", "activity_refresh"].includes(job.value?.kind));
+const jobTitle = computed(() => evidenceJob.value ? "重新获取健康证据" : "同步账号");
 const jobProgressText = computed(() => {
   if (!job.value) return "";
   if (job.value.message) return job.value.message;
@@ -130,9 +140,28 @@ const groupOptions = computed(() => {
   return [...groups.value].sort(compareGroups);
 });
 
+const excludedAccountIdSet = computed(() => {
+  return new Set(
+    (policyConfig.excluded_account_ids || [])
+      .map(Number)
+      .filter((value) => Number.isInteger(value) && value > 0)
+  );
+});
+
+const includedAccounts = computed(() => {
+  return accounts.value.filter((account) => !excludedAccountIdSet.value.has(Number(account.id)));
+});
+
+const excludedAccounts = computed(() => {
+  const accountsById = new Map(accounts.value.map((account) => [Number(account.id), account]));
+  return [...excludedAccountIdSet.value]
+    .sort((left, right) => left - right)
+    .map((id) => accountsById.get(id) || { id, name: `账号 ${id}`, platform: "", type: "" });
+});
+
 const filteredAccounts = computed(() => {
   const search = filters.search.trim().toLowerCase();
-  return accounts.value.filter((account) => {
+  return includedAccounts.value.filter((account) => {
     if (search) {
       const searchable = [account.id, account.name, account.notes, account.platform, account.type]
         .map((value) => String(value || "").toLowerCase())
@@ -175,14 +204,28 @@ const groupSections = computed(() => {
   return sections.sort((left, right) => compareGroups(left.group, right.group));
 });
 
-const activeCount = computed(() => accounts.value.filter((account) => account.status === "active").length);
-const errorCount = computed(() => accounts.value.filter((account) => account.status === "error").length);
+const activeCount = computed(() => includedAccounts.value.filter((account) => account.status === "active").length);
+const errorCount = computed(() => includedAccounts.value.filter((account) => account.status === "error").length);
 const policySummary = computed(() => policyRuntime.value?.summary || {});
+const policyAutoRunning = computed(() => {
+  return Boolean(policyRuntime.value?.is_running ?? policyRuntime.value?.isRunning ?? policyRuntime.value?.status === "running");
+});
+const dispatchMutationDisabled = computed(() => controlsDisabled.value || policyAutoRunning.value);
 const policyStatusText = computed(() => {
-  if (!policyConfig.enabled) return "仅评分";
-  if (policyRuntime.value?.status === "running") return "执行中";
-  if (policyRuntime.value?.status === "failed") return "异常";
-  return "已接管";
+  if (policyAutoRunning.value) return policyConfig.enabled ? "正在自动调度" : "正在评分";
+  if (policyRuntime.value?.status === "failed" && (policyConfig.enabled || policyConfig.auto_scoring_enabled)) return "执行异常";
+  if (policyConfig.enabled) return "等待自动调度";
+  if (policyConfig.auto_scoring_enabled) return "等待自动评分";
+  return "自动执行已关闭";
+});
+const policyStatusType = computed(() => {
+  if (
+    policyRuntime.value?.status === "failed" &&
+    !policyAutoRunning.value &&
+    (policyConfig.enabled || policyConfig.auto_scoring_enabled)
+  ) return "danger";
+  if (policyAutoRunning.value) return "warning";
+  return policyConfig.enabled || policyConfig.auto_scoring_enabled ? "success" : "info";
 });
 
 async function loadPolicy() {
@@ -198,9 +241,28 @@ async function loadPolicy() {
 
 function applyPolicyPayload(payload) {
   Object.assign(policyConfig, payload.config || {});
+  applyPolicyRuntimePayload(payload);
+  excludedAccountText.value = (policyConfig.excluded_account_ids || []).join(", ");
+}
+
+function applyAccountExclusionPayload(payload) {
+  const excludedIds = payload.config?.excluded_account_ids || payload.config?.excludedAccountIds || [];
+  policyConfig.excluded_account_ids = [...excludedIds];
+  excludedAccountText.value = excludedIds.join(", ");
+  applyPolicyRuntimePayload(payload);
+}
+
+function applyProbeModelPayload(payload) {
+  const groupModels = payload.config?.group_probe_models || payload.config?.groupProbeModels || {};
+  const accountModels = payload.config?.account_probe_models || payload.config?.accountProbeModels || {};
+  policyConfig.group_probe_models = { ...groupModels };
+  policyConfig.account_probe_models = { ...accountModels };
+  applyPolicyRuntimePayload(payload);
+}
+
+function applyPolicyRuntimePayload(payload) {
   policyRuntime.value = payload.runtime || {};
   policyActions.value = payload.actions || [];
-  excludedAccountText.value = (policyConfig.excluded_account_ids || []).join(", ");
   const states = new Map((payload.accounts || []).map((item) => [Number(item.account_id), item]));
   accounts.value.forEach((account) => {
     const state = states.get(Number(account.id));
@@ -209,8 +271,11 @@ function applyPolicyPayload(payload) {
       health_score: state.health_score,
       health_short_score: state.short_score,
       health_long_score: state.long_score,
+      health_evidence_count: state.evidence_count,
       health_evidence_at: state.evidence_at,
       health_evidence_fresh: Boolean(state.evidence_fresh),
+      probe_records: state.probe_records || state.probeRecords || [],
+      short_evidence_records: state.short_evidence_records || state.shortEvidenceRecords || [],
       decision_reason: state.decision_reason || "",
       target_concurrency: state.target_concurrency,
       target_load_factor: state.target_load_factor,
@@ -219,10 +284,45 @@ function applyPolicyPayload(payload) {
   });
 }
 
+function stopPolicyPolling() {
+  if (policyPollTimer !== null) {
+    window.clearTimeout(policyPollTimer);
+    policyPollTimer = null;
+  }
+}
+
+function schedulePolicyPoll() {
+  stopPolicyPolling();
+  if (!disposed) policyPollTimer = window.setTimeout(pollPolicyRuntime, policyAutoRunning.value ? 1000 : 3000);
+}
+
+async function pollPolicyRuntime() {
+  policyPollTimer = null;
+  try {
+    await refreshPolicyRuntime();
+  } catch {
+    // Keep the last known state; the next poll will retry.
+  } finally {
+    schedulePolicyPoll();
+  }
+}
+
+async function refreshPolicyRuntime() {
+  applyPolicyRuntimePayload(await api.platformDispatchPolicy());
+}
+
 function parseExcludedAccountIds() {
   const values = excludedAccountText.value.split(/[，,\s]+/).filter(Boolean).map(Number);
   if (values.some((value) => !Number.isInteger(value) || value <= 0)) throw new Error("排除账号 ID 必须是正整数");
   return [...new Set(values)];
+}
+
+function toggleAutomaticDispatch(enabled) {
+  if (enabled) policyConfig.auto_scoring_enabled = true;
+}
+
+function toggleAutomaticScoring(enabled) {
+  if (!enabled) policyConfig.enabled = false;
 }
 
 async function savePolicy() {
@@ -271,14 +371,15 @@ function applyDispatchPayload(payload) {
   accounts.value = (payload.accounts || []).map((account) => ({
     ...account,
     is_enabled: account.is_enabled ?? account.isEnabled ?? account.status === "active",
-    recent_activity: account.recent_activity || account.recentActivity || []
+    probe_records: account.probe_records || account.probeRecords || [],
+    short_evidence_records: account.short_evidence_records || account.shortEvidenceRecords || []
   }));
   groups.value = payload.groups || [];
   excludedGroups.value = payload.excluded_groups || payload.excludedGroups || [];
   warnings.value = payload.warnings || [];
   siteUrl.value = payload.site_url || payload.siteUrl || "";
   refreshedAt.value = payload.refreshed_at || payload.refreshedAt || "";
-  activitiesRefreshedAt.value = payload.activities_refreshed_at || payload.activitiesRefreshedAt || "";
+  evidenceRefreshedAt.value = payload.activities_refreshed_at || payload.activitiesRefreshedAt || "";
   hasCache.value = payload.has_cache ?? payload.hasCache ?? false;
   const refreshFilter = payload.refresh_filter || payload.refreshFilter || {};
   Object.assign(appliedRefreshFilter, {
@@ -311,12 +412,12 @@ async function startAccountSync() {
   }
 }
 
-async function startActivityRefresh() {
+async function startEvidenceRefresh() {
   try {
     await ElMessageBox.confirm(
-      `将为全部 ${accounts.value.length} 个已同步账号获取最近 6 条运行情况。`,
-      "刷新运行情况",
-      { confirmButtonText: "开始刷新", cancelButtonText: "取消", type: "info" }
+      `将为全部 ${accounts.value.length} 个已同步账号重新拉取最近的使用和错误证据，逐个执行探活，并重新计算短期分、长期分和健康分。`,
+      "重新获取健康证据",
+      { confirmButtonText: "开始获取", cancelButtonText: "取消", type: "info" }
     );
   } catch {
     return;
@@ -324,12 +425,12 @@ async function startActivityRefresh() {
 
   startingJob.value = true;
   try {
-    const payload = await api.refreshPlatformDispatchActivities();
+    const payload = await api.refreshPlatformDispatchEvidence();
     if (!setJobFromPayload(payload)) throw new Error("服务器未返回任务信息");
     if (jobActive.value) scheduleJobPoll();
     else await finishStartedJob();
   } catch (error) {
-    ElMessage.error(error.message || "启动运行情况刷新失败");
+    ElMessage.error(error.message || "启动健康证据获取失败");
   } finally {
     startingJob.value = false;
   }
@@ -354,9 +455,40 @@ async function excludeGroup(group) {
     applyDispatchPayload(payload);
     ElMessage.success(`已排除分组“${group.name || groupId}”`);
   } catch (error) {
+    if (error.status === 409) {
+      await refreshPolicyRuntime().catch(() => {});
+      schedulePolicyPoll();
+    }
     ElMessage.error(error.message || "排除分组失败");
   } finally {
     setGroupUpdating(groupId, false);
+  }
+}
+
+async function excludeUngroupedAccounts() {
+  try {
+    await ElMessageBox.confirm(
+      "屏蔽后，当前未分组账号会从平台调度缓存移除，后续同步也将默认不同步未分组账号。需要恢复时，可在同步账号时重新开启该选项。",
+      "屏蔽未分组账号",
+      { confirmButtonText: "确认屏蔽", cancelButtonText: "取消", type: "warning" }
+    );
+  } catch {
+    return;
+  }
+
+  excludingUngrouped.value = true;
+  try {
+    const payload = await api.excludePlatformDispatchUngrouped();
+    applyDispatchPayload(payload);
+    ElMessage.success("已屏蔽未分组账号");
+  } catch (error) {
+    if (error.status === 409) {
+      await refreshPolicyRuntime().catch(() => {});
+      schedulePolicyPoll();
+    }
+    ElMessage.error(error.message || "屏蔽未分组账号失败");
+  } finally {
+    excludingUngrouped.value = false;
   }
 }
 
@@ -369,10 +501,218 @@ async function restoreExcludedGroup(group) {
     applyDispatchPayload(payload);
     ElMessage.success("已取消排除，请重新同步账号以加载该分组数据");
   } catch (error) {
+    if (error.status === 409) {
+      await refreshPolicyRuntime().catch(() => {});
+      schedulePolicyPoll();
+    }
     ElMessage.error(error.message || "取消排除分组失败");
   } finally {
     setGroupUpdating(groupId, false);
   }
+}
+
+async function excludeAccount(account) {
+  const accountId = Number(account?.id);
+  if (!Number.isInteger(accountId) || accountId <= 0) return;
+  try {
+    await ElMessageBox.confirm(
+      `排除后，“${account.name || `账号 ${accountId}`}”将退出自动评分和调度，并从当前账号列表隐藏。不会删除或停用远端账号。`,
+      "排除账号",
+      { confirmButtonText: "确认排除", cancelButtonText: "取消", type: "warning" }
+    );
+  } catch {
+    return;
+  }
+
+  setExcludedAccountUpdating(accountId, true);
+  try {
+    applyAccountExclusionPayload(await api.excludePlatformDispatchAccount(accountId));
+    ElMessage.success(`已排除账号“${account.name || accountId}”`);
+  } catch (error) {
+    if (error.status === 409) {
+      await refreshPolicyRuntime().catch(() => {});
+      schedulePolicyPoll();
+    }
+    ElMessage.error(error.message || "排除账号失败");
+  } finally {
+    setExcludedAccountUpdating(accountId, false);
+  }
+}
+
+async function restoreExcludedAccount(account) {
+  const accountId = Number(account?.id);
+  if (!Number.isInteger(accountId) || accountId <= 0) return;
+  setExcludedAccountUpdating(accountId, true);
+  try {
+    applyAccountExclusionPayload(await api.restorePlatformDispatchAccount(accountId));
+    ElMessage.success(`已恢复账号“${account.name || accountId}”`);
+  } catch (error) {
+    if (error.status === 409) {
+      await refreshPolicyRuntime().catch(() => {});
+      schedulePolicyPoll();
+    }
+    ElMessage.error(error.message || "恢复账号失败");
+  } finally {
+    setExcludedAccountUpdating(accountId, false);
+  }
+}
+
+function setExcludedAccountUpdating(accountId, updating) {
+  const next = new Set(updatingExcludedAccountIds.value);
+  if (updating) next.add(accountId);
+  else next.delete(accountId);
+  updatingExcludedAccountIds.value = next;
+}
+
+function isExcludedAccountUpdating(account) {
+  return updatingExcludedAccountIds.value.has(Number(account?.id));
+}
+
+function accountProbeModel(account) {
+  const accountId = String(Number(account?.id));
+  return String(policyConfig.account_probe_models?.[accountId] || "").trim();
+}
+
+function groupProbeModel(group) {
+  const groupId = String(Number(group?.id));
+  return String(policyConfig.group_probe_models?.[groupId] || "").trim();
+}
+
+function accountGroupProbeModel(account) {
+  const groupModels = policyConfig.group_probe_models || {};
+  const groupIds = [...new Set(accountGroupIds(account))].sort((left, right) => left - right);
+  for (const groupId of groupIds) {
+    const model = String(groupModels[String(groupId)] || "").trim();
+    if (!model) continue;
+    const group = groups.value.find((item) => Number(item.id) === groupId);
+    return { model, groupId, groupName: group?.name || `分组 ${groupId}` };
+  }
+  return null;
+}
+
+function effectiveProbeModel(account) {
+  return accountProbeModel(account)
+    || accountGroupProbeModel(account)?.model
+    || String(policyConfig.default_probe_model || "").trim();
+}
+
+function probeModelText(account) {
+  const accountModel = accountProbeModel(account);
+  if (accountModel) return `${accountModel}（账号）`;
+  const groupModel = accountGroupProbeModel(account);
+  if (groupModel) return `${groupModel.model}（${groupModel.groupName}）`;
+  const defaultModel = String(policyConfig.default_probe_model || "").trim();
+  return defaultModel ? `${defaultModel}（默认）` : "Sub2API 默认";
+}
+
+function groupProbeModelText(group) {
+  const model = groupProbeModel(group);
+  if (model) return `${model}（分组）`;
+  const defaultModel = String(policyConfig.default_probe_model || "").trim();
+  return defaultModel ? `${defaultModel}（默认）` : "Sub2API 默认";
+}
+
+async function configureProbeModel(account) {
+  const accountId = Number(account?.id);
+  if (!Number.isInteger(accountId) || accountId <= 0) return;
+  const defaultModel = String(policyConfig.default_probe_model || "").trim();
+  const inheritedGroup = accountGroupProbeModel(account);
+  const inheritedModel = inheritedGroup?.model || defaultModel;
+  const inheritedText = inheritedGroup
+    ? `留空将使用分组“${inheritedGroup.groupName}”的模型：${inheritedGroup.model}`
+    : defaultModel
+      ? `留空将使用默认模型：${defaultModel}`
+      : "留空将使用 Sub2API 默认模型";
+  let value;
+  try {
+    const result = await ElMessageBox.prompt(
+      inheritedText,
+      `设置探活模型 - ${account.name || accountId}`,
+      {
+        confirmButtonText: "保存",
+        cancelButtonText: "取消",
+        inputValue: accountProbeModel(account),
+        inputPlaceholder: inheritedModel || "例如 gpt-5-mini",
+        inputValidator: (input) => String(input || "").trim().length <= 200 || "模型名不能超过 200 个字符"
+      }
+    );
+    value = String(result.value || "").trim();
+  } catch {
+    return;
+  }
+
+  setProbeModelUpdating(accountId, true);
+  try {
+    applyProbeModelPayload(await api.setPlatformDispatchProbeModel(accountId, value));
+    ElMessage.success(value ? `探活模型已设置为 ${value}` : "已恢复继承的探活模型");
+  } catch (error) {
+    if (error.status === 409) {
+      await refreshPolicyRuntime().catch(() => {});
+      schedulePolicyPoll();
+    }
+    ElMessage.error(error.message || "保存探活模型失败");
+  } finally {
+    setProbeModelUpdating(accountId, false);
+  }
+}
+
+function setProbeModelUpdating(accountId, updating) {
+  const next = new Set(updatingProbeModelIds.value);
+  if (updating) next.add(accountId);
+  else next.delete(accountId);
+  updatingProbeModelIds.value = next;
+}
+
+function isProbeModelUpdating(account) {
+  return updatingProbeModelIds.value.has(Number(account?.id));
+}
+
+async function configureGroupProbeModel(group) {
+  const groupId = Number(group?.id);
+  if (!Number.isInteger(groupId) || groupId <= 0) return;
+  const defaultModel = String(policyConfig.default_probe_model || "").trim();
+  let value;
+  try {
+    const result = await ElMessageBox.prompt(
+      defaultModel ? `留空将使用默认模型：${defaultModel}` : "留空将使用 Sub2API 默认模型",
+      `设置分组探活模型 - ${group.name || groupId}`,
+      {
+        confirmButtonText: "保存",
+        cancelButtonText: "取消",
+        inputValue: groupProbeModel(group),
+        inputPlaceholder: defaultModel || "例如 gpt-5-mini",
+        inputValidator: (input) => String(input || "").trim().length <= 200 || "模型名不能超过 200 个字符"
+      }
+    );
+    value = String(result.value || "").trim();
+  } catch {
+    return;
+  }
+
+  setGroupProbeModelUpdating(groupId, true);
+  try {
+    applyProbeModelPayload(await api.setPlatformDispatchGroupProbeModel(groupId, value));
+    ElMessage.success(value ? `分组探活模型已设置为 ${value}` : "分组已恢复默认探活模型");
+  } catch (error) {
+    if (error.status === 409) {
+      await refreshPolicyRuntime().catch(() => {});
+      schedulePolicyPoll();
+    }
+    ElMessage.error(error.message || "保存分组探活模型失败");
+  } finally {
+    setGroupProbeModelUpdating(groupId, false);
+  }
+}
+
+function setGroupProbeModelUpdating(groupId, updating) {
+  const next = new Set(updatingGroupProbeModelIds.value);
+  if (updating) next.add(groupId);
+  else next.delete(groupId);
+  updatingGroupProbeModelIds.value = next;
+}
+
+function isGroupProbeModelUpdating(group) {
+  return updatingGroupProbeModelIds.value.has(Number(group?.id));
 }
 
 function excludedGroupId(group) {
@@ -446,8 +786,9 @@ function scheduleJobPoll() {
 
 async function finishStartedJob() {
   await loadDispatch();
+  if (evidenceJob.value) await refreshPolicyRuntime().catch(() => {});
   if (isSuccessfulJobStatus(job.value?.status)) {
-    ElMessage.success(job.value?.kind === "activity_refresh" ? "运行情况刷新完成" : `账号同步完成，共 ${accounts.value.length} 个账号`);
+    ElMessage.success(evidenceJob.value ? "健康证据已重新获取并完成评分" : `账号同步完成，共 ${accounts.value.length} 个账号`);
   } else if (jobFailed.value) {
     ElMessage.error(job.value.error || "平台调度任务失败");
   }
@@ -504,6 +845,8 @@ async function toggleAccount(account, enabled) {
     const payload = await api.setPlatformDispatchEnabled(account.id, enabled);
     const updated = payload.account || {};
     account.status = updated.status || (enabled ? "active" : "inactive");
+    account.filter_status = updated.filter_status || updated.filterStatus || account.status;
+    account.filterStatus = account.filter_status;
     account.is_enabled = updated.is_enabled ?? updated.isEnabled ?? enabled;
     account.error_message = updated.error_message || updated.errorMessage || "";
     ElMessage.success(`${account.name} 已${enabled ? "启用" : "停用"}`);
@@ -561,34 +904,24 @@ function accountFilterStatus(account) {
   return account.filter_status || account.filterStatus || account.status || "inactive";
 }
 
-function userText(activity) {
-  const email = activity.user_email || activity.userEmail || "未知用户";
-  const id = activity.user_id || activity.userId;
-  return id ? `${email} #${id}` : email;
+function accountSwitchText(account, enabled) {
+  const status = accountFilterStatus(account);
+  if (!enabled) return status === "error" ? "错误" : "已停用";
+  return {
+    active: "调度中",
+    rate_limited: "限流中",
+    temp_unschedulable: "暂不可用",
+    unschedulable: "不可调度"
+  }[status] || "已启用";
 }
 
-function tokenText(activity) {
-  const value = activity.total_tokens ?? activity.totalTokens;
-  return value === null || value === undefined ? "-" : Number(value).toLocaleString("zh-CN");
-}
-
-function tokenDetail(activity) {
-  const input = activity.input_tokens ?? activity.inputTokens;
-  if (input === null || input === undefined) return "无 token 数据";
-  const output = activity.output_tokens ?? activity.outputTokens ?? 0;
-  const cache = activity.cache_tokens ?? activity.cacheTokens ?? 0;
-  return `输入 ${Number(input).toLocaleString("zh-CN")} / 输出 ${Number(output).toLocaleString("zh-CN")} / 缓存 ${Number(cache).toLocaleString("zh-CN")}`;
-}
-
-function costText(activity) {
-  const value = activity.cost ?? activity.actual_cost ?? activity.actualCost;
-  return value === null || value === undefined ? "-" : `$${Number(value).toFixed(6)}`;
-}
-
-function durationText(activity) {
-  const first = activity.first_token_ms ?? activity.firstTokenMs;
-  const total = activity.duration_ms ?? activity.durationMs;
-  return `${formatDuration(first)} / ${formatDuration(total)}`;
+function accountSwitchColor(account, enabled) {
+  const status = accountFilterStatus(account);
+  if (!enabled) return status === "error" ? "var(--danger)" : "#909399";
+  if (status === "active") return "var(--success)";
+  if (status === "rate_limited" || status === "temp_unschedulable") return "var(--warning)";
+  if (status === "unschedulable") return "var(--muted)";
+  return "var(--primary)";
 }
 
 function formatDuration(value) {
@@ -599,15 +932,12 @@ function formatDuration(value) {
   return `${(milliseconds / 1000).toFixed(milliseconds < 10000 ? 2 : 1)} s`;
 }
 
-function activityTime(activity) {
-  return formatTime(activity.created_at || activity.createdAt);
-}
-
 function isUpdating(accountId) {
   return updatingIds.value.has(accountId);
 }
 
 function healthType(score) {
+  if (score === null || score === undefined || score === "") return "info";
   const value = Number(score);
   if (!Number.isFinite(value)) return "info";
   if (value >= Number(policyConfig.health_threshold)) return "success";
@@ -616,14 +946,124 @@ function healthType(score) {
 }
 
 function healthText(account) {
-  const value = Number(account.health_score ?? account.healthScore);
+  const rawValue = account.health_score ?? account.healthScore;
+  if (rawValue === null || rawValue === undefined || rawValue === "") return "待采集";
+  const value = Number(rawValue);
   return Number.isFinite(value) ? value.toFixed(1) : "待采集";
+}
+
+function hasHealthComposition(account) {
+  const shortValue = account.health_short_score ?? account.healthShortScore;
+  const longValue = account.health_long_score ?? account.healthLongScore;
+  if (shortValue === null || shortValue === undefined || shortValue === "") return false;
+  if (longValue === null || longValue === undefined || longValue === "") return false;
+  const shortScore = Number(shortValue);
+  const longScore = Number(longValue);
+  return Number.isFinite(shortScore) && Number.isFinite(longScore);
+}
+
+function healthPartText(value, weight) {
+  if (value === null || value === undefined || value === "") return "-";
+  const score = Number(value);
+  if (!Number.isFinite(score)) return "-";
+  return `${score.toFixed(1)} × ${weight}% = ${(score * weight / 100).toFixed(1)}`;
 }
 
 function evidenceText(account) {
   const at = account.health_evidence_at || account.healthEvidenceAt;
   if (!at) return "无证据";
-  return `${account.health_evidence_fresh ?? account.healthEvidenceFresh ? "有效" : "已过期"} · ${formatTime(at)}`;
+  const count = Number(account.health_evidence_count ?? account.healthEvidenceCount);
+  const countText = Number.isFinite(count) ? `${count} 条证据 · ` : "";
+  return `${countText}${account.health_evidence_fresh ?? account.healthEvidenceFresh ? "有效" : "已过期"} · ${formatTime(at)}`;
+}
+
+function probeRecords(account) {
+  const records = account.probe_records || account.probeRecords || [];
+  if (!Array.isArray(records)) return [];
+  return records
+    .map((record, index) => ({
+      record,
+      index,
+      occurredAt: Date.parse(record.occurred_at || record.occurredAt || "")
+    }))
+    .sort((left, right) => {
+      const leftValid = Number.isFinite(left.occurredAt);
+      const rightValid = Number.isFinite(right.occurredAt);
+      if (leftValid && rightValid && left.occurredAt !== right.occurredAt) return right.occurredAt - left.occurredAt;
+      if (leftValid !== rightValid) return leftValid ? -1 : 1;
+      return left.index - right.index;
+    })
+    .slice(0, 15)
+    .map(({ record }) => record);
+}
+
+function probeTimelineRecords(account) {
+  return probeRecords(account).reverse();
+}
+
+function shortEvidenceRecords(account) {
+  const records = account.short_evidence_records || account.shortEvidenceRecords || [];
+  if (!Array.isArray(records)) return [];
+  return records
+    .filter((record) => ["usage", "error"].includes(record.source_kind || record.sourceKind))
+    .map((record, index) => ({
+      record,
+      index,
+      occurredAt: Date.parse(record.occurred_at || record.occurredAt || "")
+    }))
+    .sort((left, right) => {
+      const leftValid = Number.isFinite(left.occurredAt);
+      const rightValid = Number.isFinite(right.occurredAt);
+      if (leftValid && rightValid && left.occurredAt !== right.occurredAt) return right.occurredAt - left.occurredAt;
+      if (leftValid !== rightValid) return leftValid ? -1 : 1;
+      return left.index - right.index;
+    })
+    .slice(0, 10)
+    .map(({ record }) => record);
+}
+
+function probeSucceeded(record) {
+  return Boolean(record.is_probe_success ?? record.isProbeSuccess);
+}
+
+function evidenceCategoryText(category) {
+  const labels = {
+    healthy: "正常",
+    slow: "慢响应",
+    fatal_auth: "认证失败",
+    fatal_balance: "余额不足",
+    fatal_usage: "用量耗尽",
+    probe_failure: "探活失败",
+    timeout: "超时",
+    upstream_error: "上游错误"
+  };
+  if (labels[category]) return labels[category];
+  return String(category || "未知").startsWith("http_") ? `HTTP ${String(category).slice(5)}` : category || "未知";
+}
+
+function evidenceDetail(record) {
+  const statusCode = record.status_code ?? record.statusCode;
+  const firstTokenMs = record.first_token_ms ?? record.firstTokenMs;
+  const timeout = record.is_timeout ?? record.isTimeout;
+  const message = String(record.message || "").trim();
+  return [
+    statusCode ? `HTTP ${statusCode}` : "",
+    firstTokenMs === null || firstTokenMs === undefined ? "" : `首字 ${formatDuration(firstTokenMs)}`,
+    timeout ? "超时" : "",
+    message
+  ].filter(Boolean).join(" · ") || "-";
+}
+
+function evidenceTime(record) {
+  return formatTime(record.occurred_at || record.occurredAt);
+}
+
+function probeTimelineDetail(record) {
+  const time = evidenceTime(record);
+  if (probeSucceeded(record)) return `探活成功 · ${time}`;
+  const category = evidenceCategoryText(record.category);
+  const detail = evidenceDetail(record);
+  return [`探活失败（${category}）`, detail === "-" ? "无错误详情" : detail, time].filter(Boolean).join(" · ");
 }
 
 function metricText(value) {
@@ -651,12 +1091,14 @@ onMounted(async () => {
   disposed = false;
   await loadDispatch();
   await loadPolicy();
+  schedulePolicyPoll();
   resumeJob();
 });
 
 onBeforeUnmount(() => {
   disposed = true;
   stopJobPolling();
+  stopPolicyPolling();
 });
 </script>
 
@@ -668,13 +1110,13 @@ onBeforeUnmount(() => {
         <p>Sub2API 账号与最近调度记录<span v-if="siteUrl"> · {{ siteUrl }}</span></p>
       </div>
       <div class="page-actions">
-        <el-button :icon="Refresh" :disabled="controlsDisabled" @click="openRefreshDialog">同步账号</el-button>
+        <el-button :icon="Refresh" :disabled="dispatchMutationDisabled" @click="openRefreshDialog">同步账号</el-button>
         <el-button
           :icon="Timer"
-          :disabled="controlsDisabled || !hasCache || accounts.length === 0"
-          @click="startActivityRefresh"
+          :disabled="dispatchMutationDisabled || !hasCache || accounts.length === 0"
+          @click="startEvidenceRefresh"
         >
-          刷新运行情况
+          重新获取短期证据和长期证据
         </el-button>
       </div>
     </div>
@@ -682,15 +1124,24 @@ onBeforeUnmount(() => {
     <section v-loading="policyLoading" class="policy-panel">
       <header class="policy-head">
         <div class="policy-master">
-          <el-switch v-model="policyConfig.enabled" size="large" aria-label="自动调度总开关" />
+          <el-switch
+            v-model="policyConfig.enabled"
+            size="large"
+            aria-label="自动调度总开关"
+            @change="toggleAutomaticDispatch"
+          />
           <div>
             <div class="policy-title-line">
               <h2>自动调度</h2>
-              <el-tag :type="policyConfig.enabled ? (policyRuntime.status === 'failed' ? 'danger' : 'success') : 'info'" size="small">
+              <el-tag :type="policyStatusType" size="small">
                 {{ policyStatusText }}
               </el-tag>
             </div>
-            <p>{{ policyConfig.enabled ? "异常停用和最低池保护始终生效" : "仅读取请求记录并计算健康评分" }}</p>
+            <p v-if="policyAutoRunning && policyConfig.enabled">正在评估并更新账号，排除、同步和账号启停暂不可用</p>
+            <p v-else-if="policyAutoRunning">正在读取请求记录并计算健康评分，排除、同步和账号启停暂不可用</p>
+            <p v-else-if="policyConfig.enabled">自动调度已开启，等待后台执行下一轮</p>
+            <p v-else-if="policyConfig.auto_scoring_enabled">自动评分已开启，后台仅获取证据并计算健康分</p>
+            <p v-else>自动评分和自动调度均已关闭</p>
           </div>
         </div>
         <div class="policy-actions">
@@ -701,7 +1152,7 @@ onBeforeUnmount(() => {
               type="primary"
               :icon="VideoPlay"
               :loading="policyRunning"
-              :disabled="controlsDisabled || policySaving"
+              :disabled="controlsDisabled || policySaving || policyAutoRunning"
               aria-label="立即执行一轮"
               @click="runPolicyNow"
             />
@@ -709,16 +1160,21 @@ onBeforeUnmount(() => {
         </div>
       </header>
 
-      <div class="policy-behavior" :class="{ 'is-active': policyConfig.enabled }">
+      <div class="policy-behavior" :class="{ 'is-active': policyConfig.enabled || policyConfig.auto_scoring_enabled }">
         <strong>当前行为</strong>
-        <span v-if="!policyConfig.enabled">总开关关闭：不探活、不写远端；四项策略保留现有远端值。</span>
+        <span v-if="!policyConfig.auto_scoring_enabled">自动评分和自动调度均关闭；后台不再读取证据或重算健康分。</span>
+        <span v-else-if="!policyConfig.enabled">自动评分开启：后台增量读取证据并计算健康分，不探活、不写远端。</span>
         <span v-else-if="!policyConfig.return_pool_enabled && !policyConfig.smart_expand_enabled && !policyConfig.load_factor_enabled && !policyConfig.price_protection_enabled">
           四项策略均关闭；仍会自动停用异常账号，并在可用池低于 {{ policyConfig.minimum_available_accounts }} 个时回池。
         </span>
-        <span v-else>每 60 秒评估托管账号；每轮最多切换 1 个账号状态，其余策略独立执行。</span>
+        <span v-else>每 {{ policyConfig.probe_interval_seconds }} 秒评估托管账号；每轮最多切换 1 个账号状态，其余策略独立执行。</span>
       </div>
 
       <div class="policy-strategies">
+        <label class="policy-strategy">
+          <el-switch v-model="policyConfig.auto_scoring_enabled" @change="toggleAutomaticScoring" />
+          <span><strong>自动评分</strong><small>定时获取证据并计算健康分</small></span>
+        </label>
         <label class="policy-strategy">
           <el-switch v-model="policyConfig.return_pool_enabled" />
           <span><strong>健康回池</strong><small>将可用池恢复到 {{ policyConfig.healthy_target_accounts }} 个</small></span>
@@ -750,10 +1206,12 @@ onBeforeUnmount(() => {
           <section>
             <h3>池与健康</h3>
             <div class="policy-input-grid">
+              <label><span>调度间隔（秒）</span><el-input-number v-model="policyConfig.probe_interval_seconds" :min="5" :step="5" /></label>
               <label><span>健康门槛</span><el-input-number v-model="policyConfig.health_threshold" :min="0" :max="100" /></label>
               <label><span>最低可用账号</span><el-input-number v-model="policyConfig.minimum_available_accounts" :min="1" /></label>
               <label><span>健康目标账号</span><el-input-number v-model="policyConfig.healthy_target_accounts" :min="1" /></label>
               <label><span>证据有效倍数</span><el-input-number v-model="policyConfig.evidence_ttl_multiplier" :min="1" /></label>
+              <label><span>默认探活模型</span><el-input v-model="policyConfig.default_probe_model" clearable placeholder="留空使用 Sub2API 默认模型" /></label>
             </div>
           </section>
           <section>
@@ -839,18 +1297,18 @@ onBeforeUnmount(() => {
     <div v-if="hasCache" class="dispatch-cache-meta">
       <div class="dispatch-cache-times">
         <span>账号同步：{{ formatTime(refreshedAt) }}</span>
-        <span>运行情况刷新：{{ activitiesRefreshedAt ? formatTime(activitiesRefreshedAt) : "尚未刷新" }}</span>
+        <span>健康证据刷新：{{ evidenceRefreshedAt ? formatTime(evidenceRefreshedAt) : "尚未刷新" }}</span>
       </div>
       <div>
         <el-tag size="small" effect="plain">平台：{{ appliedRefreshFilter.platform || "全部" }}</el-tag>
         <el-tag size="small" effect="plain">类型：{{ appliedRefreshFilter.type || "全部" }}</el-tag>
         <el-tag size="small" effect="plain">状态：{{ appliedRefreshFilter.status ? statusText(appliedRefreshFilter.status) : "全部" }}</el-tag>
-        <el-tag size="small" effect="plain">未分组：{{ appliedRefreshFilter.include_ungrouped ? "包含" : "不包含" }}</el-tag>
+        <el-tag size="small" effect="plain">未分组：{{ appliedRefreshFilter.include_ungrouped ? "同步" : "不同步" }}</el-tag>
       </div>
     </div>
 
     <div class="dispatch-summary" v-if="hasCache">
-      <div><span>账号</span><strong>{{ accounts.length }}</strong></div>
+      <div><span>调度账号</span><strong>{{ includedAccounts.length }}</strong></div>
       <div><span>启用</span><strong class="summary-success">{{ activeCount }}</strong></div>
       <div><span>异常</span><strong class="summary-danger">{{ errorCount }}</strong></div>
       <div><span>当前筛选</span><strong>{{ filteredAccounts.length }}</strong></div>
@@ -886,6 +1344,32 @@ onBeforeUnmount(() => {
       </el-form-item>
     </el-form>
 
+    <section v-if="hasCache && excludedAccounts.length" class="dispatch-excluded-accounts">
+      <header>
+        <strong>已排除账号</strong>
+        <el-tag size="small" type="info" effect="plain">{{ excludedAccounts.length }}</el-tag>
+      </header>
+      <div v-for="account in excludedAccounts" :key="account.id" class="dispatch-excluded-account-row">
+        <div>
+          <strong>{{ account.name || `账号 ${account.id}` }}</strong>
+          <span>#{{ account.id }}</span>
+          <el-tag v-if="account.platform" size="small" effect="plain">{{ account.platform }}</el-tag>
+          <span v-if="account.type">{{ account.type }}</span>
+        </div>
+        <el-tooltip content="取消排除">
+          <el-button
+            circle
+            text
+            :icon="CircleClose"
+            :loading="isExcludedAccountUpdating(account)"
+            :disabled="dispatchMutationDisabled || policySaving"
+            :aria-label="`取消排除 ${account.name || account.id}`"
+            @click="restoreExcludedAccount(account)"
+          />
+        </el-tooltip>
+      </div>
+    </section>
+
     <div v-if="groupSections.length" class="dispatch-groups">
       <section v-for="section in groupSections" :key="section.key" class="dispatch-group">
         <header class="dispatch-group-head">
@@ -897,8 +1381,22 @@ onBeforeUnmount(() => {
             </el-tag>
             <span>{{ section.accounts.length }} 个账号</span>
             <span>OAuth {{ groupOAuthCount(section.accounts) }} 个</span>
+            <span v-if="section.group.id" class="group-probe-model" :title="groupProbeModel(section.group) || policyConfig.default_probe_model || 'Sub2API 默认'">
+              探活：{{ groupProbeModelText(section.group) }}
+            </span>
           </div>
           <div class="dispatch-group-actions">
+            <el-tooltip v-if="section.group.id" content="设置分组探活模型">
+              <el-button
+                circle
+                text
+                :icon="Setting"
+                :loading="isGroupProbeModelUpdating(section.group)"
+                :disabled="dispatchMutationDisabled || policySaving || isGroupProbeModelUpdating(section.group)"
+                :aria-label="`设置分组探活模型 ${section.group.name}`"
+                @click="configureGroupProbeModel(section.group)"
+              />
+            </el-tooltip>
             <el-button
               v-if="section.group.id"
               text
@@ -906,10 +1404,22 @@ onBeforeUnmount(() => {
               size="small"
               :icon="Hide"
               :loading="isUpdatingGroup(section.group)"
-              :disabled="controlsDisabled"
+              :disabled="dispatchMutationDisabled"
               @click="excludeGroup(section.group)"
             >
               排除
+            </el-button>
+            <el-button
+              v-if="section.key === 'ungrouped'"
+              text
+              type="danger"
+              size="small"
+              :icon="Hide"
+              :loading="excludingUngrouped"
+              :disabled="dispatchMutationDisabled"
+              @click="excludeUngroupedAccounts"
+            >
+              屏蔽
             </el-button>
             <el-tooltip :content="isCollapsed(section.key) ? '展开分组' : '收起分组'">
               <el-button
@@ -933,17 +1443,71 @@ onBeforeUnmount(() => {
                 <div class="dispatch-account-meta">
                   <el-tag size="small" effect="plain">{{ account.platform || "-" }}</el-tag>
                   <span>{{ account.type || "-" }}</span>
+                  <span class="probe-model-meta" :title="effectiveProbeModel(account) || 'Sub2API 默认'">
+                    探活：{{ probeModelText(account) }}
+                  </span>
+                </div>
+              </div>
+              <div v-if="probeTimelineRecords(account).length" class="probe-timeline" aria-label="最近探活时间轴">
+                <div class="probe-timeline-bars">
+                  <el-tooltip
+                    v-for="(record, index) in probeTimelineRecords(account)"
+                    :key="record.id || `${evidenceTime(record)}-${index}`"
+                    :content="probeTimelineDetail(record)"
+                    placement="top"
+                    popper-class="probe-timeline-tooltip"
+                  >
+                    <button
+                      type="button"
+                      class="probe-timeline-bar"
+                      :class="probeSucceeded(record) ? 'is-success' : 'is-failure'"
+                      :aria-label="probeTimelineDetail(record)"
+                    />
+                  </el-tooltip>
+                </div>
+                <div class="probe-timeline-labels" aria-hidden="true">
+                  <span>PAST</span>
+                  <span>NOW</span>
                 </div>
               </div>
               <div class="dispatch-account-state">
                 <el-tag :type="statusType(accountFilterStatus(account))" size="small">
                   {{ statusText(accountFilterStatus(account)) }}
                 </el-tag>
+                <el-tooltip content="设置探活模型">
+                  <el-button
+                    circle
+                    text
+                    :icon="Setting"
+                    :loading="isProbeModelUpdating(account)"
+                    :disabled="dispatchMutationDisabled || policySaving || isProbeModelUpdating(account)"
+                    :aria-label="`设置探活模型 ${account.name}`"
+                    @click="configureProbeModel(account)"
+                  />
+                </el-tooltip>
+                <el-tooltip content="排除账号">
+                  <el-button
+                    circle
+                    text
+                    type="danger"
+                    :icon="Hide"
+                    :loading="isExcludedAccountUpdating(account)"
+                    :disabled="dispatchMutationDisabled || policySaving || isExcludedAccountUpdating(account)"
+                    :aria-label="`排除账号 ${account.name}`"
+                    @click="excludeAccount(account)"
+                  />
+                </el-tooltip>
                 <el-switch
                   v-model="account.is_enabled"
+                  inline-prompt
+                  :width="78"
+                  :active-text="accountSwitchText(account, true)"
+                  :inactive-text="accountSwitchText(account, false)"
+                  :active-color="accountSwitchColor(account, true)"
+                  :inactive-color="accountSwitchColor(account, false)"
                   :loading="isUpdating(account.id)"
-                  :disabled="controlsDisabled || isUpdating(account.id)"
-                  :aria-label="`${account.name} 启用状态`"
+                  :disabled="dispatchMutationDisabled || isUpdating(account.id)"
+                  :aria-label="`${account.name} 调度状态：${accountSwitchText(account, account.is_enabled)}`"
                   @change="toggleAccount(account, $event)"
                 />
               </div>
@@ -959,6 +1523,10 @@ onBeforeUnmount(() => {
                 <el-tag :type="healthType(account.health_score ?? account.healthScore)" size="small">
                   {{ healthText(account) }}
                 </el-tag>
+                <div v-if="hasHealthComposition(account)" class="health-score-breakdown">
+                  <small><strong>短期</strong>{{ healthPartText(account.health_short_score ?? account.healthShortScore, 70) }}</small>
+                  <small><strong>长期</strong>{{ healthPartText(account.health_long_score ?? account.healthLongScore, 30) }}</small>
+                </div>
                 <small>{{ evidenceText(account) }}</small>
               </div>
               <div>
@@ -982,52 +1550,32 @@ onBeforeUnmount(() => {
               </p>
             </div>
 
-            <div v-if="account.recent_activity.length" class="activity-table">
-              <div class="activity-table-head" aria-hidden="true">
-                <span>结果</span><span>用户</span><span>模型</span><span>Token</span><span>费用</span><span>首字 / 总耗时</span><span>时间</span>
-              </div>
-              <div
-                v-for="activity in account.recent_activity"
-                :key="activity.id"
-                class="activity-row"
-                :class="{ 'is-error': activity.is_error || activity.isError }"
-              >
-                <div class="activity-cell activity-status">
-                  <span class="activity-label">结果</span>
-                  <el-tag :type="activity.is_error || activity.isError ? 'danger' : 'success'" size="small">
-                    {{ activity.is_error || activity.isError ? `错误 ${activity.status_code || activity.statusCode || ''}` : "正常" }}
+            <section class="short-evidence">
+              <header>
+                <strong>短期健康证据</strong>
+                <span>{{ shortEvidenceRecords(account).length }} 条</span>
+              </header>
+              <div v-if="shortEvidenceRecords(account).length" class="short-evidence-table">
+                <div class="short-evidence-head" aria-hidden="true">
+                  <span>结果</span><span>分数</span><span>类型</span><span>状态与信息</span><span>时间</span>
+                </div>
+                <div
+                  v-for="record in shortEvidenceRecords(account)"
+                  :key="record.id"
+                  class="short-evidence-row"
+                  :class="{ 'is-error': (record.source_kind || record.sourceKind) === 'error' }"
+                >
+                  <el-tag :type="(record.source_kind || record.sourceKind) === 'error' ? 'danger' : 'success'" size="small">
+                    {{ (record.source_kind || record.sourceKind) === "error" ? "错误" : "使用成功" }}
                   </el-tag>
+                  <strong>{{ Number(record.score).toFixed(1) }}</strong>
+                  <span>{{ evidenceCategoryText(record.category) }}</span>
+                  <span class="short-evidence-message" :title="evidenceDetail(record)">{{ evidenceDetail(record) }}</span>
+                  <span>{{ evidenceTime(record) }}</span>
                 </div>
-                <div class="activity-cell activity-user">
-                  <span class="activity-label">用户</span>
-                  <strong :title="userText(activity)">{{ userText(activity) }}</strong>
-                </div>
-                <div class="activity-cell activity-model">
-                  <span class="activity-label">模型</span>
-                  <strong :title="activity.model || '-'">{{ activity.model || "-" }}</strong>
-                </div>
-                <div class="activity-cell activity-number">
-                  <span class="activity-label">Token</span>
-                  <el-tooltip :content="tokenDetail(activity)"><strong>{{ tokenText(activity) }}</strong></el-tooltip>
-                </div>
-                <div class="activity-cell activity-number">
-                  <span class="activity-label">费用</span>
-                  <strong>{{ costText(activity) }}</strong>
-                </div>
-                <div class="activity-cell activity-duration">
-                  <span class="activity-label">首字 / 总耗时</span>
-                  <strong>{{ durationText(activity) }}</strong>
-                </div>
-                <div class="activity-cell activity-time">
-                  <span class="activity-label">时间</span>
-                  <strong>{{ activityTime(activity) }}</strong>
-                </div>
-                <p v-if="activity.is_error || activity.isError" class="activity-error-message" :title="activity.message">
-                  {{ activity.message || "请求失败" }}
-                </p>
               </div>
-            </div>
-            <el-empty v-else :image-size="42" description="暂无使用记录" />
+              <div v-else class="short-evidence-empty">短期证据中暂无使用成功或错误记录</div>
+            </section>
           </article>
         </div>
       </section>
@@ -1074,12 +1622,12 @@ onBeforeUnmount(() => {
             <el-option v-for="option in STATUS_FILTER_OPTIONS" :key="option.value" :label="option.label" :value="option.value" />
           </el-select>
         </el-form-item>
-        <el-form-item label="未分组账号">
+        <el-form-item label="同步未分组账号">
           <el-switch
             v-model="refreshForm.include_ungrouped"
             :disabled="startingJob"
-            active-text="包含"
-            inactive-text="不包含"
+            active-text="同步"
+            inactive-text="不同步"
           />
         </el-form-item>
         <div v-if="excludedGroups.length" class="dispatch-excluded-groups">
@@ -1105,7 +1653,7 @@ onBeforeUnmount(() => {
                 text
                 :icon="CircleClose"
                 :loading="isUpdatingGroup(excludedGroup)"
-                :disabled="controlsDisabled"
+                :disabled="dispatchMutationDisabled"
                 :aria-label="`取消排除 ${excludedGroupName(excludedGroup)}`"
                 @click="restoreExcludedGroup(excludedGroup)"
               />
@@ -1217,7 +1765,7 @@ onBeforeUnmount(() => {
 
 .policy-strategies {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
 }
 
 .policy-strategy {
@@ -1501,6 +2049,55 @@ onBeforeUnmount(() => {
   width: 100%;
 }
 
+.dispatch-excluded-accounts {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin-bottom: 16px;
+  overflow: hidden;
+}
+
+.dispatch-excluded-accounts > header,
+.dispatch-excluded-account-row {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.dispatch-excluded-accounts > header {
+  background: var(--panel-soft);
+  padding: 8px 12px;
+}
+
+.dispatch-excluded-accounts > header strong {
+  font-size: 12px;
+}
+
+.dispatch-excluded-account-row {
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+  gap: 10px;
+  min-height: 44px;
+  padding: 6px 8px 6px 12px;
+}
+
+.dispatch-excluded-account-row > div {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 8px;
+  min-width: 0;
+}
+
+.dispatch-excluded-account-row strong {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.dispatch-excluded-account-row span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .dispatch-reset-item {
   min-width: auto !important;
 }
@@ -1540,6 +2137,14 @@ onBeforeUnmount(() => {
   overflow-wrap: anywhere;
 }
 
+.group-probe-model {
+  color: var(--muted);
+  max-width: min(360px, 100%);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .dispatch-account-grid {
   display: grid;
   gap: 14px;
@@ -1559,7 +2164,7 @@ onBeforeUnmount(() => {
   border-bottom: 1px solid var(--line);
   display: flex;
   gap: 12px;
-  justify-content: space-between;
+  justify-content: flex-start;
   padding: 14px 16px;
 }
 
@@ -1584,8 +2189,73 @@ onBeforeUnmount(() => {
   overflow-wrap: anywhere;
 }
 
+.probe-model-meta {
+  max-width: min(320px, 100%);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.probe-timeline {
+  display: grid;
+  flex: none;
+  gap: 3px;
+  max-width: 100%;
+}
+
+.probe-timeline-bars {
+  align-items: center;
+  display: flex;
+  gap: 2px;
+  height: 22px;
+}
+
+.probe-timeline-bar {
+  appearance: none;
+  border: 0;
+  border-radius: 1px;
+  cursor: help;
+  flex: 0 0 4px;
+  height: 20px;
+  margin: 0;
+  padding: 0;
+  transition: height 120ms ease, filter 120ms ease;
+  width: 4px;
+}
+
+.probe-timeline-bar.is-success {
+  background: var(--success);
+}
+
+.probe-timeline-bar.is-failure {
+  background: var(--danger);
+}
+
+.probe-timeline-bar:hover,
+.probe-timeline-bar:focus-visible {
+  filter: brightness(0.86);
+  height: 22px;
+  outline: 2px solid var(--text);
+  outline-offset: 1px;
+}
+
+.probe-timeline-labels {
+  color: var(--muted);
+  display: flex;
+  font-size: 8px;
+  justify-content: space-between;
+  letter-spacing: 0;
+  line-height: 1;
+}
+
+:global(.probe-timeline-tooltip) {
+  max-width: min(420px, calc(100vw - 24px));
+  overflow-wrap: anywhere;
+}
+
 .dispatch-account-state {
   flex: none;
+  margin-left: auto;
 }
 
 .dispatch-account-error {
@@ -1597,77 +2267,84 @@ onBeforeUnmount(() => {
   padding: 9px 16px;
 }
 
-.activity-table {
-  overflow-x: auto;
+.short-evidence {
+  border-bottom: 1px solid var(--line);
 }
 
-.activity-table-head,
-.activity-row {
+.short-evidence > header {
+  align-items: center;
+  background: var(--panel);
+  display: flex;
+  justify-content: space-between;
+  padding: 9px 16px;
+}
+
+.short-evidence > header strong {
+  font-size: 12px;
+}
+
+.short-evidence > header span,
+.short-evidence-empty {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.short-evidence-table {
+  max-height: 330px;
+  overflow: auto;
+}
+
+.short-evidence-head,
+.short-evidence-row {
+  align-items: center;
   display: grid;
   gap: 8px;
-  grid-template-columns: 72px minmax(130px, 1.35fr) minmax(105px, 1fr) 86px 90px 118px 144px;
+  grid-template-columns: 68px 58px 90px minmax(180px, 1fr) 145px;
+  min-width: 620px;
+  padding: 7px 16px;
 }
 
-.activity-table-head {
+.short-evidence-head {
   background: var(--panel-soft);
   border-bottom: 1px solid var(--line);
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
-  min-width: 790px;
-  padding: 8px 12px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
 }
 
-.activity-row {
-  align-items: center;
+.short-evidence-row {
   border-bottom: 1px solid var(--line);
-  min-width: 790px;
-  padding: 9px 12px;
+  font-size: 12px;
 }
 
-.activity-row:last-child {
+.short-evidence-row:last-child {
   border-bottom: 0;
 }
 
-.activity-row.is-error {
-  background: #fffafa;
-}
-
-.activity-cell {
-  min-width: 0;
-}
-
-.activity-cell strong {
-  display: block;
-  font-size: 12px;
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.activity-number strong,
-.activity-duration strong,
-.activity-time strong {
+.short-evidence-row > strong {
   font-variant-numeric: tabular-nums;
 }
 
-.activity-error-message {
-  color: var(--danger);
-  font-size: 12px;
-  grid-column: 2 / -1;
-  margin: -2px 0 0;
+.short-evidence-row > span {
+  min-width: 0;
+}
+
+.short-evidence-row.is-error {
+  background: #fffafa;
+}
+
+.short-evidence-message {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.activity-label {
-  display: none;
-}
-
-.dispatch-account-card :deep(.el-empty) {
-  padding: 18px 0;
+.short-evidence-empty {
+  background: var(--panel-soft);
+  padding: 12px 16px;
 }
 
 .account-policy-metrics {
@@ -1705,6 +2382,24 @@ onBeforeUnmount(() => {
 
 .account-policy-metrics strong {
   font-size: 13px;
+}
+
+.health-score-breakdown {
+  display: grid;
+  gap: 1px;
+  margin-top: 2px;
+}
+
+.health-score-breakdown small {
+  font-variant-numeric: tabular-nums;
+}
+
+.health-score-breakdown strong {
+  color: var(--text);
+  display: inline-block;
+  font-size: 11px;
+  margin-right: 4px;
+  min-width: 24px;
 }
 
 .account-policy-metrics > p {
@@ -1853,50 +2548,5 @@ onBeforeUnmount(() => {
     border-right: 0;
   }
 
-  .activity-table {
-    overflow: visible;
-  }
-
-  .activity-table-head {
-    display: none;
-  }
-
-  .activity-row {
-    align-items: start;
-    gap: 10px 12px;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    min-width: 0;
-    padding: 12px;
-  }
-
-  .activity-cell strong {
-    font-size: 13px;
-    overflow: visible;
-    text-overflow: clip;
-    white-space: normal;
-    word-break: break-word;
-  }
-
-  .activity-status,
-  .activity-user,
-  .activity-model,
-  .activity-time,
-  .activity-error-message {
-    grid-column: 1 / -1;
-  }
-
-  .activity-label {
-    color: var(--muted);
-    display: block;
-    font-size: 11px;
-    margin-bottom: 3px;
-  }
-
-  .activity-error-message {
-    margin: 0;
-    overflow: visible;
-    text-overflow: clip;
-    white-space: normal;
-  }
 }
 </style>
