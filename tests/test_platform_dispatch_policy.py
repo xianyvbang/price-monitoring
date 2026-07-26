@@ -1046,3 +1046,60 @@ async def test_price_safe_recovery_can_override_manual_close_but_only_once(tmp_p
     assert client.updates == [(1, "schedulable", True)]
     assert "成本来源：source / pro" in action
     assert "覆盖人工关闭状态：是" in action
+
+
+@pytest.mark.asyncio
+async def test_dispatch_refreshes_local_rates_and_ignores_excluded_groups(tmp_path):
+    db = make_db(tmp_path)
+    accounts = [
+        {
+            "id": 1,
+            "name": "mixed-groups",
+            "status": "active",
+            "schedulable": True,
+            "group_ids": [8, 9],
+        }
+    ]
+    prepare_cache(db, accounts)
+    db.exclude_platform_dispatch_group("https://sub.example", 8, "excluded-low", "openai")
+    balance_account_id = db.upsert_account(
+        {
+            "platform": "sub2Api",
+            "name": "balance-source",
+            "base_url": "https://balance.example",
+            "api_key": "sk-test",
+        }
+    )
+    db.replace_account_monitor_groups(
+        balance_account_id,
+        [{"group_id": "pro", "effective_rate_multiplier": 1}],
+    )
+    monitor_group_id = int(db.list_monitor_groups(balance_account_id)[0]["id"])
+    db.update_monitor_group_snapshot(
+        monitor_group_id,
+        {"group_id": "pro", "effective_rate_multiplier": 1},
+        datetime.now(timezone.utc).isoformat(),
+    )
+    db.save_platform_dispatch_cost_binding("https://sub.example", 1, monitor_group_id)
+    db.save_platform_dispatch_policy(
+        {**POLICY_DEFAULTS, "enabled": True, "price_protection_enabled": True},
+        "https://sub.example",
+    )
+    client = PolicyClient(accounts)
+
+    async def list_groups(**kwargs):
+        return [
+            {"id": 8, "name": "excluded-low", "platform": "openai", "rate_multiplier": 0.5},
+            {"id": 9, "name": "included-safe", "platform": "openai", "rate_multiplier": 1.2},
+        ]
+
+    client.list_groups = list_groups
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+
+    summary = await scheduler.run_once()
+    cache = db.get_platform_dispatch_cache()
+
+    assert not any(update == (1, "schedulable", False) for update in client.updates)
+    assert summary["price_unsafe_accounts"] == 0
+    assert cache["accounts"][0]["group_ids"] == [9]
+    assert [(group["id"], group["rate_multiplier"]) for group in cache["groups"]] == [(9, 1.2)]

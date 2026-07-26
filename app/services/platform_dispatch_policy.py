@@ -911,8 +911,19 @@ class PlatformDispatchPolicyScheduler:
             client.list_accounts(platform=platform or None, account_type=account_type or None),
             client.list_groups(platform=platform or None),
         )
+        excluded_group_ids = {
+            int(group["id"])
+            for group in self.db.list_platform_dispatch_excluded_groups(site_url)
+        }
+        groups = [
+            group
+            for group in groups
+            if isinstance(group, dict)
+            and _optional_int(group.get("id"))
+            and int(group["id"]) not in excluded_group_ids
+        ]
         accounts = {
-            int(account["id"]): account
+            int(account["id"]): _without_excluded_account_groups(account, excluded_group_ids)
             for account in remote_accounts
             if isinstance(account, dict) and _optional_int(account.get("id")) in managed_ids
         }
@@ -944,6 +955,7 @@ class PlatformDispatchPolicyScheduler:
         availability_by_id = _keyed_account_map((availability_data or {}).get("account"))
         states = {item["account_id"]: item for item in self.db.list_platform_dispatch_account_states(site_url)}
         public_groups = [public_dispatch_group(group) for group in groups]
+        self.db.update_platform_dispatch_cached_groups(site_url, public_groups)
         group_rates = {
             int(group["id"]): _optional_float(group.get("rate_multiplier"))
             for group in groups
@@ -1819,6 +1831,33 @@ def _account_group_ids(account: dict[str, Any]) -> list[int]:
         if parsed and parsed not in result:
             result.append(parsed)
     return result
+
+
+def _without_excluded_account_groups(
+    account: dict[str, Any], excluded_group_ids: set[int]
+) -> dict[str, Any]:
+    if not excluded_group_ids:
+        return account
+    filtered = dict(account)
+    group_ids = [
+        group_id
+        for group_id in _account_group_ids(account)
+        if group_id not in excluded_group_ids
+    ]
+    filtered.pop("group_id", None)
+    filtered.pop("groupId", None)
+    filtered.pop("plans", None)
+    filtered["group_ids"] = group_ids
+    filtered["groupIds"] = group_ids
+    if isinstance(account.get("groups"), list):
+        filtered["groups"] = [
+            group
+            for group in account["groups"]
+            if not isinstance(group, dict)
+            or _optional_int(group.get("id", group.get("group_id", group.get("groupId"))))
+            not in excluded_group_ids
+        ]
+    return filtered
 
 
 def _account_pool_keys(account: dict[str, Any]) -> list[int | str]:

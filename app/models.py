@@ -928,6 +928,8 @@ class Database:
                     cached["error_message"] = error_message
                     cached["errorMessage"] = error_message
                 aliases = {
+                    "group_ids": "groupIds",
+                    "groups": "groups",
                     "concurrency": "concurrency",
                     "load_factor": "loadFactor",
                     "schedulable": "schedulable",
@@ -959,6 +961,24 @@ class Database:
                 (json.dumps(accounts, ensure_ascii=False, separators=(",", ":")),),
             )
         return True
+
+    def update_platform_dispatch_cached_groups(
+        self, source_site_url: str, groups: list[dict[str, Any]]
+    ) -> bool:
+        site_url = str(source_site_url or "").strip().rstrip("/")
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE platform_dispatch_cache
+                SET groups_json = ?
+                WHERE id = 1 AND source_site_url = ?
+                """,
+                (
+                    json.dumps(groups, ensure_ascii=False, separators=(",", ":")),
+                    site_url,
+                ),
+            )
+        return cursor.rowcount == 1
 
     def list_platform_dispatch_cost_source_options(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
