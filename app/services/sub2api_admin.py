@@ -278,9 +278,6 @@ class Sub2ApiAdminClient:
             "recentLimit": recent_limit,
         }
 
-    async def update_account_status(self, account_id: int, enabled: bool) -> dict[str, Any]:
-        return await self.update_account_fields(account_id, {"status": "active" if enabled else "inactive"})
-
     async def update_account_schedulable(self, account_id: int, schedulable: bool) -> dict[str, Any]:
         payload = await self._request(
             "POST",

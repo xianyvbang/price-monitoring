@@ -266,10 +266,10 @@ class PolicyClient:
         self.realtime_reads += 1
         return {"account": {}}
 
-    async def update_account_status(self, account_id, enabled):
-        self.updates.append((account_id, "status", "active" if enabled else "inactive"))
+    async def update_account_schedulable(self, account_id, schedulable):
+        self.updates.append((account_id, "schedulable", schedulable))
         account = next(item for item in self.accounts if item["id"] == account_id)
-        account["status"] = "active" if enabled else "inactive"
+        account["schedulable"] = schedulable
         return dict(account)
 
     async def update_account_fields(self, account_id, fields):
@@ -473,9 +473,9 @@ async def test_policy_change_can_rearm_timer_without_starting_an_automatic_round
 
 
 @pytest.mark.asyncio
-async def test_minimum_pool_recovers_with_all_subpolicies_off(tmp_path):
+async def test_minimum_pool_recovers_manually_unschedulable_account_with_all_subpolicies_off(tmp_path):
     db = make_db(tmp_path)
-    accounts = [{"id": 1, "name": "one", "status": "inactive", "concurrency": 20}]
+    accounts = [{"id": 1, "name": "one", "status": "active", "schedulable": False, "concurrency": 20}]
     prepare_cache(db, accounts)
     db.save_platform_dispatch_policy({**POLICY_DEFAULTS, "enabled": True}, "https://sub.example")
     client = PolicyClient(accounts)
@@ -484,8 +484,24 @@ async def test_minimum_pool_recovers_with_all_subpolicies_off(tmp_path):
     summary = await scheduler.run_once()
 
     assert client.probes == [1]
-    assert client.updates == [(1, "status", "active")]
-    assert summary["status_action"].startswith("启用 one")
+    assert client.updates == [(1, "schedulable", True)]
+    assert summary["scheduling_action"].startswith("开启调度 one")
+    assert summary["status_action"] == summary["scheduling_action"]
+
+
+@pytest.mark.asyncio
+async def test_minimum_pool_does_not_reactivate_inactive_account(tmp_path):
+    db = make_db(tmp_path)
+    accounts = [{"id": 1, "name": "one", "status": "inactive", "schedulable": False, "concurrency": 20}]
+    prepare_cache(db, accounts)
+    db.save_platform_dispatch_policy({**POLICY_DEFAULTS, "enabled": True}, "https://sub.example")
+    client = PolicyClient(accounts)
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+
+    summary = await scheduler.run_once()
+
+    assert client.updates == []
+    assert summary["scheduling_action"] == ""
 
 
 @pytest.mark.asyncio
@@ -566,7 +582,7 @@ async def test_manual_refresh_and_automatic_scoring_share_evidence_collection(tm
 
 
 @pytest.mark.asyncio
-async def test_status_policy_switches_only_one_account_per_round(tmp_path):
+async def test_schedulable_policy_switches_only_one_account_per_round(tmp_path):
     db = make_db(tmp_path)
     accounts = {
         1: {"id": 1, "name": "one", "status": "active"},
@@ -582,12 +598,12 @@ async def test_status_policy_switches_only_one_account_per_round(tmp_path):
         for account_id in accounts
     }
 
-    await scheduler._apply_status_policy(
+    await scheduler._apply_schedulable_policy(
         client, client.site_url, accounts, health, [1, 2], {**POLICY_DEFAULTS, "enabled": True}, 180
     )
 
     assert len(client.updates) == 1
-    assert client.updates[0][1:] == ("status", "inactive")
+    assert client.updates[0][1:] == ("schedulable", False)
 
 
 @pytest.mark.asyncio

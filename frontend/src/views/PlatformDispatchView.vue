@@ -381,7 +381,7 @@ async function runPolicyNow() {
     const payload = await api.runPlatformDispatchPolicy();
     applyPolicyPayload(payload);
     await loadDispatch();
-    ElMessage.success(payload.summary?.status_action || payload.summary?.message || "自动调度轮次已完成");
+    ElMessage.success(payload.summary?.scheduling_action || payload.summary?.status_action || payload.summary?.message || "自动调度轮次已完成");
   } catch (error) {
     ElMessage.error(error.message || "执行自动调度失败");
   } finally {
@@ -1212,8 +1212,8 @@ onBeforeUnmount(() => {
                 {{ policyStatusText }}
               </el-tag>
             </div>
-            <p v-if="policyAutoRunning && policyConfig.enabled">正在评估并更新账号，排除、同步和账号启停暂不可用</p>
-            <p v-else-if="policyAutoRunning">正在读取请求记录并计算健康评分，排除、同步和账号启停暂不可用</p>
+            <p v-if="policyAutoRunning && policyConfig.enabled">正在评估并更新账号，排除、同步和账号调度开关暂不可用</p>
+            <p v-else-if="policyAutoRunning">正在读取请求记录并计算健康评分，排除、同步和账号调度开关暂不可用</p>
             <p v-else-if="policyConfig.enabled">自动调度已开启，等待后台执行下一轮</p>
             <p v-else-if="policyConfig.auto_scoring_enabled">自动评分已开启，后台仅获取证据并计算健康分</p>
             <p v-else>自动评分和自动调度均已关闭</p>
@@ -1253,9 +1253,9 @@ onBeforeUnmount(() => {
         <span v-if="!policyConfig.auto_scoring_enabled">自动评分和自动调度均关闭；后台不再读取证据或重算健康分。</span>
         <span v-else-if="!policyConfig.enabled">自动评分开启：后台增量读取请求证据、按到期规则探活并计算健康分，不修改 Sub2API 账号状态或调度参数。</span>
         <span v-else-if="!policyConfig.return_pool_enabled && !policyConfig.smart_expand_enabled && !policyConfig.load_factor_enabled && !policyConfig.price_protection_enabled">
-          四项可选策略均关闭；仍会在 Sub2API 停用异常账号。健康可用账号低于 {{ policyConfig.minimum_available_accounts }} 个时，会将符合条件的 Sub2API 已停用账号逐个启用。
+          四项可选策略均关闭；仍会在 Sub2API 关闭异常账号的调度。健康可用账号低于 {{ policyConfig.minimum_available_accounts }} 个时，会将符合条件的调度关闭账号逐个重新开启。
         </span>
-        <span v-else>每 {{ policyConfig.probe_interval_seconds }} 秒评估托管账号；每轮最多在 Sub2API 停用或启用 1 个账号，其余策略独立执行。</span>
+        <span v-else>每 {{ policyConfig.probe_interval_seconds }} 秒评估托管账号；每轮最多在 Sub2API 关闭或开启 1 个账号的调度，其余策略独立执行。</span>
       </div>
 
       <div class="policy-strategies">
@@ -1270,7 +1270,7 @@ onBeforeUnmount(() => {
         </label>
         <label class="policy-strategy">
           <el-switch v-model="policyConfig.return_pool_enabled" />
-          <span><strong>健康回池</strong><small>健康可用账号不足时，逐步启用 Sub2API 已停用账号，直至达到 {{ policyConfig.healthy_target_accounts }} 个</small></span>
+          <span><strong>健康回池</strong><small>健康可用账号不足时，逐步重新开启 Sub2API 账号调度，直至达到 {{ policyConfig.healthy_target_accounts }} 个</small></span>
         </label>
         <label class="policy-strategy">
           <el-switch v-model="policyConfig.smart_expand_enabled" />
@@ -1343,7 +1343,7 @@ onBeforeUnmount(() => {
       </details>
 
       <div class="policy-rules">
-        <p><strong>Sub2API 账号启停</strong><span>认证、余额和用量上限异常时立即在 Sub2API 停用账号；最近 5 次出现 3 次异常且评分低于 60，或最近 10 次有 5 次首字超过 15 秒时也会停用。达到回池条件时，再将 Sub2API 已停用账号逐个启用。</span></p>
+        <p><strong>Sub2API 调度开关</strong><span>认证、余额和用量上限异常时立即关闭账号调度；最近 5 次出现 3 次异常且评分低于 60，或最近 10 次有 5 次首字超过 15 秒时也会关闭。达到回池条件时，可重新开启任何健康达标的调度关闭账号，包括人员手动关闭的账号。</span></p>
         <p><strong>系统计算</strong><span>短期为最新证据与前 9 次均值各 50%，最终评分为短期 70% + 最近 60 次均值 30%。</span></p>
       </div>
 

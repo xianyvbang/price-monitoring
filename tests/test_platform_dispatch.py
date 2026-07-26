@@ -457,24 +457,6 @@ async def test_sub2api_admin_list_accounts_reads_all_pages(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_sub2api_admin_updates_account_status(monkeypatch):
-    DummyAsyncClient.requests = []
-    DummyAsyncClient.responses = [
-        DummyResponse({"code": 0, "data": {"id": 9, "name": "remote", "status": "inactive"}})
-    ]
-    monkeypatch.setattr("app.services.sub2api_admin.httpx.AsyncClient", DummyAsyncClient)
-
-    account = await Sub2ApiAdminClient("https://sub.example/", "admin-key").update_account_status(9, False)
-
-    assert account["status"] == "inactive"
-    assert account["is_enabled"] is False
-    request = DummyAsyncClient.requests[0]
-    assert request["method"] == "PUT"
-    assert request["url"] == "https://sub.example/api/v1/admin/accounts/9"
-    assert request["json"] == {"status": "inactive"}
-
-
-@pytest.mark.asyncio
 async def test_sub2api_admin_updates_account_schedulable(monkeypatch):
     DummyAsyncClient.requests = []
     DummyAsyncClient.responses = [

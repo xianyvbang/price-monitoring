@@ -826,11 +826,11 @@ class PlatformDispatchPolicyScheduler:
             if progress:
                 progress("scoring", processed, len(accounts))
 
-        status_action = ""
+        scheduling_action = ""
         if progress:
             progress("dispatch" if config["enabled"] else "finalizing", len(accounts), len(accounts))
         if config["enabled"]:
-            status_action = await self._apply_status_policy(
+            scheduling_action = await self._apply_schedulable_policy(
                 client, site_url, accounts, health, available_ids, config, ttl_seconds
             )
             if config["smart_expand_enabled"] and concurrency_data is not None:
@@ -850,7 +850,8 @@ class PlatformDispatchPolicyScheduler:
             "current_concurrency": total_current,
             "capacity": total_capacity,
             "configured_concurrency": int(config["total_concurrency"]),
-            "status_action": status_action,
+            "scheduling_action": scheduling_action,
+            "status_action": scheduling_action,
             "warnings": list(dict.fromkeys(warnings)),
             "groups": len(public_groups),
         }
@@ -1104,15 +1105,14 @@ class PlatformDispatchPolicyScheduler:
         for account_id, account in accounts.items():
             item = health[account_id]
             latest_probe = _parse_datetime(item.get("latest_probe_at"))
-            inactive = str(account.get("status") or "inactive") != "active"
-            if force or inactive or latest_probe is None or latest_probe < now - timedelta(seconds=probe_interval_seconds):
+            if force or latest_probe is None or latest_probe < now - timedelta(seconds=probe_interval_seconds):
                 due.append(account_id)
         if progress:
             progress("probe", 0, len(due))
         await asyncio.gather(*(probe(account_id) for account_id in due))
         return results
 
-    async def _apply_status_policy(
+    async def _apply_schedulable_policy(
         self,
         client: Sub2ApiAdminClient,
         site_url: str,
@@ -1125,7 +1125,7 @@ class PlatformDispatchPolicyScheduler:
         fatal: list[tuple[int, str]] = []
         threshold: list[tuple[int, str]] = []
         for account_id, account in accounts.items():
-            if str(account.get("status") or "inactive") not in {"active", "error"}:
+            if str(account.get("status") or "inactive") != "active" or account.get("schedulable") is False:
                 continue
             item = health[account_id]
             evidence = item["evidence"]
@@ -1170,12 +1170,12 @@ class PlatformDispatchPolicyScheduler:
                     item = health[account_id]
                     probe_at = _parse_datetime(item.get("latest_probe_success_at"))
                     if (
-                        str(account.get("status") or "inactive") == "inactive"
+                        str(account.get("status") or "inactive") == "active"
+                        and account.get("schedulable") is False
                         and item["evidence_fresh"]
                         and (item["health_score"] or 0) >= float(config["health_threshold"])
                         and probe_at is not None
                         and probe_at >= now - timedelta(seconds=ttl_seconds)
-                        and account.get("schedulable") is not False
                     ):
                         recovery.append(account_id)
                 if recovery:
@@ -1183,17 +1183,36 @@ class PlatformDispatchPolicyScheduler:
                     candidate = (account_id, True, reason)
         if candidate is None:
             return ""
-        account_id, enabled, reason = candidate
+        account_id, schedulable, reason = candidate
         account = accounts[account_id]
+        old_value = account.get("schedulable") is not False
         try:
-            updated = await client.update_account_status(account_id, enabled)
+            updated = await client.update_account_schedulable(account_id, schedulable)
         except Exception as exc:
-            self._record_action(site_url, account, "enable" if enabled else "disable", "status", account.get("status"), "active" if enabled else "inactive", reason, exc)
+            self._record_action(
+                site_url,
+                account,
+                "enable_scheduling" if schedulable else "disable_scheduling",
+                "schedulable",
+                old_value,
+                schedulable,
+                reason,
+                exc,
+            )
             return ""
-        account["status"] = "active" if enabled else "inactive"
+        account.update(updated)
+        account["schedulable"] = schedulable
         self.db.update_platform_dispatch_cached_account(updated)
-        self._record_action(site_url, account, "enable" if enabled else "disable", "status", "inactive" if enabled else "active", account["status"], reason)
-        return f"{'启用' if enabled else '停用'} {account.get('name') or account_id}: {reason}"
+        self._record_action(
+            site_url,
+            account,
+            "enable_scheduling" if schedulable else "disable_scheduling",
+            "schedulable",
+            old_value,
+            schedulable,
+            reason,
+        )
+        return f"{'开启调度' if schedulable else '关闭调度'} {account.get('name') or account_id}: {reason}"
 
     async def _apply_concurrency_policy(
         self,
@@ -1209,6 +1228,7 @@ class PlatformDispatchPolicyScheduler:
             account_id
             for account_id, account in accounts.items()
             if str(account.get("status") or "") == "active"
+            and account.get("schedulable") is not False
             and health[account_id]["evidence_fresh"]
             and (health[account_id]["health_score"] or 0) >= float(config["health_threshold"])
         ]
@@ -1253,6 +1273,7 @@ class PlatformDispatchPolicyScheduler:
             account_id
             for account_id, account in accounts.items()
             if str(account.get("status") or "") == "active"
+            and account.get("schedulable") is not False
             and health[account_id]["evidence_fresh"]
             and (health[account_id]["health_score"] or 0) >= float(config["health_threshold"])
         ]
