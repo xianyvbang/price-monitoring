@@ -919,10 +919,10 @@ async function toggleAccount(account, enabled) {
     account.filterStatus = account.filter_status;
     account.is_enabled = updated.is_enabled ?? updated.isEnabled ?? enabled;
     account.error_message = updated.error_message || updated.errorMessage || "";
-    ElMessage.success(`${account.name} 已${enabled ? "启用" : "停用"}`);
+    ElMessage.success(`${account.name} 已在 Sub2API ${enabled ? "启用" : "停用"}`);
   } catch (error) {
     account.is_enabled = !enabled;
-    ElMessage.error(error.message || "更新账号状态失败");
+    ElMessage.error(error.message || "更新 Sub2API 账号状态失败");
   } finally {
     const next = new Set(updatingIds.value);
     next.delete(account.id);
@@ -1246,11 +1246,11 @@ onBeforeUnmount(() => {
       <div class="policy-behavior" :class="{ 'is-active': policyConfig.enabled || policyConfig.auto_scoring_enabled }">
         <strong>当前行为</strong>
         <span v-if="!policyConfig.auto_scoring_enabled">自动评分和自动调度均关闭；后台不再读取证据或重算健康分。</span>
-        <span v-else-if="!policyConfig.enabled">自动评分开启：后台增量读取请求证据、按到期规则探活并计算健康分，不写远端。</span>
+        <span v-else-if="!policyConfig.enabled">自动评分开启：后台增量读取请求证据、按到期规则探活并计算健康分，不修改 Sub2API 账号状态或调度参数。</span>
         <span v-else-if="!policyConfig.return_pool_enabled && !policyConfig.smart_expand_enabled && !policyConfig.load_factor_enabled && !policyConfig.price_protection_enabled">
-          四项策略均关闭；仍会自动停用异常账号，并在可用池低于 {{ policyConfig.minimum_available_accounts }} 个时回池。
+          四项可选策略均关闭；仍会在 Sub2API 停用异常账号。健康可用账号低于 {{ policyConfig.minimum_available_accounts }} 个时，会将符合条件的 Sub2API 已停用账号逐个启用。
         </span>
-        <span v-else>每 {{ policyConfig.probe_interval_seconds }} 秒评估托管账号；每轮最多切换 1 个账号状态，其余策略独立执行。</span>
+        <span v-else>每 {{ policyConfig.probe_interval_seconds }} 秒评估托管账号；每轮最多在 Sub2API 停用或启用 1 个账号，其余策略独立执行。</span>
       </div>
 
       <div class="policy-strategies">
@@ -1265,7 +1265,7 @@ onBeforeUnmount(() => {
         </label>
         <label class="policy-strategy">
           <el-switch v-model="policyConfig.return_pool_enabled" />
-          <span><strong>健康回池</strong><small>将可用池恢复到 {{ policyConfig.healthy_target_accounts }} 个</small></span>
+          <span><strong>健康回池</strong><small>健康可用账号不足时，逐步启用 Sub2API 已停用账号，直至达到 {{ policyConfig.healthy_target_accounts }} 个</small></span>
         </label>
         <label class="policy-strategy">
           <el-switch v-model="policyConfig.smart_expand_enabled" />
@@ -1283,7 +1283,11 @@ onBeforeUnmount(() => {
 
       <div class="policy-runtime">
         <div><span>托管账号</span><strong>{{ policySummary.managed_accounts ?? accounts.length }}</strong></div>
-        <div><span>可用池</span><strong>{{ policySummary.available_accounts ?? "-" }} / {{ policyConfig.healthy_target_accounts }}</strong></div>
+        <div>
+          <span>Sub2API 当前健康可用</span>
+          <strong>{{ policySummary.available_accounts == null ? "尚无数据" : `${policySummary.available_accounts} 个` }}</strong>
+          <small>最低保障 {{ policyConfig.minimum_available_accounts }} 个 · 健康回池目标 {{ policyConfig.healthy_target_accounts }} 个</small>
+        </div>
         <div><span>实时并发</span><strong>{{ metricText(policySummary.current_concurrency) }} / {{ metricText(policySummary.capacity) }}</strong></div>
         <div><span>最近轮次</span><strong>{{ policyRuntime.last_finished_at ? formatTime(policyRuntime.last_finished_at) : "尚未执行" }}</strong></div>
       </div>
@@ -1296,8 +1300,8 @@ onBeforeUnmount(() => {
             <div class="policy-input-grid">
               <label><span>调度间隔（秒）</span><el-input-number v-model="policyConfig.probe_interval_seconds" :min="5" :step="5" /></label>
               <label><span>健康门槛</span><el-input-number v-model="policyConfig.health_threshold" :min="0" :max="100" /></label>
-              <label><span>最低可用账号</span><el-input-number v-model="policyConfig.minimum_available_accounts" :min="1" /></label>
-              <label><span>健康目标账号</span><el-input-number v-model="policyConfig.healthy_target_accounts" :min="1" /></label>
+              <label><span>最低保障账号数</span><el-input-number v-model="policyConfig.minimum_available_accounts" :min="1" /></label>
+              <label><span>健康回池目标数</span><el-input-number v-model="policyConfig.healthy_target_accounts" :min="1" /></label>
               <label><span>证据有效倍数</span><el-input-number v-model="policyConfig.evidence_ttl_multiplier" :min="1" /></label>
               <label><span>默认探活模型</span><el-input v-model="policyConfig.default_probe_model" clearable placeholder="留空使用 Sub2API 默认模型" /></label>
             </div>
@@ -1334,7 +1338,7 @@ onBeforeUnmount(() => {
       </details>
 
       <div class="policy-rules">
-        <p><strong>默认生效</strong><span>认证、余额和用量上限立即停用；3/5 异常且评分低于 60，或 5/10 首字超过 15 秒时停用。</span></p>
+        <p><strong>Sub2API 账号启停</strong><span>认证、余额和用量上限异常时立即在 Sub2API 停用账号；最近 5 次出现 3 次异常且评分低于 60，或最近 10 次有 5 次首字超过 15 秒时也会停用。达到回池条件时，再将 Sub2API 已停用账号逐个启用。</span></p>
         <p><strong>系统计算</strong><span>短期为最新证据与前 9 次均值各 50%，最终评分为短期 70% + 最近 60 次均值 30%。</span></p>
       </div>
 
@@ -1596,19 +1600,21 @@ onBeforeUnmount(() => {
                     @click="excludeAccount(account)"
                   />
                 </el-tooltip>
-                <el-switch
-                  v-model="account.is_enabled"
-                  inline-prompt
-                  :width="78"
-                  :active-text="accountSwitchText(account, true)"
-                  :inactive-text="accountSwitchText(account, false)"
-                  :active-color="accountSwitchColor(account, true)"
-                  :inactive-color="accountSwitchColor(account, false)"
-                  :loading="isUpdating(account.id)"
-                  :disabled="dispatchMutationDisabled || isUpdating(account.id)"
-                  :aria-label="`${account.name} 调度状态：${accountSwitchText(account, account.is_enabled)}`"
-                  @change="toggleAccount(account, $event)"
-                />
+                <el-tooltip content="直接修改该账号在 Sub2API 中的启用/停用状态">
+                  <el-switch
+                    v-model="account.is_enabled"
+                    inline-prompt
+                    :width="78"
+                    :active-text="accountSwitchText(account, true)"
+                    :inactive-text="accountSwitchText(account, false)"
+                    :active-color="accountSwitchColor(account, true)"
+                    :inactive-color="accountSwitchColor(account, false)"
+                    :loading="isUpdating(account.id)"
+                    :disabled="dispatchMutationDisabled || isUpdating(account.id)"
+                    :aria-label="`${account.name} 的 Sub2API 账号状态：${accountSwitchText(account, account.is_enabled)}`"
+                    @change="toggleAccount(account, $event)"
+                  />
+                </el-tooltip>
               </div>
             </header>
 
@@ -1937,6 +1943,11 @@ onBeforeUnmount(() => {
 }
 
 .policy-runtime span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.policy-runtime small {
   color: var(--muted);
   font-size: 11px;
 }
