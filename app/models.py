@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import calendar
 import hashlib
+import json
 import os
 import sqlite3
 from contextlib import contextmanager
@@ -241,6 +242,130 @@ class Database:
                     checked_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS platform_dispatch_cache (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    source_site_url TEXT NOT NULL,
+                    accounts_json TEXT NOT NULL,
+                    groups_json TEXT NOT NULL,
+                    warnings_json TEXT NOT NULL,
+                    refresh_platform TEXT NOT NULL DEFAULT '',
+                    refresh_type TEXT NOT NULL DEFAULT '',
+                    refresh_status TEXT NOT NULL DEFAULT '',
+                    refresh_include_ungrouped INTEGER NOT NULL DEFAULT 1,
+                    recent_limit INTEGER NOT NULL DEFAULT 6,
+                    activities_refreshed_at TEXT,
+                    refreshed_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS platform_dispatch_jobs (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    job_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    phase TEXT NOT NULL,
+                    current_page INTEGER NOT NULL DEFAULT 0,
+                    total_pages INTEGER NOT NULL DEFAULT 0,
+                    processed INTEGER NOT NULL DEFAULT 0,
+                    total INTEGER NOT NULL DEFAULT 0,
+                    percent INTEGER NOT NULL DEFAULT 0,
+                    filter_json TEXT NOT NULL DEFAULT '{}',
+                    source_site_url TEXT NOT NULL DEFAULT '',
+                    message TEXT NOT NULL DEFAULT '',
+                    error TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS platform_dispatch_excluded_groups (
+                    source_site_url TEXT NOT NULL,
+                    group_id INTEGER NOT NULL,
+                    name TEXT NOT NULL DEFAULT '',
+                    platform TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (source_site_url, group_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS platform_dispatch_policy (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    config_json TEXT NOT NULL,
+                    source_site_url TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'idle',
+                    last_started_at TEXT,
+                    last_finished_at TEXT,
+                    last_error TEXT NOT NULL DEFAULT '',
+                    summary_json TEXT NOT NULL DEFAULT '{}',
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS platform_dispatch_evidence (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_site_url TEXT NOT NULL,
+                    account_id INTEGER NOT NULL,
+                    source_kind TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    score REAL NOT NULL,
+                    status_code INTEGER,
+                    first_token_ms REAL,
+                    is_timeout INTEGER NOT NULL DEFAULT 0,
+                    is_probe_success INTEGER NOT NULL DEFAULT 0,
+                    message TEXT NOT NULL DEFAULT '',
+                    occurred_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(source_site_url, source_kind, source_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS platform_dispatch_account_state (
+                    source_site_url TEXT NOT NULL,
+                    account_id INTEGER NOT NULL,
+                    name TEXT NOT NULL DEFAULT '',
+                    health_score REAL,
+                    short_score REAL,
+                    long_score REAL,
+                    evidence_count INTEGER NOT NULL DEFAULT 0,
+                    evidence_at TEXT,
+                    evidence_fresh INTEGER NOT NULL DEFAULT 0,
+                    latest_probe_success_at TEXT,
+                    decision_reason TEXT NOT NULL DEFAULT '',
+                    target_concurrency INTEGER,
+                    target_load_factor INTEGER,
+                    baseline_load_factor INTEGER,
+                    last_concurrency_write_at TEXT,
+                    last_load_factor_write_at TEXT,
+                    last_action_at TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (source_site_url, account_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS platform_dispatch_cursors (
+                    source_site_url TEXT NOT NULL,
+                    account_id INTEGER NOT NULL,
+                    source_kind TEXT NOT NULL,
+                    latest_source_id TEXT NOT NULL DEFAULT '',
+                    latest_occurred_at TEXT,
+                    initialized_at TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (source_site_url, account_id, source_kind)
+                );
+
+                CREATE TABLE IF NOT EXISTS platform_dispatch_actions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_site_url TEXT NOT NULL,
+                    account_id INTEGER,
+                    account_name TEXT NOT NULL DEFAULT '',
+                    action TEXT NOT NULL,
+                    field TEXT NOT NULL DEFAULT '',
+                    old_value TEXT,
+                    new_value TEXT,
+                    reason TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL,
+                    error TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_app_logs_created_at ON app_logs(created_at);
                 CREATE INDEX IF NOT EXISTS idx_reminders_due
                 ON reminders(is_sent, remind_at);
@@ -252,6 +377,10 @@ class Database:
                 ON query_records(account_id, checked_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_opencode_go_usage_account_checked_at
                 ON opencode_go_usage_records(account_id, checked_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_platform_dispatch_evidence_account_time
+                ON platform_dispatch_evidence(source_site_url, account_id, occurred_at DESC, id DESC);
+                CREATE INDEX IF NOT EXISTS idx_platform_dispatch_actions_created
+                ON platform_dispatch_actions(created_at DESC, id DESC);
                 """
             )
             self._migrate_smtp_nullable(conn)
@@ -270,6 +399,7 @@ class Database:
             self._migrate_opencode_go_cpa_state(conn)
             self._migrate_opencode_go_referral(conn)
             self._migrate_group_rate_records_monitor_group(conn)
+            self._migrate_platform_dispatch_cache(conn)
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_group_rate_records_monitor_checked_at
@@ -523,6 +653,17 @@ class Database:
         if "monitor_group_id" not in column_names:
             conn.execute("ALTER TABLE group_rate_records ADD COLUMN monitor_group_id INTEGER REFERENCES account_monitor_groups(id) ON DELETE CASCADE")
 
+    @staticmethod
+    def _migrate_platform_dispatch_cache(conn: sqlite3.Connection) -> None:
+        columns = conn.execute("PRAGMA table_info(platform_dispatch_cache)").fetchall()
+        column_names = {row["name"] for row in columns}
+        if "activities_refreshed_at" not in column_names:
+            conn.execute("ALTER TABLE platform_dispatch_cache ADD COLUMN activities_refreshed_at TEXT")
+        if "refresh_include_ungrouped" not in column_names:
+            conn.execute(
+                "ALTER TABLE platform_dispatch_cache ADD COLUMN refresh_include_ungrouped INTEGER NOT NULL DEFAULT 1"
+            )
+
     def _migrate_legacy_selected_groups(self, conn: sqlite3.Connection) -> None:
         existing = conn.execute("SELECT COUNT(*) AS count FROM account_monitor_groups").fetchone()["count"]
         if existing:
@@ -628,6 +769,697 @@ class Database:
                 "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (key, value),
             )
+
+    def get_platform_dispatch_cache(self) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM platform_dispatch_cache WHERE id = 1").fetchone()
+        if row is None:
+            return None
+        return {
+            "source_site_url": str(row["source_site_url"] or ""),
+            "accounts": _json_list(row["accounts_json"]),
+            "groups": _json_list(row["groups_json"]),
+            "warnings": [str(value) for value in _json_list(row["warnings_json"])],
+            "refresh_filter": {
+                "platform": str(row["refresh_platform"] or ""),
+                "type": str(row["refresh_type"] or ""),
+                "status": str(row["refresh_status"] or ""),
+                "include_ungrouped": bool(row["refresh_include_ungrouped"]),
+            },
+            "recent_limit": max(1, int(row["recent_limit"] or 6)),
+            "activities_refreshed_at": str(row["activities_refreshed_at"] or ""),
+            "refreshed_at": str(row["refreshed_at"] or ""),
+        }
+
+    def replace_platform_dispatch_cache(
+        self,
+        source_site_url: str,
+        accounts: list[dict[str, Any]],
+        groups: list[dict[str, Any]],
+        warnings: list[str],
+        refresh_filter: dict[str, Any],
+        recent_limit: int = 6,
+        activities_refreshed_at: str | None = None,
+    ) -> None:
+        refreshed_at = utc_now()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO platform_dispatch_cache (
+                    id, source_site_url, accounts_json, groups_json, warnings_json,
+                    refresh_platform, refresh_type, refresh_status, refresh_include_ungrouped, recent_limit,
+                    activities_refreshed_at, refreshed_at
+                )
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    source_site_url = excluded.source_site_url,
+                    accounts_json = excluded.accounts_json,
+                    groups_json = excluded.groups_json,
+                    warnings_json = excluded.warnings_json,
+                    refresh_platform = excluded.refresh_platform,
+                    refresh_type = excluded.refresh_type,
+                    refresh_status = excluded.refresh_status,
+                    refresh_include_ungrouped = excluded.refresh_include_ungrouped,
+                    recent_limit = excluded.recent_limit,
+                    activities_refreshed_at = excluded.activities_refreshed_at,
+                    refreshed_at = excluded.refreshed_at
+                """,
+                (
+                    str(source_site_url or "").strip().rstrip("/"),
+                    json.dumps(accounts, ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(groups, ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(warnings, ensure_ascii=False, separators=(",", ":")),
+                    str(refresh_filter.get("platform") or ""),
+                    str(refresh_filter.get("type") or ""),
+                    str(refresh_filter.get("status") or ""),
+                    1 if refresh_filter.get("include_ungrouped", True) else 0,
+                    max(1, int(recent_limit)),
+                    str(activities_refreshed_at or "") or None,
+                    refreshed_at,
+                ),
+            )
+
+    def replace_platform_dispatch_activities(
+        self,
+        source_site_url: str,
+        accounts: list[dict[str, Any]],
+        warnings: list[str],
+    ) -> bool:
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE platform_dispatch_cache
+                SET accounts_json = ?, warnings_json = ?, activities_refreshed_at = ?
+                WHERE id = 1 AND source_site_url = ?
+                """,
+                (
+                    json.dumps(accounts, ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(warnings, ensure_ascii=False, separators=(",", ":")),
+                    utc_now(),
+                    str(source_site_url or "").strip().rstrip("/"),
+                ),
+            )
+        return cursor.rowcount == 1
+
+    def clear_platform_dispatch_cache(self) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM platform_dispatch_cache WHERE id = 1")
+
+    def update_platform_dispatch_cached_account(self, account: dict[str, Any]) -> bool:
+        account_id = _positive_int_or_none(account.get("id"))
+        if account_id is None:
+            return False
+        with self.connect() as conn:
+            row = conn.execute("SELECT accounts_json FROM platform_dispatch_cache WHERE id = 1").fetchone()
+            if row is None:
+                return False
+            accounts = _json_list(row["accounts_json"])
+            updated = False
+            for cached in accounts:
+                if not isinstance(cached, dict) or _positive_int_or_none(cached.get("id")) != account_id:
+                    continue
+                if "name" in account:
+                    cached["name"] = account["name"]
+                if "status" in account:
+                    cached["status"] = account["status"]
+                if "filter_status" in account or "filterStatus" in account:
+                    filter_status = account.get("filter_status", account.get("filterStatus", ""))
+                    cached["filter_status"] = filter_status
+                    cached["filterStatus"] = filter_status
+                if "is_enabled" in account or "isEnabled" in account or "status" in account:
+                    enabled = account.get("is_enabled", account.get("isEnabled", account.get("status") == "active"))
+                    cached["is_enabled"] = bool(enabled)
+                    cached["isEnabled"] = bool(enabled)
+                if "error_message" in account or "errorMessage" in account:
+                    error_message = account.get("error_message", account.get("errorMessage", ""))
+                    cached["error_message"] = error_message
+                    cached["errorMessage"] = error_message
+                aliases = {
+                    "concurrency": "concurrency",
+                    "load_factor": "loadFactor",
+                    "rate_multiplier": "rateMultiplier",
+                    "schedulable": "schedulable",
+                    "current_concurrency": "currentConcurrency",
+                    "waiting_in_queue": "waitingInQueue",
+                    "health_score": "healthScore",
+                    "health_short_score": "healthShortScore",
+                    "health_long_score": "healthLongScore",
+                    "health_evidence_at": "healthEvidenceAt",
+                    "health_evidence_fresh": "healthEvidenceFresh",
+                    "decision_reason": "decisionReason",
+                    "target_concurrency": "targetConcurrency",
+                    "target_load_factor": "targetLoadFactor",
+                    "last_policy_action_at": "lastPolicyActionAt",
+                }
+                for source, alias in aliases.items():
+                    if source in account or alias in account:
+                        value = account.get(source, account.get(alias))
+                        cached[source] = value
+                        if alias != source:
+                            cached[alias] = value
+                updated = True
+                break
+            if not updated:
+                return False
+            conn.execute(
+                "UPDATE platform_dispatch_cache SET accounts_json = ? WHERE id = 1",
+                (json.dumps(accounts, ensure_ascii=False, separators=(",", ":")),),
+            )
+        return True
+
+    def list_platform_dispatch_excluded_groups(self, source_site_url: str) -> list[dict[str, Any]]:
+        site_url = str(source_site_url or "").strip().rstrip("/")
+        if not site_url:
+            return []
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT group_id, name, platform, created_at, updated_at
+                FROM platform_dispatch_excluded_groups
+                WHERE source_site_url = ?
+                ORDER BY platform COLLATE NOCASE, name COLLATE NOCASE, group_id
+                """,
+                (site_url,),
+            ).fetchall()
+        return [
+            {
+                "id": int(row["group_id"]),
+                "name": str(row["name"] or f"分组 {row['group_id']}"),
+                "platform": str(row["platform"] or ""),
+                "created_at": str(row["created_at"] or ""),
+                "updated_at": str(row["updated_at"] or ""),
+            }
+            for row in rows
+        ]
+
+    def exclude_platform_dispatch_group(
+        self,
+        source_site_url: str,
+        group_id: int,
+        name: str,
+        platform: str,
+    ) -> None:
+        site_url = str(source_site_url or "").strip().rstrip("/")
+        group_id = int(group_id)
+        if not site_url or group_id <= 0:
+            raise ValueError("排除分组参数不正确")
+        now = utc_now()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                INSERT INTO platform_dispatch_excluded_groups (
+                    source_site_url, group_id, name, platform, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_site_url, group_id) DO UPDATE SET
+                    name = excluded.name,
+                    platform = excluded.platform,
+                    updated_at = excluded.updated_at
+                """,
+                (site_url, group_id, str(name or ""), str(platform or ""), now, now),
+            )
+            row = conn.execute(
+                "SELECT accounts_json, groups_json FROM platform_dispatch_cache WHERE id = 1 AND source_site_url = ?",
+                (site_url,),
+            ).fetchone()
+            if row is None:
+                return
+            accounts = filter_platform_dispatch_accounts_by_groups(_json_list(row["accounts_json"]), {group_id})
+            groups = [
+                group
+                for group in _json_list(row["groups_json"])
+                if not isinstance(group, dict) or _positive_int_or_none(group.get("id")) != group_id
+            ]
+            conn.execute(
+                "UPDATE platform_dispatch_cache SET accounts_json = ?, groups_json = ? WHERE id = 1",
+                (
+                    json.dumps(accounts, ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(groups, ensure_ascii=False, separators=(",", ":")),
+                ),
+            )
+
+    def remove_platform_dispatch_excluded_group(self, source_site_url: str, group_id: int) -> bool:
+        site_url = str(source_site_url or "").strip().rstrip("/")
+        with self.connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM platform_dispatch_excluded_groups WHERE source_site_url = ? AND group_id = ?",
+                (site_url, int(group_id)),
+            )
+        return cursor.rowcount == 1
+
+    def refresh_platform_dispatch_excluded_group_metadata(
+        self,
+        source_site_url: str,
+        groups: list[dict[str, Any]],
+    ) -> None:
+        site_url = str(source_site_url or "").strip().rstrip("/")
+        if not site_url:
+            return
+        now = utc_now()
+        with self.connect() as conn:
+            for group in groups:
+                if not isinstance(group, dict):
+                    continue
+                group_id = _positive_int_or_none(group.get("id"))
+                if group_id is None:
+                    continue
+                conn.execute(
+                    """
+                    UPDATE platform_dispatch_excluded_groups
+                    SET name = ?, platform = ?, updated_at = ?
+                    WHERE source_site_url = ? AND group_id = ?
+                    """,
+                    (
+                        str(group.get("name") or f"分组 {group_id}"),
+                        str(group.get("platform") or ""),
+                        now,
+                        site_url,
+                        group_id,
+                    ),
+                )
+
+    def has_active_platform_dispatch_job(self) -> bool:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM platform_dispatch_jobs WHERE id = 1 AND status IN ('queued', 'running')"
+            ).fetchone()
+        return row is not None
+
+    def create_platform_dispatch_job(
+        self,
+        job_id: str,
+        kind: str,
+        refresh_filter: dict[str, Any],
+        source_site_url: str,
+    ) -> dict[str, Any] | None:
+        now = utc_now()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            active = conn.execute(
+                "SELECT 1 FROM platform_dispatch_jobs WHERE id = 1 AND status IN ('queued', 'running')"
+            ).fetchone()
+            if active is not None:
+                return None
+            conn.execute(
+                """
+                INSERT INTO platform_dispatch_jobs (
+                    id, job_id, kind, status, phase, current_page, total_pages,
+                    processed, total, percent, filter_json, source_site_url,
+                    message, error, created_at, started_at, finished_at, updated_at
+                )
+                VALUES (1, ?, ?, 'queued', 'queued', 0, 0, 0, 0, 0, ?, ?, ?, '', ?, NULL, NULL, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    job_id = excluded.job_id,
+                    kind = excluded.kind,
+                    status = excluded.status,
+                    phase = excluded.phase,
+                    current_page = excluded.current_page,
+                    total_pages = excluded.total_pages,
+                    processed = excluded.processed,
+                    total = excluded.total,
+                    percent = excluded.percent,
+                    filter_json = excluded.filter_json,
+                    source_site_url = excluded.source_site_url,
+                    message = excluded.message,
+                    error = excluded.error,
+                    created_at = excluded.created_at,
+                    started_at = excluded.started_at,
+                    finished_at = excluded.finished_at,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    str(job_id),
+                    str(kind),
+                    json.dumps(refresh_filter, ensure_ascii=False, separators=(",", ":")),
+                    str(source_site_url or "").strip().rstrip("/"),
+                    "任务已排队",
+                    now,
+                    now,
+                ),
+            )
+        return self.get_platform_dispatch_job()
+
+    def get_platform_dispatch_job(self) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM platform_dispatch_jobs WHERE id = 1").fetchone()
+        if row is None:
+            return None
+        return {
+            "job_id": str(row["job_id"]),
+            "kind": str(row["kind"]),
+            "status": str(row["status"]),
+            "phase": str(row["phase"]),
+            "current_page": max(0, int(row["current_page"] or 0)),
+            "total_pages": max(0, int(row["total_pages"] or 0)),
+            "processed": max(0, int(row["processed"] or 0)),
+            "total": max(0, int(row["total"] or 0)),
+            "percent": max(0, min(100, int(row["percent"] or 0))),
+            "refresh_filter": _json_dict(row["filter_json"]),
+            "source_site_url": str(row["source_site_url"] or ""),
+            "message": str(row["message"] or ""),
+            "error": str(row["error"] or ""),
+            "created_at": str(row["created_at"] or ""),
+            "started_at": str(row["started_at"] or ""),
+            "finished_at": str(row["finished_at"] or ""),
+            "updated_at": str(row["updated_at"] or ""),
+        }
+
+    def update_platform_dispatch_job(self, job_id: str, **fields: Any) -> bool:
+        allowed = {
+            "status",
+            "phase",
+            "current_page",
+            "total_pages",
+            "processed",
+            "total",
+            "percent",
+            "message",
+            "error",
+            "started_at",
+            "finished_at",
+        }
+        updates = {key: value for key, value in fields.items() if key in allowed}
+        if not updates:
+            return False
+        updates["updated_at"] = utc_now()
+        assignments = ", ".join(f"{key} = ?" for key in updates)
+        with self.connect() as conn:
+            cursor = conn.execute(
+                f"UPDATE platform_dispatch_jobs SET {assignments} WHERE id = 1 AND job_id = ?",
+                (*updates.values(), str(job_id)),
+            )
+        return cursor.rowcount == 1
+
+    def interrupt_platform_dispatch_job(self, message: str = "任务因服务重启中断") -> bool:
+        now = utc_now()
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE platform_dispatch_jobs
+                SET status = 'failed', phase = 'failed', error = ?, message = ?,
+                    finished_at = ?, updated_at = ?
+                WHERE id = 1 AND status IN ('queued', 'running')
+                """,
+                (str(message), str(message), now, now),
+            )
+        return cursor.rowcount == 1
+
+    def get_platform_dispatch_policy(self, defaults: dict[str, Any]) -> dict[str, Any]:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM platform_dispatch_policy WHERE id = 1").fetchone()
+        config = dict(defaults)
+        if row is not None:
+            config.update(_json_dict(row["config_json"]))
+        runtime = {
+            "source_site_url": str(row["source_site_url"] or "") if row else "",
+            "status": str(row["status"] or "idle") if row else "idle",
+            "last_started_at": str(row["last_started_at"] or "") if row else "",
+            "last_finished_at": str(row["last_finished_at"] or "") if row else "",
+            "last_error": str(row["last_error"] or "") if row else "",
+            "summary": _json_dict(row["summary_json"]) if row else {},
+            "updated_at": str(row["updated_at"] or "") if row else "",
+        }
+        return {"config": config, "runtime": runtime}
+
+    def save_platform_dispatch_policy(self, config: dict[str, Any], source_site_url: str = "") -> None:
+        now = utc_now()
+        site_url = str(source_site_url or "").strip().rstrip("/")
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO platform_dispatch_policy (
+                    id, config_json, source_site_url, status, last_error, summary_json, updated_at
+                )
+                VALUES (1, ?, ?, 'idle', '', '{}', ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    config_json = excluded.config_json,
+                    source_site_url = CASE
+                        WHEN excluded.source_site_url = '' THEN platform_dispatch_policy.source_site_url
+                        ELSE excluded.source_site_url
+                    END,
+                    updated_at = excluded.updated_at
+                """,
+                (json.dumps(config, ensure_ascii=False, separators=(",", ":")), site_url, now),
+            )
+
+    def update_platform_dispatch_policy_runtime(
+        self,
+        defaults: dict[str, Any],
+        *,
+        source_site_url: str | None = None,
+        status: str | None = None,
+        last_started_at: str | None = None,
+        last_finished_at: str | None = None,
+        last_error: str | None = None,
+        summary: dict[str, Any] | None = None,
+    ) -> None:
+        current = self.get_platform_dispatch_policy(defaults)
+        self.save_platform_dispatch_policy(current["config"], source_site_url or current["runtime"]["source_site_url"])
+        updates: dict[str, Any] = {"updated_at": utc_now()}
+        if source_site_url is not None:
+            updates["source_site_url"] = str(source_site_url or "").strip().rstrip("/")
+        if status is not None:
+            updates["status"] = str(status)
+        if last_started_at is not None:
+            updates["last_started_at"] = last_started_at or None
+        if last_finished_at is not None:
+            updates["last_finished_at"] = last_finished_at or None
+        if last_error is not None:
+            updates["last_error"] = str(last_error)
+        if summary is not None:
+            updates["summary_json"] = json.dumps(summary, ensure_ascii=False, separators=(",", ":"))
+        assignments = ", ".join(f"{key} = ?" for key in updates)
+        with self.connect() as conn:
+            conn.execute(f"UPDATE platform_dispatch_policy SET {assignments} WHERE id = 1", tuple(updates.values()))
+
+    def disable_platform_dispatch_policy(self, defaults: dict[str, Any], source_site_url: str = "") -> None:
+        policy = self.get_platform_dispatch_policy(defaults)
+        config = dict(policy["config"])
+        config["enabled"] = False
+        self.save_platform_dispatch_policy(config, source_site_url)
+        self.update_platform_dispatch_policy_runtime(
+            defaults,
+            source_site_url=source_site_url,
+            status="idle",
+            last_error="",
+            summary={},
+        )
+
+    def add_platform_dispatch_evidence(self, source_site_url: str, evidence: dict[str, Any]) -> bool:
+        site_url = str(source_site_url or "").strip().rstrip("/")
+        account_id = _positive_int_or_none(evidence.get("account_id"))
+        source_kind = str(evidence.get("source_kind") or "")
+        source_id = str(evidence.get("source_id") or "")
+        if not site_url or account_id is None or not source_kind or not source_id:
+            return False
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO platform_dispatch_evidence (
+                    source_site_url, account_id, source_kind, source_id, category, score,
+                    status_code, first_token_ms, is_timeout, is_probe_success,
+                    message, occurred_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    site_url,
+                    account_id,
+                    source_kind,
+                    source_id,
+                    str(evidence.get("category") or "unknown"),
+                    float(evidence.get("score") or 0),
+                    evidence.get("status_code"),
+                    evidence.get("first_token_ms"),
+                    1 if evidence.get("is_timeout") else 0,
+                    1 if evidence.get("is_probe_success") else 0,
+                    str(evidence.get("message") or ""),
+                    str(evidence.get("occurred_at") or utc_now()),
+                    utc_now(),
+                ),
+            )
+            if cursor.rowcount:
+                conn.execute(
+                    """
+                    DELETE FROM platform_dispatch_evidence
+                    WHERE source_site_url = ? AND account_id = ? AND id NOT IN (
+                        SELECT id FROM platform_dispatch_evidence
+                        WHERE source_site_url = ? AND account_id = ?
+                        ORDER BY occurred_at DESC, id DESC LIMIT 60
+                    )
+                    """,
+                    (site_url, account_id, site_url, account_id),
+                )
+        return cursor.rowcount == 1
+
+    def list_platform_dispatch_evidence(
+        self, source_site_url: str, account_id: int, limit: int = 60
+    ) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM platform_dispatch_evidence
+                WHERE source_site_url = ? AND account_id = ?
+                ORDER BY occurred_at DESC, id DESC LIMIT ?
+                """,
+                (str(source_site_url or "").strip().rstrip("/"), int(account_id), max(1, min(60, int(limit)))),
+            ).fetchall()
+        return [row_to_dict(row) for row in rows]
+
+    def upsert_platform_dispatch_account_state(self, source_site_url: str, account_id: int, **fields: Any) -> None:
+        allowed = {
+            "name", "health_score", "short_score", "long_score", "evidence_count", "evidence_at",
+            "evidence_fresh", "latest_probe_success_at", "decision_reason", "target_concurrency",
+            "target_load_factor", "baseline_load_factor", "last_concurrency_write_at",
+            "last_load_factor_write_at", "last_action_at",
+        }
+        values = {key: value for key, value in fields.items() if key in allowed}
+        site_url = str(source_site_url or "").strip().rstrip("/")
+        now = utc_now()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO platform_dispatch_account_state (
+                    source_site_url, account_id, name, updated_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (site_url, int(account_id), str(values.get("name") or ""), now),
+            )
+            values["updated_at"] = now
+            assignments = ", ".join(f"{key} = ?" for key in values)
+            conn.execute(
+                f"UPDATE platform_dispatch_account_state SET {assignments} WHERE source_site_url = ? AND account_id = ?",
+                (*values.values(), site_url, int(account_id)),
+            )
+
+    def list_platform_dispatch_account_states(self, source_site_url: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM platform_dispatch_account_state
+                WHERE source_site_url = ? ORDER BY account_id
+                """,
+                (str(source_site_url or "").strip().rstrip("/"),),
+            ).fetchall()
+        return [row_to_dict(row) for row in rows]
+
+    def get_platform_dispatch_account_state(self, source_site_url: str, account_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM platform_dispatch_account_state WHERE source_site_url = ? AND account_id = ?",
+                (str(source_site_url or "").strip().rstrip("/"), int(account_id)),
+            ).fetchone()
+        return row_to_dict(row) if row else None
+
+    def get_platform_dispatch_cursor(
+        self, source_site_url: str, account_id: int, source_kind: str
+    ) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM platform_dispatch_cursors
+                WHERE source_site_url = ? AND account_id = ? AND source_kind = ?
+                """,
+                (str(source_site_url or "").strip().rstrip("/"), int(account_id), str(source_kind)),
+            ).fetchone()
+        return row_to_dict(row) if row else None
+
+    def save_platform_dispatch_cursor(
+        self,
+        source_site_url: str,
+        account_id: int,
+        source_kind: str,
+        latest_source_id: str,
+        latest_occurred_at: str,
+    ) -> None:
+        now = utc_now()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO platform_dispatch_cursors (
+                    source_site_url, account_id, source_kind, latest_source_id,
+                    latest_occurred_at, initialized_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_site_url, account_id, source_kind) DO UPDATE SET
+                    latest_source_id = excluded.latest_source_id,
+                    latest_occurred_at = excluded.latest_occurred_at,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    str(source_site_url or "").strip().rstrip("/"),
+                    int(account_id),
+                    str(source_kind),
+                    str(latest_source_id or ""),
+                    str(latest_occurred_at or "") or None,
+                    now,
+                    now,
+                ),
+            )
+
+    def add_platform_dispatch_action(
+        self,
+        source_site_url: str,
+        *,
+        account_id: int | None,
+        account_name: str,
+        action: str,
+        field: str = "",
+        old_value: Any = None,
+        new_value: Any = None,
+        reason: str = "",
+        status: str = "succeeded",
+        error: str = "",
+    ) -> int:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat(timespec="seconds")
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO platform_dispatch_actions (
+                    source_site_url, account_id, account_name, action, field,
+                    old_value, new_value, reason, status, error, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(source_site_url or "").strip().rstrip("/"),
+                    account_id,
+                    str(account_name or ""),
+                    str(action),
+                    str(field or ""),
+                    None if old_value is None else str(old_value),
+                    None if new_value is None else str(new_value),
+                    str(reason or ""),
+                    str(status),
+                    str(error or ""),
+                    utc_now(),
+                ),
+            )
+            conn.execute(
+                "DELETE FROM platform_dispatch_actions WHERE created_at < ?",
+                (cutoff,),
+            )
+            conn.execute(
+                """
+                DELETE FROM platform_dispatch_actions
+                WHERE id NOT IN (SELECT id FROM platform_dispatch_actions ORDER BY id DESC LIMIT 5000)
+                """
+            )
+        return int(cursor.lastrowid)
+
+    def list_platform_dispatch_actions(self, page: int = 1, page_size: int = 50) -> dict[str, Any]:
+        page = max(1, int(page))
+        page_size = max(1, min(100, int(page_size)))
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat(timespec="seconds")
+        with self.connect() as conn:
+            conn.execute("DELETE FROM platform_dispatch_actions WHERE created_at < ?", (cutoff,))
+            total = int(conn.execute("SELECT COUNT(*) FROM platform_dispatch_actions").fetchone()[0])
+            rows = conn.execute(
+                """
+                SELECT * FROM platform_dispatch_actions
+                ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?
+                """,
+                (page_size, (page - 1) * page_size),
+            ).fetchall()
+        return {"items": [row_to_dict(row) for row in rows], "total": total, "page": page, "page_size": page_size}
 
     def get_smtp_settings(self) -> sqlite3.Row:
         with self.connect() as conn:
@@ -2106,6 +2938,79 @@ def _sum_consumption(records: list[sqlite3.Row]) -> Optional[float]:
 
 def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {key: row[key] for key in row.keys()}
+
+
+def _json_list(value: Any) -> list[Any]:
+    try:
+        parsed = json.loads(str(value or "[]"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _json_dict(value: Any) -> dict[str, Any]:
+    try:
+        parsed = json.loads(str(value or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def filter_platform_dispatch_accounts_by_groups(
+    accounts: list[Any], excluded_group_ids: set[int]
+) -> list[dict[str, Any]]:
+    excluded = {int(group_id) for group_id in excluded_group_ids if int(group_id) > 0}
+    result: list[dict[str, Any]] = []
+    for account in accounts:
+        if not isinstance(account, dict):
+            continue
+        group_ids = _platform_dispatch_account_group_ids(account)
+        if not group_ids.intersection(excluded):
+            result.append(dict(account))
+            continue
+        remaining = sorted(group_ids - excluded)
+        if not remaining:
+            continue
+        sanitized = {
+            key: value
+            for key, value in account.items()
+            if key not in {"group_id", "groupId", "group_ids", "groupIds", "groups", "plans"}
+        }
+        sanitized["group_ids"] = remaining
+        sanitized["groupIds"] = remaining
+        result.append(sanitized)
+    return result
+
+
+def _platform_dispatch_account_group_ids(account: dict[str, Any]) -> set[int]:
+    group_ids: set[int] = set()
+
+    def collect(value: Any) -> None:
+        if value is None or value == "":
+            return
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                collect(item)
+            return
+        if isinstance(value, dict):
+            for key in ("id", "group_id", "groupId"):
+                collect(value.get(key))
+            return
+        group_id = _positive_int_or_none(value)
+        if group_id is not None:
+            group_ids.add(group_id)
+
+    for key in ("group_id", "groupId", "group_ids", "groupIds", "groups", "plans"):
+        collect(account.get(key))
+    return group_ids
+
+
+def _positive_int_or_none(value: Any) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
 
 
 def reminder_to_dict(row: sqlite3.Row) -> dict[str, Any]:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timezone
 from typing import Any
 
@@ -45,13 +46,57 @@ class Sub2ApiAdminClient:
     async def list_accounts(
         self,
         platform: str | None = None,
+        account_type: str | None = None,
         status: str | None = None,
         search: str | None = None,
         group_id: int | None = None,
     ) -> list[dict[str, Any]]:
+        page = 1
+        result: list[dict[str, Any]] = []
+        while True:
+            page_data = await self.list_accounts_page(
+                page=page,
+                page_size=100,
+                platform=platform,
+                account_type=account_type,
+                status=status,
+                search=search,
+                group_id=group_id,
+            )
+            records = page_data["accounts"]
+            result.extend(records)
+            pages = page_data.get("pages")
+            total = page_data.get("total")
+            if not records:
+                break
+            if pages is not None:
+                if page >= pages:
+                    break
+            elif total is not None:
+                if len(result) >= total:
+                    break
+            elif len(records) < 100:
+                break
+            page += 1
+        return result
+
+    async def list_accounts_page(
+        self,
+        page: int,
+        page_size: int = 100,
+        platform: str | None = None,
+        account_type: str | None = None,
+        status: str | None = None,
+        search: str | None = None,
+        group_id: int | None = None,
+    ) -> dict[str, Any]:
+        page = max(1, int(page))
+        page_size = max(1, min(100, int(page_size)))
         params: dict[str, Any] = {"sort_by": "name", "sort_order": "asc"}
         if platform:
             params["platform"] = platform
+        if account_type:
+            params["type"] = account_type
         if status:
             params["status"] = status
         if search:
@@ -59,35 +104,77 @@ class Sub2ApiAdminClient:
         if group_id is not None:
             params["group"] = int(group_id)
             params["group_id"] = int(group_id)
-        return await self._list_all_pages(
-            "/api/v1/admin/accounts",
-            params,
-            ("accounts", "items", "records", "rows", "list", "data"),
-            "Sub2API 账号响应格式不正确",
-        )
+        params.update({"page": page, "page_size": page_size})
+        payload = await self._request("GET", "/api/v1/admin/accounts", params=params)
+        records = _extract_sub2api_list(payload, ("accounts", "items", "records", "rows", "list", "data"))
+        if records is None:
+            raise Sub2ApiAdminError("Sub2API 账号响应格式不正确", status_code=502)
+        page_data = _unwrap_sub2api_data(payload)
+        total = _non_negative_int_or_none(page_data.get("total")) if isinstance(page_data, dict) else None
+        pages = _non_negative_int_or_none(page_data.get("pages")) if isinstance(page_data, dict) else None
+        response_page = _positive_int(page_data.get("page")) if isinstance(page_data, dict) else None
+        response_page_size = _positive_int(page_data.get("page_size")) if isinstance(page_data, dict) else None
+        return {
+            "accounts": [record for record in records if isinstance(record, dict)],
+            "total": total,
+            "pages": pages,
+            "page": response_page or page,
+            "page_size": response_page_size or page_size,
+        }
 
     async def list_recent_usage(self, account_id: int, limit: int = 6) -> list[dict[str, Any]]:
+        page = await self.list_usage_page(account_id, page=1, page_size=limit)
+        return page["records"]
+
+    async def list_usage_page(
+        self,
+        account_id: int,
+        *,
+        page: int = 1,
+        page_size: int = 100,
+        start_date: str | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "account_id": int(account_id),
+            "page": max(1, int(page)),
+            "page_size": max(1, min(100, int(page_size))),
+            "sort_by": "created_at",
+            "sort_order": "desc",
+        }
+        if start_date:
+            params["start_date"] = str(start_date)
         payload = await self._request(
             "GET",
             "/api/v1/admin/usage",
-            params={
-                "account_id": int(account_id),
-                "page": 1,
-                "page_size": max(1, min(100, int(limit))),
-                "sort_by": "created_at",
-                "sort_order": "desc",
-            },
+            params=params,
         )
         records = _extract_sub2api_list(payload, ("items", "records", "rows", "list", "data"))
         if records is None:
             raise Sub2ApiAdminError("Sub2API 使用记录响应格式不正确", status_code=502)
-        return [record for record in records if isinstance(record, dict)]
+        data = _unwrap_sub2api_data(payload)
+        return {
+            "records": [record for record in records if isinstance(record, dict)],
+            "page": _positive_int(data.get("page")) if isinstance(data, dict) else params["page"],
+            "pages": _positive_int(data.get("pages")) if isinstance(data, dict) else None,
+            "total": _non_negative_int_or_none(data.get("total")) if isinstance(data, dict) else None,
+        }
 
     async def list_recent_errors(self, account_id: int | None = None, limit: int = 6) -> list[dict[str, Any]]:
+        page = await self.list_errors_page(account_id, page=1, page_size=limit)
+        return page["records"]
+
+    async def list_errors_page(
+        self,
+        account_id: int | None = None,
+        *,
+        page: int = 1,
+        page_size: int = 100,
+        time_range: str = "30d",
+    ) -> dict[str, Any]:
         params: dict[str, Any] = {
-            "page": 1,
-            "page_size": max(1, min(100, int(limit))),
-            "time_range": "30d",
+            "page": max(1, int(page)),
+            "page_size": max(1, min(500, int(page_size))),
+            "time_range": str(time_range or "30d"),
             "sort_by": "created_at",
             "sort_order": "desc",
         }
@@ -97,11 +184,50 @@ class Sub2ApiAdminClient:
         records = _extract_sub2api_list(payload, ("items", "errors", "records", "rows", "list", "data"))
         if records is None:
             raise Sub2ApiAdminError("Sub2API 错误记录响应格式不正确", status_code=502)
-        return [record for record in records if isinstance(record, dict)]
+        data = _unwrap_sub2api_data(payload)
+        return {
+            "records": [record for record in records if isinstance(record, dict)],
+            "page": _positive_int(data.get("page")) if isinstance(data, dict) else params["page"],
+            "pages": _positive_int(data.get("pages")) if isinstance(data, dict) else None,
+            "total": _non_negative_int_or_none(data.get("total")) if isinstance(data, dict) else None,
+        }
 
-    async def platform_dispatch(self, recent_limit: int = 6) -> dict[str, Any]:
+    async def get_concurrency_stats(self, platform: str | None = None) -> dict[str, Any]:
+        params = {"platform": platform} if platform else None
+        payload = await self._request("GET", "/api/v1/admin/ops/concurrency", params=params)
+        data = _unwrap_sub2api_data(payload)
+        if not isinstance(data, dict):
+            raise Sub2ApiAdminError("Sub2API 实时并发响应格式不正确", status_code=502)
+        return data
+
+    async def get_account_availability(self, platform: str | None = None) -> dict[str, Any]:
+        params = {"platform": platform} if platform else None
+        payload = await self._request("GET", "/api/v1/admin/ops/account-availability", params=params)
+        data = _unwrap_sub2api_data(payload)
+        if not isinstance(data, dict):
+            raise Sub2ApiAdminError("Sub2API 账号可用性响应格式不正确", status_code=502)
+        return data
+
+    async def platform_dispatch(
+        self,
+        recent_limit: int = 6,
+        platform: str = "",
+        account_type: str = "",
+        status: str = "",
+    ) -> dict[str, Any]:
         recent_limit = max(1, min(20, int(recent_limit)))
-        accounts, groups = await asyncio.gather(self.list_accounts(), self.list_groups())
+        platform = str(platform or "").strip()
+        account_type = str(account_type or "").strip()
+        status = str(status or "").strip().lower()
+        accounts, groups = await asyncio.gather(
+            self.list_accounts(platform=platform or None, account_type=account_type or None, status=status or None),
+            self.list_groups(platform=platform or None),
+        )
+        accounts = [
+            account
+            for account in accounts
+            if matches_dispatch_filter(account, platform=platform, account_type=account_type, status=status)
+        ]
         warnings: list[str] = []
 
         errors_available = True
@@ -153,15 +279,75 @@ class Sub2ApiAdminClient:
         }
 
     async def update_account_status(self, account_id: int, enabled: bool) -> dict[str, Any]:
+        return await self.update_account_fields(account_id, {"status": "active" if enabled else "inactive"})
+
+    async def update_account_fields(self, account_id: int, fields: dict[str, Any]) -> dict[str, Any]:
+        allowed = {"status", "concurrency", "load_factor"}
+        payload_fields = {key: value for key, value in fields.items() if key in allowed}
+        if not payload_fields:
+            raise Sub2ApiAdminError("没有可更新的 Sub2API 账号字段")
         payload = await self._request(
             "PUT",
             f"/api/v1/admin/accounts/{int(account_id)}",
-            json={"status": "active" if enabled else "inactive"},
+            json=payload_fields,
         )
         account = _unwrap_sub2api_data(payload)
         if not isinstance(account, dict):
-            raise Sub2ApiAdminError("Sub2API 账号状态响应格式不正确", status_code=502)
+            raise Sub2ApiAdminError("Sub2API 账号更新响应格式不正确", status_code=502)
         return public_dispatch_account(account, [])
+
+    async def probe_account(self, account_id: int) -> dict[str, Any]:
+        headers = {
+            "x-api-key": self.admin_key,
+            "Accept": "text/event-stream",
+            "Content-Type": "application/json",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True) as client:
+                response = await client.request(
+                    "POST",
+                    f"{self.site_url}/api/v1/admin/accounts/{int(account_id)}/test",
+                    headers=headers,
+                    json={},
+                )
+        except httpx.TimeoutException:
+            return {"success": False, "is_timeout": True, "message": "账号探活超时"}
+        except httpx.HTTPError as exc:
+            return {"success": False, "is_timeout": False, "message": f"账号探活请求失败: {exc}"}
+
+        body = str(getattr(response, "text", "") or "")
+        if response.status_code < 200 or response.status_code >= 300:
+            return {
+                "success": False,
+                "is_timeout": response.status_code in {408, 504},
+                "status_code": response.status_code,
+                "message": body.strip() or f"账号探活 HTTP {response.status_code}",
+            }
+        error = ""
+        content_seen = False
+        for line in body.splitlines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            raw = line[5:].strip()
+            try:
+                event = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(event, dict):
+                continue
+            if event.get("type") == "error":
+                error = str(event.get("error") or event.get("message") or "账号探活失败")
+            elif event.get("type") in {"content", "done", "end"}:
+                content_seen = True
+        if error:
+            lower = error.lower()
+            return {
+                "success": False,
+                "is_timeout": "timeout" in lower or "timed out" in lower or "超时" in error,
+                "message": error,
+            }
+        return {"success": True, "is_timeout": False, "message": "探活成功", "content_seen": content_seen}
 
     async def _list_all_pages(
         self,
@@ -311,6 +497,47 @@ def _is_openai_account(account: dict[str, Any]) -> bool:
     return not platform or platform == SUB2API_OPENAI_PLATFORM
 
 
+def matches_dispatch_filter(account: dict[str, Any], platform: str, account_type: str, status: str) -> bool:
+    if platform and str(account.get("platform") or "").strip().casefold() != platform.casefold():
+        return False
+    if account_type and str(account.get("type") or "").strip().casefold() != account_type.casefold():
+        return False
+    if status and _dispatch_filter_status(account) != status.casefold():
+        return False
+    return True
+
+
+def _dispatch_filter_status(account: dict[str, Any]) -> str:
+    status = str(account.get("status") or "inactive").strip().lower()
+    if status != "active":
+        return status
+    if _is_future_timestamp(account.get("temp_unschedulable_until")):
+        return "temp_unschedulable"
+    if _is_future_timestamp(account.get("rate_limit_reset_at")):
+        return "rate_limited"
+    if account.get("schedulable") is False:
+        return "unschedulable"
+    return "active"
+
+
+def _is_future_timestamp(value: Any) -> bool:
+    if value is None or value == "":
+        return False
+    try:
+        if isinstance(value, (int, float)):
+            timestamp = float(value)
+            if timestamp > 10_000_000_000:
+                timestamp /= 1000
+            parsed = datetime.fromtimestamp(timestamp, timezone.utc)
+        else:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc) > datetime.now(timezone.utc)
+    except (OSError, TypeError, ValueError):
+        return False
+
+
 def _extract_sub2api_list(payload: Any, keys: tuple[str, ...]) -> list[Any] | None:
     data = _unwrap_sub2api_data(payload)
     if isinstance(data, list):
@@ -384,15 +611,18 @@ def public_dispatch_account(account: dict[str, Any], recent_activity: list[dict[
     if status not in {"active", "inactive", "error"}:
         status = "inactive"
     group_ids = sorted(_account_group_ids(account))
+    filter_status = _dispatch_filter_status(account)
     groups = account.get("groups")
     public_groups = [public_dispatch_group(group) for group in groups if isinstance(group, dict)] if isinstance(groups, list) else []
-    return {
+    result = {
         "id": account_id,
         "name": str(account.get("name") or f"账号 {account_id}"),
         "notes": str(account.get("notes") or ""),
         "platform": str(account.get("platform") or ""),
         "type": str(account.get("type") or ""),
         "status": status,
+        "filter_status": filter_status,
+        "filterStatus": filter_status,
         "is_enabled": status == "active",
         "isEnabled": status == "active",
         "error_message": str(account.get("error_message") or ""),
@@ -406,9 +636,26 @@ def public_dispatch_account(account: dict[str, Any], recent_activity: list[dict[
         "createdAt": account.get("created_at"),
         "updated_at": account.get("updated_at"),
         "updatedAt": account.get("updated_at"),
+        "rate_limit_reset_at": account.get("rate_limit_reset_at"),
+        "rateLimitResetAt": account.get("rate_limit_reset_at"),
+        "overload_until": account.get("overload_until"),
+        "overloadUntil": account.get("overload_until"),
+        "temp_unschedulable_until": account.get("temp_unschedulable_until"),
+        "tempUnschedulableUntil": account.get("temp_unschedulable_until"),
         "recent_activity": recent_activity,
         "recentActivity": recent_activity,
     }
+    if "concurrency" in account:
+        result["concurrency"] = _non_negative_int(account.get("concurrency"))
+    if "load_factor" in account:
+        result["load_factor"] = _positive_int(account.get("load_factor"))
+        result["loadFactor"] = result["load_factor"]
+    if "rate_multiplier" in account:
+        result["rate_multiplier"] = _optional_number(account.get("rate_multiplier"))
+        result["rateMultiplier"] = result["rate_multiplier"]
+    if "schedulable" in account:
+        result["schedulable"] = account.get("schedulable") is not False
+    return result
 
 
 def public_dispatch_group(group: dict[str, Any]) -> dict[str, Any]:
@@ -540,6 +787,16 @@ def _non_negative_int(value: Any) -> int:
         parsed = int(value)
     except (TypeError, ValueError):
         return 0
+    return max(0, parsed)
+
+
+def _non_negative_int_or_none(value: Any) -> int | None:
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
     return max(0, parsed)
 
 

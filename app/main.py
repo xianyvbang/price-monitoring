@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -25,6 +26,7 @@ from app.models import (
     actual_consumption_amount,
     actual_consumption_stats,
     format_china_time,
+    filter_platform_dispatch_accounts_by_groups,
     monitor_group_to_dict,
     reminder_to_dict,
     row_to_dict,
@@ -81,13 +83,27 @@ from app.services.scheduler import (
     query_opencode_go_for_account,
     query_sub2api_group_for_account,
 )
-from app.services.sub2api_admin import Sub2ApiAdminClient, Sub2ApiAdminError
+from app.services.sub2api_admin import (
+    Sub2ApiAdminClient,
+    Sub2ApiAdminError,
+    matches_dispatch_filter,
+    merge_recent_activity,
+    public_dispatch_account,
+    public_dispatch_group,
+)
+from app.services.platform_dispatch_policy import (
+    POLICY_DEFAULTS,
+    PlatformDispatchPolicyScheduler,
+    validate_policy_config,
+)
 
 config = get_config()
 db = Database(config.database_path, config.app_secret_key)
 templates = Jinja2Templates(directory="app/templates")
 serializer = URLSafeTimedSerializer(config.app_secret_key, salt="balance-monitor-session")
 scheduler = BalanceScheduler(db)
+platform_dispatch_policy_scheduler = PlatformDispatchPolicyScheduler(db, lambda: sub2api_admin_client())
+platform_dispatch_tasks: set[asyncio.Task[Any]] = set()
 FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
 FRONTEND_INDEX = FRONTEND_DIR / "index.html"
 FRONTEND_ASSETS_DIR = FRONTEND_DIR / "assets"
@@ -133,10 +149,20 @@ SUB2API_SITE_URL_SETTING = "sub2api_site_url"
 async def lifespan(app: FastAPI):
     db.init()
     db.ensure_admin(config.admin_username, config.admin_password)
+    db.interrupt_platform_dispatch_job()
     if uses_default_app_secret(config.app_secret_key):
         db.add_log("warning", "security", "APP_SECRET_KEY 仍为默认值，请尽快在 .env 中更换为长随机密钥")
     scheduler.start()
+    platform_dispatch_policy_scheduler.db = db
+    platform_dispatch_policy_scheduler.start()
     yield
+    tasks = list(platform_dispatch_tasks)
+    for task in tasks:
+        task.cancel()
+    for task in tasks:
+        with suppress(asyncio.CancelledError):
+            await task
+    await platform_dispatch_policy_scheduler.stop()
     await scheduler.stop()
 
 
@@ -1636,22 +1662,181 @@ async def api_accounts(request: Request):
 @app.get("/api/platform-dispatch")
 async def api_platform_dispatch(request: Request):
     require_user(request)
+    return platform_dispatch_cache_response()
+
+
+@app.get("/api/platform-dispatch/policy")
+async def api_platform_dispatch_policy(request: Request):
+    require_user(request)
+    return platform_dispatch_policy_response()
+
+
+@app.put("/api/platform-dispatch/policy")
+async def api_platform_dispatch_policy_update(request: Request):
+    require_user(request)
     try:
-        result = await sub2api_admin_client().platform_dispatch(recent_limit=6)
+        payload = await request.json()
+        current = db.get_platform_dispatch_policy(POLICY_DEFAULTS)["config"]
+        config_value = validate_policy_config(payload, current)
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+    site_url = db.get_setting(SUB2API_SITE_URL_SETTING, "").strip().rstrip("/")
+    db.save_platform_dispatch_policy(config_value, site_url)
+    platform_dispatch_policy_scheduler.notify_changed()
+    db.add_log("info", "platform-dispatch-policy", "平台调度策略配置已更新")
+    return platform_dispatch_policy_response()
+
+
+@app.post("/api/platform-dispatch/policy/run")
+async def api_platform_dispatch_policy_run(request: Request):
+    require_user(request)
+    if db.has_active_platform_dispatch_job():
+        return JSONResponse({"ok": False, "message": "平台调度同步任务正在执行"}, status_code=409)
+    try:
+        summary = await platform_dispatch_policy_scheduler.run_once()
     except Sub2ApiAdminError as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=exc.status_code)
-    settings = public_sub2api_settings()
-    return {
-        "ok": True,
-        "site_url": settings["site_url"],
-        "siteUrl": settings["site_url"],
-        **result,
-    }
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=502)
+    return {"ok": True, "summary": summary, **platform_dispatch_policy_response()}
+
+
+@app.get("/api/platform-dispatch/actions")
+async def api_platform_dispatch_actions(request: Request, page: int = 1, page_size: int = 50):
+    require_user(request)
+    result = db.list_platform_dispatch_actions(page, page_size)
+    return {"ok": True, **result, "pageSize": result["page_size"]}
+
+
+@app.get("/api/platform-dispatch/job")
+async def api_platform_dispatch_job(request: Request):
+    require_user(request)
+    return platform_dispatch_job_response()
+
+
+@app.post("/api/platform-dispatch/sync")
+@app.post("/api/platform-dispatch/refresh")
+async def api_platform_dispatch_sync(request: Request):
+    require_user(request)
+    active_job = db.get_platform_dispatch_job()
+    if active_job and active_job.get("status") in {"queued", "pending", "running"}:
+        return JSONResponse(
+            {"ok": False, "message": "已有平台调度任务正在执行", "job": public_platform_dispatch_job(active_job)},
+            status_code=409,
+        )
+    if platform_dispatch_policy_scheduler.lock.locked():
+        return JSONResponse({"ok": False, "message": "自动调度策略正在执行"}, status_code=409)
+    try:
+        payload = await request.json()
+        refresh_filter = platform_dispatch_refresh_filter(payload)
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+    try:
+        admin_client = sub2api_admin_client()
+    except Sub2ApiAdminError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=exc.status_code)
+    job_id = uuid4().hex
+    job = db.create_platform_dispatch_job(job_id, "accounts_sync", refresh_filter, admin_client.site_url)
+    if job is None:
+        return JSONResponse(
+            {"ok": False, "message": "已有平台调度任务正在执行", "job": public_platform_dispatch_job(db.get_platform_dispatch_job())},
+            status_code=409,
+        )
+    _start_platform_dispatch_task(_run_platform_dispatch_account_sync(job_id, admin_client, refresh_filter))
+    return JSONResponse({"ok": True, "job": public_platform_dispatch_job(job)}, status_code=202)
+
+
+@app.post("/api/platform-dispatch/activities/refresh")
+async def api_platform_dispatch_activities_refresh(request: Request):
+    require_user(request)
+    if platform_dispatch_policy_scheduler.lock.locked():
+        return JSONResponse({"ok": False, "message": "自动调度策略正在执行"}, status_code=409)
+    cache = db.get_platform_dispatch_cache()
+    accounts = cache.get("accounts") if cache else []
+    if not accounts:
+        return JSONResponse({"ok": False, "message": "请先同步账号信息"}, status_code=409)
+    try:
+        admin_client = sub2api_admin_client()
+    except Sub2ApiAdminError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=exc.status_code)
+    job_id = uuid4().hex
+    job = db.create_platform_dispatch_job(
+        job_id,
+        "activity_refresh",
+        cache.get("refresh_filter") or {},
+        admin_client.site_url,
+    )
+    if job is None:
+        return JSONResponse(
+            {"ok": False, "message": "已有平台调度任务正在执行", "job": public_platform_dispatch_job(db.get_platform_dispatch_job())},
+            status_code=409,
+        )
+    _start_platform_dispatch_task(_run_platform_dispatch_activity_refresh(job_id, admin_client, cache))
+    return JSONResponse({"ok": True, "job": public_platform_dispatch_job(job)}, status_code=202)
+
+
+@app.post("/api/platform-dispatch/groups/{group_id}/exclude")
+async def api_platform_dispatch_group_exclude(request: Request, group_id: int):
+    require_user(request)
+    if group_id <= 0:
+        return JSONResponse({"ok": False, "message": "分组 ID 必须是正整数"}, status_code=400)
+    if db.has_active_platform_dispatch_job():
+        return JSONResponse({"ok": False, "message": "平台调度任务执行期间不能修改排除分组"}, status_code=409)
+    if platform_dispatch_policy_scheduler.lock.locked():
+        return JSONResponse({"ok": False, "message": "自动调度策略执行期间不能修改排除分组"}, status_code=409)
+    site_url = db.get_setting(SUB2API_SITE_URL_SETTING, "").strip().rstrip("/")
+    cache = db.get_platform_dispatch_cache()
+    if not cache or cache.get("source_site_url") != site_url:
+        return JSONResponse({"ok": False, "message": "请先同步当前站点的账号信息"}, status_code=409)
+    group = next(
+        (
+            item
+            for item in cache.get("groups") or []
+            if isinstance(item, dict) and _platform_dispatch_account_id(item) == group_id
+        ),
+        None,
+    )
+    if group is None:
+        referenced = any(
+            group_id in _cached_platform_dispatch_group_ids(account)
+            for account in cache.get("accounts") or []
+            if isinstance(account, dict)
+        )
+        if referenced:
+            group = {"id": group_id, "name": f"分组 {group_id}", "platform": ""}
+    if group is None:
+        return JSONResponse({"ok": False, "message": "分组不存在或已经被排除"}, status_code=404)
+    db.exclude_platform_dispatch_group(
+        site_url,
+        group_id,
+        str(group.get("name") or f"分组 {group_id}"),
+        str(group.get("platform") or ""),
+    )
+    db.add_log("info", "platform-dispatch", f"排除 Sub2API 分组 {group.get('name') or group_id} (#{group_id})")
+    return platform_dispatch_cache_response()
+
+
+@app.delete("/api/platform-dispatch/excluded-groups/{group_id}")
+async def api_platform_dispatch_excluded_group_delete(request: Request, group_id: int):
+    require_user(request)
+    if group_id <= 0:
+        return JSONResponse({"ok": False, "message": "分组 ID 必须是正整数"}, status_code=400)
+    if db.has_active_platform_dispatch_job():
+        return JSONResponse({"ok": False, "message": "平台调度任务执行期间不能修改排除分组"}, status_code=409)
+    if platform_dispatch_policy_scheduler.lock.locked():
+        return JSONResponse({"ok": False, "message": "自动调度策略执行期间不能修改排除分组"}, status_code=409)
+    site_url = db.get_setting(SUB2API_SITE_URL_SETTING, "").strip().rstrip("/")
+    if not db.remove_platform_dispatch_excluded_group(site_url, group_id):
+        return JSONResponse({"ok": False, "message": "该分组未设置排除"}, status_code=404)
+    db.add_log("info", "platform-dispatch", f"取消排除 Sub2API 分组 #{group_id}")
+    return platform_dispatch_cache_response()
 
 
 @app.post("/api/platform-dispatch/accounts/{account_id}/enabled")
 async def api_platform_dispatch_account_enabled(request: Request, account_id: int):
     require_user(request)
+    if platform_dispatch_policy_scheduler.lock.locked():
+        return JSONResponse({"ok": False, "message": "自动调度策略正在执行"}, status_code=409)
     payload = await request.json()
     if not isinstance(payload, dict) or not isinstance(
         payload.get("is_enabled", payload.get("isEnabled", payload.get("enabled"))), bool
@@ -1659,9 +1844,11 @@ async def api_platform_dispatch_account_enabled(request: Request, account_id: in
         return JSONResponse({"ok": False, "message": "is_enabled 必须是布尔值"}, status_code=400)
     enabled = payload.get("is_enabled", payload.get("isEnabled", payload.get("enabled")))
     try:
-        account = await sub2api_admin_client().update_account_status(account_id, enabled)
+        async with platform_dispatch_policy_scheduler.lock:
+            account = await sub2api_admin_client().update_account_status(account_id, enabled)
     except Sub2ApiAdminError as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=exc.status_code)
+    db.update_platform_dispatch_cached_account(account)
     db.add_log("info", "platform-dispatch", f"Sub2API 账号 {account.get('name') or account_id}: {'启用' if enabled else '停用'}")
     return {"ok": True, "account": account}
 
@@ -3295,9 +3482,14 @@ async def api_sub2api_settings(request: Request):
         site_url = _normalize_sub2api_site_url(payload.get("site_url", payload.get("siteUrl", "")))
     except ValueError as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+    previous_site_url = db.get_setting(SUB2API_SITE_URL_SETTING, "")
     if admin_key:
         db.set_setting(SUB2API_ADMIN_KEY_SETTING, encrypt_value(admin_key, db.secret_key) or "")
     db.set_setting(SUB2API_SITE_URL_SETTING, site_url)
+    if previous_site_url != site_url:
+        db.clear_platform_dispatch_cache()
+        db.disable_platform_dispatch_policy(POLICY_DEFAULTS, site_url)
+        platform_dispatch_policy_scheduler.notify_changed()
     db.add_log("info", "settings", "API 更新 Sub2API 配置")
     return {"ok": True, "sub2api": public_sub2api_settings()}
 
@@ -3876,6 +4068,433 @@ def public_sub2api_settings() -> dict[str, Any]:
         "admin_key_masked": masked,
         "adminKeyMasked": masked,
     }
+
+
+def _start_platform_dispatch_task(coro: Any) -> None:
+    task = asyncio.create_task(coro)
+    platform_dispatch_tasks.add(task)
+    task.add_done_callback(platform_dispatch_tasks.discard)
+
+
+async def _run_platform_dispatch_account_sync(
+    job_id: str,
+    admin_client: Sub2ApiAdminClient,
+    refresh_filter: dict[str, Any],
+) -> None:
+    async with platform_dispatch_policy_scheduler.lock:
+        await _run_platform_dispatch_account_sync_locked(job_id, admin_client, refresh_filter)
+
+
+async def _run_platform_dispatch_account_sync_locked(
+    job_id: str,
+    admin_client: Sub2ApiAdminClient,
+    refresh_filter: dict[str, Any],
+) -> None:
+    try:
+        db.update_platform_dispatch_job(
+            job_id,
+            status="running",
+            phase="groups",
+            started_at=utc_now(),
+            message="正在获取分组信息",
+        )
+        old_cache = db.get_platform_dispatch_cache()
+        groups = await admin_client.list_groups(platform=refresh_filter["platform"] or None)
+        db.refresh_platform_dispatch_excluded_group_metadata(admin_client.site_url, groups)
+        excluded_groups = db.list_platform_dispatch_excluded_groups(admin_client.site_url)
+        excluded_group_ids = {int(group["id"]) for group in excluded_groups}
+        db.update_platform_dispatch_job(job_id, phase="accounts", message="正在分页获取账号")
+
+        page = 1
+        processed = 0
+        total = 0
+        total_pages = 0
+        raw_accounts: list[dict[str, Any]] = []
+        while True:
+            page_data = await admin_client.list_accounts_page(
+                page=page,
+                page_size=100,
+                platform=refresh_filter["platform"] or None,
+                account_type=refresh_filter["type"] or None,
+                status=refresh_filter["status"] or None,
+            )
+            page_accounts = page_data.get("accounts") or []
+            raw_accounts.extend(
+                account
+                for account in page_accounts
+                if matches_dispatch_filter(
+                    account,
+                    platform=refresh_filter["platform"],
+                    account_type=refresh_filter["type"],
+                    status=refresh_filter["status"],
+                )
+            )
+            processed += len(page_accounts)
+            response_total = page_data.get("total")
+            response_pages = page_data.get("pages")
+            if response_total is not None:
+                total = max(0, int(response_total))
+            if response_pages is not None:
+                total_pages = max(0, int(response_pages))
+            if total_pages:
+                percent = min(99, round(page * 100 / total_pages))
+            elif total:
+                percent = min(99, round(processed * 100 / total))
+            else:
+                percent = 0
+            db.update_platform_dispatch_job(
+                job_id,
+                current_page=page,
+                total_pages=total_pages,
+                processed=processed,
+                total=total,
+                percent=percent,
+                message=f"正在获取账号，第 {page} 页",
+            )
+            if not page_accounts:
+                break
+            if total_pages and page >= total_pages:
+                break
+            if total and processed >= total:
+                break
+            if response_pages is None and response_total is None and len(page_accounts) < 100:
+                break
+            page += 1
+
+        db.update_platform_dispatch_job(job_id, phase="finalizing", percent=99, message="正在写入账号缓存")
+        _ensure_platform_dispatch_site_unchanged(admin_client.site_url)
+        old_activity: dict[int, list[dict[str, Any]]] = {}
+        activities_refreshed_at = ""
+        if old_cache and old_cache.get("source_site_url") == admin_client.site_url:
+            activities_refreshed_at = str(old_cache.get("activities_refreshed_at") or "")
+            for account in old_cache.get("accounts") or []:
+                account_id = _platform_dispatch_account_id(account)
+                if account_id:
+                    old_activity[account_id] = account.get("recent_activity", account.get("recentActivity", [])) or []
+        filtered_accounts = filter_platform_dispatch_accounts_by_groups(raw_accounts, excluded_group_ids)
+        public_accounts = [
+            public_dispatch_account(account, old_activity.get(_platform_dispatch_account_id(account), []))
+            for account in filtered_accounts
+        ]
+        if not refresh_filter["include_ungrouped"]:
+            public_accounts = [account for account in public_accounts if _cached_platform_dispatch_group_ids(account)]
+        public_groups = [
+            public_dispatch_group(group)
+            for group in groups
+            if _platform_dispatch_account_id(group) not in excluded_group_ids
+        ]
+        db.replace_platform_dispatch_cache(
+            admin_client.site_url,
+            public_accounts,
+            public_groups,
+            [],
+            refresh_filter,
+            recent_limit=6,
+            activities_refreshed_at=activities_refreshed_at,
+        )
+        finished_at = utc_now()
+        db.update_platform_dispatch_job(
+            job_id,
+            status="succeeded",
+            phase="completed",
+            processed=processed,
+            total=total,
+            percent=100,
+            message=f"账号同步完成，共缓存 {len(public_accounts)} 个账号",
+            error="",
+            finished_at=finished_at,
+        )
+        db.add_log("info", "platform-dispatch", f"手动同步 Sub2API 平台调度缓存 {len(public_accounts)} 个账号")
+    except asyncio.CancelledError:
+        _fail_platform_dispatch_job(job_id, "任务因服务停止中断")
+        raise
+    except Exception as exc:
+        _fail_platform_dispatch_job(job_id, str(exc))
+
+
+async def _run_platform_dispatch_activity_refresh(
+    job_id: str,
+    admin_client: Sub2ApiAdminClient,
+    snapshot: dict[str, Any],
+) -> None:
+    async with platform_dispatch_policy_scheduler.lock:
+        await _run_platform_dispatch_activity_refresh_locked(job_id, admin_client, snapshot)
+
+
+async def _run_platform_dispatch_activity_refresh_locked(
+    job_id: str,
+    admin_client: Sub2ApiAdminClient,
+    snapshot: dict[str, Any],
+) -> None:
+    accounts = [account for account in snapshot.get("accounts") or [] if isinstance(account, dict)]
+    total = len(accounts)
+    semaphore = asyncio.Semaphore(8)
+    warnings: list[str] = []
+    refreshed_activity: dict[int, list[dict[str, Any]]] = {}
+    activity_tasks: list[asyncio.Task[Any]] = []
+
+    async def load_activity(account: dict[str, Any]) -> tuple[int, list[dict[str, Any]] | None, list[str]]:
+        account_id = _platform_dispatch_account_id(account)
+        name = str(account.get("name") or account_id or "未知账号")
+        if not account_id:
+            return 0, None, [f"账号 {name} 缺少有效 ID，已保留旧运行记录"]
+        async with semaphore:
+            usage_result, error_result = await asyncio.gather(
+                admin_client.list_recent_usage(account_id, 6),
+                admin_client.list_recent_errors(account_id, 6),
+                return_exceptions=True,
+            )
+        account_warnings: list[str] = []
+        usage_records: list[dict[str, Any]] = []
+        error_records: list[dict[str, Any]] = []
+        if isinstance(usage_result, Exception):
+            account_warnings.append(f"账号 {name} 的使用记录读取失败: {usage_result}")
+        else:
+            usage_records = usage_result
+        if isinstance(error_result, Exception):
+            account_warnings.append(f"账号 {name} 的错误记录读取失败: {error_result}")
+        else:
+            error_records = error_result
+        if isinstance(usage_result, Exception) and isinstance(error_result, Exception):
+            account_warnings.append(f"账号 {name} 的运行记录刷新失败，已保留旧数据")
+            return account_id, None, account_warnings
+        return account_id, merge_recent_activity(usage_records, error_records, 6), account_warnings
+
+    try:
+        db.update_platform_dispatch_job(
+            job_id,
+            status="running",
+            phase="activities",
+            total=total,
+            started_at=utc_now(),
+            message=f"正在刷新运行情况，0 / {total}",
+        )
+        succeeded = 0
+        processed = 0
+        activity_tasks = [asyncio.create_task(load_activity(account)) for account in accounts]
+        for result in asyncio.as_completed(activity_tasks):
+            account_id, activity, account_warnings = await result
+            warnings.extend(account_warnings)
+            if account_id and activity is not None:
+                refreshed_activity[account_id] = activity
+                succeeded += 1
+            processed += 1
+            db.update_platform_dispatch_job(
+                job_id,
+                processed=processed,
+                percent=min(99, round(processed * 100 / total)) if total else 0,
+                message=f"正在刷新运行情况，{processed} / {total}",
+            )
+        if succeeded == 0:
+            raise Sub2ApiAdminError("所有账号的运行情况均刷新失败", status_code=502)
+
+        db.update_platform_dispatch_job(job_id, phase="finalizing", percent=99, message="正在写入运行情况缓存")
+        _ensure_platform_dispatch_site_unchanged(admin_client.site_url)
+        current_cache = db.get_platform_dispatch_cache()
+        if not current_cache or current_cache.get("source_site_url") != admin_client.site_url:
+            raise Sub2ApiAdminError("账号缓存已变化，请重新同步后再刷新运行情况", status_code=409)
+        current_accounts = current_cache.get("accounts") or []
+        for account in current_accounts:
+            account_id = _platform_dispatch_account_id(account)
+            if account_id not in refreshed_activity:
+                continue
+            activity = refreshed_activity[account_id]
+            account["recent_activity"] = activity
+            account["recentActivity"] = activity
+        unique_warnings = list(dict.fromkeys(warning for warning in warnings if warning))
+        if not db.replace_platform_dispatch_activities(admin_client.site_url, current_accounts, unique_warnings):
+            raise Sub2ApiAdminError("运行情况缓存写入失败，请重新同步后重试", status_code=409)
+        db.update_platform_dispatch_job(
+            job_id,
+            status="succeeded",
+            phase="completed",
+            processed=processed,
+            total=total,
+            percent=100,
+            message=f"运行情况刷新完成，成功 {succeeded} / {total}",
+            error="",
+            finished_at=utc_now(),
+        )
+        db.add_log("info", "platform-dispatch", f"手动刷新 Sub2API 运行情况 {succeeded}/{total} 个账号")
+    except asyncio.CancelledError:
+        for task in activity_tasks:
+            task.cancel()
+        await asyncio.gather(*activity_tasks, return_exceptions=True)
+        _fail_platform_dispatch_job(job_id, "任务因服务停止中断")
+        raise
+    except Exception as exc:
+        for task in activity_tasks:
+            task.cancel()
+        await asyncio.gather(*activity_tasks, return_exceptions=True)
+        _fail_platform_dispatch_job(job_id, str(exc))
+
+
+def _ensure_platform_dispatch_site_unchanged(source_site_url: str) -> None:
+    current_site_url = db.get_setting(SUB2API_SITE_URL_SETTING, "").strip().rstrip("/")
+    if current_site_url != str(source_site_url or "").strip().rstrip("/"):
+        raise Sub2ApiAdminError("Sub2API 站点地址已变化，本次任务结果未写入", status_code=409)
+
+
+def _platform_dispatch_account_id(account: Any) -> int:
+    if not isinstance(account, dict):
+        return 0
+    try:
+        account_id = int(account.get("id"))
+    except (TypeError, ValueError):
+        return 0
+    return account_id if account_id > 0 else 0
+
+
+def _cached_platform_dispatch_group_ids(account: dict[str, Any]) -> set[int]:
+    raw_group_ids = account.get("group_ids", account.get("groupIds", []))
+    if not isinstance(raw_group_ids, list):
+        raw_group_ids = [raw_group_ids]
+    group_ids: set[int] = set()
+    for value in raw_group_ids:
+        try:
+            group_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if group_id > 0:
+            group_ids.add(group_id)
+    return group_ids
+
+
+def _fail_platform_dispatch_job(job_id: str, error: str) -> None:
+    message = str(error or "平台调度任务执行失败")
+    db.update_platform_dispatch_job(
+        job_id,
+        status="failed",
+        phase="failed",
+        message=message,
+        error=message,
+        finished_at=utc_now(),
+    )
+    db.add_log("error", "platform-dispatch", f"平台调度任务失败: {message}")
+
+
+def public_platform_dispatch_job(job: dict[str, Any] | None) -> dict[str, Any] | None:
+    if job is None:
+        return None
+    result = dict(job)
+    aliases = {
+        "job_id": "jobId",
+        "current_page": "currentPage",
+        "total_pages": "totalPages",
+        "source_site_url": "sourceSiteUrl",
+        "refresh_filter": "refreshFilter",
+        "created_at": "createdAt",
+        "started_at": "startedAt",
+        "finished_at": "finishedAt",
+        "updated_at": "updatedAt",
+    }
+    for source, alias in aliases.items():
+        result[alias] = result.get(source)
+    return result
+
+
+def platform_dispatch_job_response() -> dict[str, Any]:
+    return {"ok": True, "job": public_platform_dispatch_job(db.get_platform_dispatch_job())}
+
+
+def platform_dispatch_policy_response() -> dict[str, Any]:
+    policy = db.get_platform_dispatch_policy(POLICY_DEFAULTS)
+    site_url = db.get_setting(SUB2API_SITE_URL_SETTING, "").strip().rstrip("/")
+    states = db.list_platform_dispatch_account_states(site_url) if site_url else []
+    actions = db.list_platform_dispatch_actions(1, 10)["items"]
+    return {
+        "ok": True,
+        "config": policy["config"],
+        "runtime": policy["runtime"],
+        "accounts": states,
+        "actions": actions,
+    }
+
+
+def public_platform_dispatch_excluded_group(group: dict[str, Any]) -> dict[str, Any]:
+    result = dict(group)
+    result["createdAt"] = result.get("created_at")
+    result["updatedAt"] = result.get("updated_at")
+    return result
+
+
+def platform_dispatch_cache_response() -> dict[str, Any]:
+    cache = db.get_platform_dispatch_cache()
+    site_url = db.get_setting(SUB2API_SITE_URL_SETTING, "")
+    excluded_groups = [
+        public_platform_dispatch_excluded_group(group)
+        for group in db.list_platform_dispatch_excluded_groups(site_url)
+    ]
+    if cache is None:
+        accounts: list[dict[str, Any]] = []
+        groups: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        refresh_filter = {"platform": "", "type": "", "status": "", "include_ungrouped": True}
+        recent_limit = 6
+        activities_refreshed_at = None
+        refreshed_at = None
+        source_site_url = ""
+    else:
+        accounts = cache["accounts"]
+        groups = cache["groups"]
+        warnings = cache["warnings"]
+        refresh_filter = cache["refresh_filter"]
+        recent_limit = cache["recent_limit"]
+        activities_refreshed_at = cache["activities_refreshed_at"] or None
+        refreshed_at = cache["refreshed_at"]
+        source_site_url = cache["source_site_url"]
+    return {
+        "ok": True,
+        "has_cache": cache is not None,
+        "hasCache": cache is not None,
+        "site_url": site_url,
+        "siteUrl": site_url,
+        "source_site_url": source_site_url,
+        "sourceSiteUrl": source_site_url,
+        "accounts": accounts,
+        "groups": groups,
+        "warnings": warnings,
+        "excluded_groups": excluded_groups,
+        "excludedGroups": excluded_groups,
+        "recent_limit": recent_limit,
+        "recentLimit": recent_limit,
+        "activities_refreshed_at": activities_refreshed_at,
+        "activitiesRefreshedAt": activities_refreshed_at,
+        "refreshed_at": refreshed_at,
+        "refreshedAt": refreshed_at,
+        "refresh_filter": refresh_filter,
+        "refreshFilter": refresh_filter,
+    }
+
+
+def platform_dispatch_refresh_filter(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("请求内容格式不正确")
+    values: dict[str, Any] = {}
+    aliases = {
+        "platform": ("platform",),
+        "type": ("type", "account_type", "accountType"),
+        "status": ("status",),
+    }
+    for key, candidates in aliases.items():
+        raw = next((payload[candidate] for candidate in candidates if candidate in payload), "")
+        if raw is None:
+            raw = ""
+        if not isinstance(raw, str):
+            raise ValueError(f"{key} 必须是字符串")
+        value = raw.strip()
+        if len(value) > 100:
+            raise ValueError(f"{key} 长度不能超过 100 个字符")
+        values[key] = value
+    values["status"] = values["status"].lower()
+    allowed_statuses = {"", "active", "inactive", "error", "rate_limited", "temp_unschedulable", "unschedulable"}
+    if values["status"] not in allowed_statuses:
+        raise ValueError("status 不是有效的 Sub2API 账号筛选状态")
+    include_ungrouped = payload.get("include_ungrouped", payload.get("includeUngrouped", True))
+    if not isinstance(include_ungrouped, bool):
+        raise ValueError("include_ungrouped 必须是布尔值")
+    values["include_ungrouped"] = include_ungrouped
+    return values
 
 
 def public_cpa_settings() -> dict[str, Any]:

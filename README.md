@@ -98,6 +98,12 @@ JSON 示例：
 
 平台配置页面提供“下载账号导入插件”按钮，可下载独立的 `NewAPI/Sub2API Account Grabber` Chrome/Edge 扩展。它与 OpenCode Go 插件分开，源码模板位于 `extension/account-grabber`。安装后，扩展会在识别到 newApi 或 sub2Api 类网站时显示右侧悬浮按钮；悬浮窗可自动填入名称、Base URL、备注 `1:1`、预警阈值 `5`、仪表盘显示和自动查询开关，并从页面请求或浏览器存储中抓取 newApi 的 `accessToken/userId`、sub2Api 的第一个 `apiKey` 与已登录 `accessToken/refreshToken`。推送到 app 时会按平台和 Base URL 判重：Base URL 相同则更新账号，不同则新增账号；保存后不会立即触发余额或分组查询。
 
+## 平台调度
+
+“平台调度”页面使用 SQLite 中最后一次成功同步的账号集合。手动同步会用本次筛选结果完整替换托管集合，远端请求失败则保留旧集合；账号手动启停会立即写入 Sub2API 并更新本地快照。
+
+自动调度总开关和健康回池、智能扩容、负载因子、价格保护四项策略默认关闭。总开关关闭时，后台只增量读取请求证据并计算健康评分，不探活、不写远端；总开关开启后，异常账号停用和至少保留 1 个可用账号始终生效，即使四项子策略均关闭。调度器每 60 秒运行一轮，每轮最多自动切换 1 个账号状态。账号健康证据每个账号保留最近 60 条，探活证据有效期默认 180 秒，账号状态、目标并发、目标负载因子和操作审计均保存在 SQLite。
+
 ## OpenCode Go
 
 页面顶部的 `OpenCode Go` 用于监控 OpenCode Go 订阅的 5h、7d、30d 用量和 API key。新增账号时填写 Google 邮箱和密码用于账号归档；服务端不会启动内置浏览器，也不会自动操作 Google 登录。
@@ -129,6 +135,13 @@ Cookie: name=value; name2=value2
 - `GET /api/accounts`
 - `GET /api/dashboard`
 - `GET /api/settings`
+- `GET /api/platform-dispatch`（只读取本地缓存）
+- `POST /api/platform-dispatch/refresh`（手动拉取并覆盖缓存）
+- `POST /api/platform-dispatch/accounts/{id}/enabled`
+- `GET /api/platform-dispatch/policy`
+- `PUT /api/platform-dispatch/policy`
+- `POST /api/platform-dispatch/policy/run`
+- `GET /api/platform-dispatch/actions`
 - `POST /api/accounts`
 - `POST /api/accounts/import-by-base-url`
 - `POST /api/accounts/bulk`
