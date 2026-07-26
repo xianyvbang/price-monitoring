@@ -47,6 +47,7 @@ const collapsedGroups = ref(new Set());
 const updatingIds = ref(new Set());
 const updatingGroupIds = ref(new Set());
 const updatingExcludedAccountIds = ref(new Set());
+const probingAccountIds = ref(new Set());
 const updatingProbeModelIds = ref(new Set());
 const updatingGroupProbeModelIds = ref(new Set());
 const excludingUngrouped = ref(false);
@@ -224,7 +225,7 @@ const policyProgressDetail = computed(() => {
 const policyAutoRunning = computed(() => {
   return Boolean(policyRuntime.value?.is_running ?? policyRuntime.value?.isRunning ?? policyRuntime.value?.status === "running");
 });
-const dispatchMutationDisabled = computed(() => controlsDisabled.value || policyAutoRunning.value);
+const dispatchMutationDisabled = computed(() => controlsDisabled.value || policyAutoRunning.value || probingAccountIds.value.size > 0);
 const policyStatusText = computed(() => {
   if (policyAutoRunning.value) return policyConfig.enabled ? "正在自动调度" : "正在评分";
   if (policyRuntime.value?.status === "failed" && (policyConfig.enabled || policyConfig.auto_scoring_enabled)) return "执行异常";
@@ -698,6 +699,42 @@ function setProbeModelUpdating(accountId, updating) {
 
 function isProbeModelUpdating(account) {
   return updatingProbeModelIds.value.has(Number(account?.id));
+}
+
+function setAccountProbing(accountId, probing) {
+  const next = new Set(probingAccountIds.value);
+  if (probing) next.add(accountId);
+  else next.delete(accountId);
+  probingAccountIds.value = next;
+}
+
+function isAccountProbing(account) {
+  return probingAccountIds.value.has(Number(account?.id));
+}
+
+async function probeAccount(account) {
+  const accountId = Number(account?.id);
+  if (!Number.isInteger(accountId) || accountId <= 0) return;
+  setAccountProbing(accountId, true);
+  try {
+    const payload = await api.probePlatformDispatchAccount(accountId);
+    applyPolicyPayload(payload);
+    const probe = payload.probe || {};
+    const model = probe.model || "Sub2API 默认模型";
+    if (probe.success) {
+      ElMessage.success(`${account.name || `账号 ${accountId}`} 探活成功 · ${model}`);
+    } else {
+      ElMessage.error(probe.message || `${account.name || `账号 ${accountId}`} 探活失败`);
+    }
+  } catch (error) {
+    if (error.status === 409) {
+      await refreshPolicyRuntime().catch(() => {});
+      schedulePolicyPoll();
+    }
+    ElMessage.error(error.message || "账号探活失败");
+  } finally {
+    setAccountProbing(accountId, false);
+  }
 }
 
 async function configureGroupProbeModel(group) {
@@ -1525,6 +1562,17 @@ onBeforeUnmount(() => {
                 <el-tag :type="statusType(accountFilterStatus(account))" size="small">
                   {{ statusText(accountFilterStatus(account)) }}
                 </el-tag>
+                <el-tooltip content="单独探活">
+                  <el-button
+                    circle
+                    text
+                    :icon="VideoPlay"
+                    :loading="isAccountProbing(account)"
+                    :disabled="dispatchMutationDisabled"
+                    :aria-label="`单独探活 ${account.name}`"
+                    @click="probeAccount(account)"
+                  />
+                </el-tooltip>
                 <el-tooltip content="设置探活模型">
                   <el-button
                     circle

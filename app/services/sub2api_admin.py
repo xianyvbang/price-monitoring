@@ -303,7 +303,7 @@ class Sub2ApiAdminClient:
             "Content-Type": "application/json",
         }
         probe_model = str(model or "").strip()
-        request_body = {"model": probe_model} if probe_model else {}
+        request_body = {"model_id": probe_model} if probe_model else {}
         try:
             async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True) as client:
                 response = await client.request(

@@ -235,6 +235,56 @@ def test_platform_dispatch_account_probe_model_api_sets_override_and_restores_de
     assert conflict.status_code == 409
 
 
+def test_platform_dispatch_account_probe_api_uses_configured_model_and_updates_health(tmp_path, monkeypatch):
+    test_db = setup_test_db(tmp_path, monkeypatch)
+    test_db.set_setting("sub2api_site_url", "https://sub.example")
+    test_db.replace_platform_dispatch_cache(
+        "https://sub.example",
+        [{"id": 1, "name": "probe-account", "status": "active", "group_ids": [2]}],
+        [{"id": 2, "name": "主分组"}],
+        [],
+        {"platform": "", "type": "", "status": "", "include_ungrouped": True},
+    )
+    test_db.save_platform_dispatch_policy(
+        {"group_probe_models": {"2": "group-model"}}, "https://sub.example"
+    )
+
+    class ProbeClient:
+        site_url = "https://sub.example"
+
+        def __init__(self):
+            self.probes = []
+
+        async def probe_account(self, account_id, model=None):
+            self.probes.append((account_id, model))
+            return {"success": True, "message": "ok"}
+
+    probe_client = ProbeClient()
+    monkeypatch.setattr("app.main.sub2api_admin_client", lambda: probe_client)
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.post("/api/platform-dispatch/accounts/1/probe")
+        missing = client.post("/api/platform-dispatch/accounts/99/probe")
+        test_db.create_platform_dispatch_job("active-job", "accounts_sync", {}, "https://sub.example")
+        conflict = client.post("/api/platform-dispatch/accounts/1/probe")
+
+    assert response.status_code == 200
+    assert response.json()["probe"] == {
+        "success": True,
+        "message": "ok",
+        "account_id": 1,
+        "model": "group-model",
+        "health_score": 100.0,
+    }
+    assert probe_client.probes == [(1, "group-model")]
+    state = response.json()["accounts"][0]
+    assert state["health_score"] == 100.0
+    assert state["probe_records"][0]["is_probe_success"] is True
+    assert missing.status_code == 404
+    assert conflict.status_code == 409
+
+
 def test_platform_dispatch_group_probe_model_api_sets_override_and_restores_default(tmp_path, monkeypatch):
     test_db = setup_test_db(tmp_path, monkeypatch)
     test_db.set_setting("sub2api_site_url", "https://sub.example")
@@ -440,7 +490,7 @@ async def test_sub2api_admin_probe_sends_configured_model_and_omits_empty_model(
 
     assert configured["success"] is True
     assert default["success"] is True
-    assert DummyAsyncClient.requests[0]["json"] == {"model": "gpt-5-mini"}
+    assert DummyAsyncClient.requests[0]["json"] == {"model_id": "gpt-5-mini"}
     assert DummyAsyncClient.requests[1]["json"] == {}
 
 
@@ -686,16 +736,34 @@ def test_platform_dispatch_evidence_refresh_reloads_history_probes_and_recalcula
     test_db.replace_platform_dispatch_cache(
         "https://sub.example",
         [
-            {"id": 1, "name": "works", "status": "active", "recent_activity": [{"id": "old-1"}]},
-            {"id": 2, "name": "fails", "status": "active", "recent_activity": [{"id": "old-2"}]},
+            {
+                "id": 1,
+                "name": "works",
+                "status": "active",
+                "group_ids": [7],
+                "recent_activity": [{"id": "old-1"}],
+            },
+            {
+                "id": 2,
+                "name": "fails",
+                "status": "active",
+                "group_ids": [7],
+                "recent_activity": [{"id": "old-2"}],
+            },
         ],
         [],
         [],
         {"platform": "", "type": "", "status": ""},
     )
+    test_db.save_platform_dispatch_policy(
+        {"group_probe_models": {"7": "group-model"}}, "https://sub.example"
+    )
 
     class EvidenceClient:
         site_url = "https://sub.example"
+
+        def __init__(self):
+            self.probe_models = []
 
         async def list_usage_page(self, account_id, page, page_size, start_date):
             assert page_size == 100
@@ -719,11 +787,13 @@ def test_platform_dispatch_evidence_refresh_reloads_history_probes_and_recalcula
             }
 
         async def probe_account(self, account_id, model=None):
+            self.probe_models.append((account_id, model))
             if account_id == 2:
                 return {"success": False, "status_code": 503, "message": "probe unavailable"}
             return {"success": True, "message": "ok"}
 
-    monkeypatch.setattr("app.main.sub2api_admin_client", lambda: EvidenceClient())
+    evidence_client = EvidenceClient()
+    monkeypatch.setattr("app.main.sub2api_admin_client", lambda: evidence_client)
 
     with TestClient(app) as client:
         login(client)
@@ -737,6 +807,7 @@ def test_platform_dispatch_evidence_refresh_reloads_history_probes_and_recalcula
     assert job["processed"] == 2
     assert job["total"] == 2
     assert job["kind"] == "evidence_refresh"
+    assert evidence_client.probe_models == [(1, "group-model"), (2, "group-model")]
     cached_accounts = response.json()["accounts"]
     assert cached_accounts[0]["recent_activity"] == [{"id": "old-1"}]
     assert cached_accounts[1]["recent_activity"] == [{"id": "old-2"}]

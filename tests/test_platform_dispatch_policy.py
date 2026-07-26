@@ -439,6 +439,40 @@ async def test_disabling_automatic_scoring_cancels_active_round_and_keeps_schedu
 
 
 @pytest.mark.asyncio
+async def test_policy_change_can_rearm_timer_without_starting_an_automatic_round(tmp_path, monkeypatch):
+    db = make_db(tmp_path)
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: None)
+    calls = 0
+    first_run = asyncio.Event()
+    immediate_run = asyncio.Event()
+
+    async def fake_run_once(*, automatic=False):
+        nonlocal calls
+        assert automatic is True
+        calls += 1
+        if calls == 1:
+            first_run.set()
+        elif calls == 2:
+            immediate_run.set()
+        return {}
+
+    monkeypatch.setattr(scheduler, "run_once", fake_run_once)
+    scheduler.start()
+    try:
+        await asyncio.wait_for(first_run.wait(), timeout=1)
+
+        scheduler.notify_changed(run_immediately=False)
+        await asyncio.sleep(0.05)
+        assert calls == 1
+
+        scheduler.notify_changed()
+        await asyncio.wait_for(immediate_run.wait(), timeout=1)
+        assert calls == 2
+    finally:
+        await scheduler.stop()
+
+
+@pytest.mark.asyncio
 async def test_minimum_pool_recovers_with_all_subpolicies_off(tmp_path):
     db = make_db(tmp_path)
     accounts = [{"id": 1, "name": "one", "status": "inactive", "concurrency": 20}]
@@ -485,6 +519,50 @@ async def test_probe_model_prefers_account_then_group_then_default(tmp_path):
         (3, "group-twenty"),
         (4, "group-ten"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_probe_model_uses_sub2api_default_when_no_override_is_configured(tmp_path):
+    db = make_db(tmp_path)
+    accounts = [{"id": 1, "name": "default", "status": "active", "group_ids": [10]}]
+    prepare_cache(db, accounts)
+    client = PolicyClient(accounts)
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+
+    await scheduler.run_once()
+
+    assert client.probe_models == [(1, None)]
+
+
+@pytest.mark.asyncio
+async def test_manual_refresh_and_automatic_scoring_share_evidence_collection(tmp_path):
+    db = make_db(tmp_path)
+    accounts = [{"id": 1, "name": "one", "status": "active", "group_ids": [10]}]
+    prepare_cache(db, accounts)
+    db.save_platform_dispatch_policy(
+        {**POLICY_DEFAULTS, "group_probe_models": {"10": "group-model"}},
+        "https://sub.example",
+    )
+    client = PolicyClient(accounts)
+
+    class TrackingScheduler(PlatformDispatchPolicyScheduler):
+        def __init__(self):
+            super().__init__(db, lambda: client)
+            self.collection_modes = []
+
+        async def _collect_health_evidence(self, *args, **kwargs):
+            self.collection_modes.append(
+                (bool(kwargs.get("force_full")), bool(kwargs.get("force_probe")))
+            )
+            return await super()._collect_health_evidence(*args, **kwargs)
+
+    scheduler = TrackingScheduler()
+
+    await scheduler.run_once(automatic=True)
+    await scheduler.refresh_health_evidence(client, db.get_platform_dispatch_cache())
+
+    assert scheduler.collection_modes == [(False, False), (True, True)]
+    assert client.probe_models == [(1, "group-model"), (1, "group-model")]
 
 
 @pytest.mark.asyncio

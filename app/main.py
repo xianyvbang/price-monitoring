@@ -1681,7 +1681,7 @@ async def api_platform_dispatch_policy_update(request: Request):
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
     site_url = db.get_setting(SUB2API_SITE_URL_SETTING, "").strip().rstrip("/")
     db.save_platform_dispatch_policy(config_value, site_url)
-    platform_dispatch_policy_scheduler.notify_changed()
+    platform_dispatch_policy_scheduler.notify_changed(run_immediately=False)
     db.add_log("info", "platform-dispatch-policy", "平台调度策略配置已更新")
     return platform_dispatch_policy_response()
 
@@ -1795,6 +1795,39 @@ async def api_platform_dispatch_account_probe_model_update(request: Request, acc
         f"探活模型已{'设置为 ' + configured_model if configured_model else '恢复继承配置'}",
     )
     return platform_dispatch_policy_response()
+
+
+@app.post("/api/platform-dispatch/accounts/{account_id}/probe")
+async def api_platform_dispatch_account_probe(request: Request, account_id: int):
+    require_user(request)
+    if account_id <= 0:
+        return JSONResponse({"ok": False, "message": "账号 ID 必须是正整数"}, status_code=400)
+    if db.has_active_platform_dispatch_job():
+        return JSONResponse({"ok": False, "message": "平台调度任务执行期间不能单独探活"}, status_code=409)
+    if platform_dispatch_policy_scheduler.lock.locked():
+        return JSONResponse({"ok": False, "message": "自动调度策略执行期间不能单独探活"}, status_code=409)
+    cache = db.get_platform_dispatch_cache()
+    if not cache or not cache.get("accounts"):
+        return JSONResponse({"ok": False, "message": "请先同步账号信息"}, status_code=409)
+    try:
+        admin_client = sub2api_admin_client()
+        async with platform_dispatch_policy_scheduler.lock:
+            result = await platform_dispatch_policy_scheduler.probe_account_health(
+                admin_client, cache, account_id
+            )
+    except Sub2ApiAdminError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=exc.status_code)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=502)
+
+    log_level = "info" if result.get("success") else "warning"
+    db.add_log(
+        log_level,
+        "platform-dispatch-policy",
+        f"Sub2API 调度账号 #{account_id} 单独探活{'成功' if result.get('success') else '失败'}"
+        + (f"，模型 {result['model']}" if result.get("model") else ""),
+    )
+    return {"ok": True, "probe": result, **platform_dispatch_policy_response()}
 
 
 @app.put("/api/platform-dispatch/groups/{group_id}/probe-model")

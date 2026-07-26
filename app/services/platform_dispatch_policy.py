@@ -386,6 +386,27 @@ def allocate_weighted_increments(
     return {account_id: value for account_id, value in additions.items() if value > 0}
 
 
+def _resolve_probe_model(account_id: int, account: dict[str, Any], config: dict[str, Any]) -> str | None:
+    account_models = config.get("account_probe_models") or {}
+    account_model = str(
+        account_models.get(str(account_id), account_models.get(account_id, "")) or ""
+    ).strip()
+    if account_model:
+        return account_model
+
+    group_models = config.get("group_probe_models") or {}
+    group_ids = public_dispatch_account(account, []).get("group_ids") or []
+    for group_id in sorted(set(group_ids)):
+        group_model = str(
+            group_models.get(str(group_id), group_models.get(group_id, "")) or ""
+        ).strip()
+        if group_model:
+            return group_model
+
+    default_model = str(config.get("default_probe_model") or "").strip()
+    return default_model or None
+
+
 class PlatformDispatchPolicyScheduler:
     def __init__(self, db: Database, client_factory: Callable[[], Sub2ApiAdminClient]) -> None:
         self.db = db
@@ -395,12 +416,14 @@ class PlatformDispatchPolicyScheduler:
         self._automatic_run_task: asyncio.Task[dict[str, Any]] | None = None
         self._stopped = asyncio.Event()
         self._changed = asyncio.Event()
+        self._run_after_change = False
 
     def start(self) -> None:
         if self._task is None or self._task.done():
             self.lock = asyncio.Lock()
             self._stopped = asyncio.Event()
             self._changed = asyncio.Event()
+            self._run_after_change = False
             self._automatic_run_task = None
             self._task = asyncio.create_task(self._run_loop())
 
@@ -421,7 +444,9 @@ class PlatformDispatchPolicyScheduler:
                 await automatic_run_task
         self._automatic_run_task = None
 
-    def notify_changed(self) -> None:
+    def notify_changed(self, *, run_immediately: bool = True) -> None:
+        if run_immediately:
+            self._run_after_change = True
         self._changed.set()
         config = self.db.get_platform_dispatch_policy(POLICY_DEFAULTS)["config"]
         automatic_run_task = self._automatic_run_task
@@ -447,12 +472,20 @@ class PlatformDispatchPolicyScheduler:
             finally:
                 if self._automatic_run_task is automatic_run_task:
                     self._automatic_run_task = None
-            policy = self.db.get_platform_dispatch_policy(POLICY_DEFAULTS)["config"]
-            timeout = max(5, int(policy.get("probe_interval_seconds") or 60))
-            try:
-                await asyncio.wait_for(self._changed.wait(), timeout=timeout)
-            except asyncio.TimeoutError:
-                pass
+            while not self._stopped.is_set():
+                if self._run_after_change:
+                    self._run_after_change = False
+                    break
+                policy = self.db.get_platform_dispatch_policy(POLICY_DEFAULTS)["config"]
+                timeout = max(5, int(policy.get("probe_interval_seconds") or 60))
+                self._changed.clear()
+                try:
+                    await asyncio.wait_for(self._changed.wait(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    break
+                if self._run_after_change:
+                    self._run_after_change = False
+                    break
 
     async def run_once(self, *, automatic: bool = False) -> dict[str, Any]:
         if automatic:
@@ -495,37 +528,19 @@ class PlatformDispatchPolicyScheduler:
             raise Sub2ApiAdminError("请先同步账号信息", status_code=409)
 
         config = validate_policy_config({}, self.db.get_platform_dispatch_policy(POLICY_DEFAULTS)["config"])
-        ttl_seconds = int(config["probe_interval_seconds"]) * int(config["evidence_ttl_multiplier"])
-        warnings = await self._refresh_evidence(
+        warnings, health, probe_results, _ = await self._collect_health_evidence(
             client,
             site_url,
             accounts,
-            force_full=True,
-            progress=progress,
-        )
-        now = datetime.now(timezone.utc)
-        health = {
-            account_id: calculate_health(
-                self.db.list_platform_dispatch_evidence(site_url, account_id), now, ttl_seconds
-            )
-            for account_id in accounts
-        }
-        await self._probe_due_accounts(
-            client,
-            site_url,
-            accounts,
-            health,
             config,
-            force=True,
+            force_full=True,
+            force_probe=True,
             progress=progress,
         )
 
-        now = datetime.now(timezone.utc)
         evidence_total = 0
         for account_id, account in accounts.items():
-            item = calculate_health(
-                self.db.list_platform_dispatch_evidence(site_url, account_id), now, ttl_seconds
-            )
+            item = health[account_id]
             evidence_total += int(item["evidence_count"])
             public = public_dispatch_account(account, _cached_activity(cache, account_id))
             public.update(
@@ -554,9 +569,73 @@ class PlatformDispatchPolicyScheduler:
         return {
             "refreshed_accounts": len(accounts),
             "evidence_count": evidence_total,
-            "probe_count": len(accounts),
+            "probe_count": len(probe_results),
             "warnings": list(dict.fromkeys(warnings)),
         }
+
+    async def probe_account_health(
+        self,
+        client: Sub2ApiAdminClient,
+        cache: dict[str, Any],
+        account_id: int,
+    ) -> dict[str, Any]:
+        site_url = client.site_url
+        if cache.get("source_site_url") != site_url:
+            raise Sub2ApiAdminError("平台调度缓存与当前 Sub2API 站点不一致", status_code=409)
+        account = next(
+            (
+                item
+                for item in cache.get("accounts") or []
+                if isinstance(item, dict) and _optional_int(item.get("id")) == account_id
+            ),
+            None,
+        )
+        if account is None:
+            raise Sub2ApiAdminError("账号不存在", status_code=404)
+
+        config = validate_policy_config({}, self.db.get_platform_dispatch_policy(POLICY_DEFAULTS)["config"])
+        _, health, probe_results, _ = await self._collect_health_evidence(
+            client,
+            site_url,
+            {account_id: account},
+            config,
+            refresh_sources=False,
+            force_probe=True,
+        )
+        item = health[account_id]
+        public = public_dispatch_account(account, _cached_activity(cache, account_id))
+        public.update(
+            {
+                "health_score": _round_score(item["health_score"]),
+                "health_short_score": _round_score(item["short_score"]),
+                "health_long_score": _round_score(item["long_score"]),
+                "health_evidence_count": item["evidence_count"],
+                "health_evidence_at": item["evidence_at"] or None,
+                "health_evidence_fresh": bool(item["evidence_fresh"]),
+            }
+        )
+        self.db.update_platform_dispatch_cached_account(public)
+        self.db.upsert_platform_dispatch_account_state(
+            site_url,
+            account_id,
+            name=str(account.get("name") or ""),
+            health_score=item["health_score"],
+            short_score=item["short_score"],
+            long_score=item["long_score"],
+            evidence_count=item["evidence_count"],
+            evidence_at=item["evidence_at"] or None,
+            evidence_fresh=1 if item["evidence_fresh"] else 0,
+            latest_probe_success_at=item["latest_probe_success_at"] or None,
+        )
+        result = dict(probe_results[account_id])
+        result.update(
+            {
+                "account_id": account_id,
+                "model": _resolve_probe_model(account_id, account, config) or "",
+                "health_score": _round_score(item["health_score"]),
+            }
+        )
+        return result
 
     async def _run_once_locked(self) -> dict[str, Any]:
         started_at = utc_now()
@@ -673,23 +752,9 @@ class PlatformDispatchPolicyScheduler:
         managed_ids.intersection_update(accounts)
         group_map = {int(group["id"]): group for group in groups if isinstance(group, dict) and _optional_int(group.get("id"))}
 
-        warnings = await self._refresh_evidence(client, site_url, accounts, progress=progress)
-        now = datetime.now(timezone.utc)
-        ttl_seconds = int(config["probe_interval_seconds"]) * int(config["evidence_ttl_multiplier"])
-        health = {
-            account_id: calculate_health(
-                self.db.list_platform_dispatch_evidence(site_url, account_id), now, ttl_seconds
-            )
-            for account_id in managed_ids
-        }
-
-        await self._probe_due_accounts(client, site_url, accounts, health, config, progress=progress)
-        health = {
-            account_id: calculate_health(
-                self.db.list_platform_dispatch_evidence(site_url, account_id), now, ttl_seconds
-            )
-            for account_id in managed_ids
-        }
+        warnings, health, _, ttl_seconds = await self._collect_health_evidence(
+            client, site_url, accounts, config, progress=progress
+        )
 
         concurrency_data: dict[str, Any] | None = None
         availability_data: dict[str, Any] | None = None
@@ -790,6 +855,53 @@ class PlatformDispatchPolicyScheduler:
             "groups": len(public_groups),
         }
         return summary
+
+    async def _collect_health_evidence(
+        self,
+        client: Sub2ApiAdminClient,
+        site_url: str,
+        accounts: dict[int, dict[str, Any]],
+        config: dict[str, Any],
+        *,
+        refresh_sources: bool = True,
+        force_full: bool = False,
+        force_probe: bool = False,
+        progress: Callable[[str, int, int], None] | None = None,
+    ) -> tuple[list[str], dict[int, dict[str, Any]], dict[int, dict[str, Any]], int]:
+        warnings = []
+        if refresh_sources:
+            warnings = await self._refresh_evidence(
+                client,
+                site_url,
+                accounts,
+                force_full=force_full,
+                progress=progress,
+            )
+        ttl_seconds = int(config["probe_interval_seconds"]) * int(config["evidence_ttl_multiplier"])
+        now = datetime.now(timezone.utc)
+        health = {
+            account_id: calculate_health(
+                self.db.list_platform_dispatch_evidence(site_url, account_id), now, ttl_seconds
+            )
+            for account_id in accounts
+        }
+        probe_results = await self._probe_due_accounts(
+            client,
+            site_url,
+            accounts,
+            health,
+            config,
+            force=force_probe,
+            progress=progress,
+        )
+        now = datetime.now(timezone.utc)
+        health = {
+            account_id: calculate_health(
+                self.db.list_platform_dispatch_evidence(site_url, account_id), now, ttl_seconds
+            )
+            for account_id in accounts
+        }
+        return warnings, health, probe_results, ttl_seconds
 
     async def _refresh_evidence(
         self,
@@ -948,32 +1060,21 @@ class PlatformDispatchPolicyScheduler:
         *,
         force: bool = False,
         progress: Callable[[str, int, int], None] | None = None,
-    ) -> None:
+    ) -> dict[int, dict[str, Any]]:
         semaphore = asyncio.Semaphore(8)
         now = datetime.now(timezone.utc)
         completed = 0
+        results: dict[int, dict[str, Any]] = {}
 
         async def probe(account_id: int) -> None:
             nonlocal completed
-            account_models = config.get("account_probe_models") or {}
-            account_model = str(account_models.get(str(account_id), account_models.get(account_id, "")) or "").strip()
-            group_models = config.get("group_probe_models") or {}
-            group_model = ""
-            if not account_model:
-                group_ids = public_dispatch_account(accounts[account_id], []).get("group_ids") or []
-                for group_id in group_ids:
-                    group_model = str(
-                        group_models.get(str(group_id), group_models.get(group_id, "")) or ""
-                    ).strip()
-                    if group_model:
-                        break
-            default_model = str(config.get("default_probe_model") or "").strip()
-            probe_model = account_model or group_model or default_model
+            probe_model = _resolve_probe_model(account_id, accounts[account_id], config)
             try:
                 async with semaphore:
                     result = await client.probe_account(account_id, model=probe_model or None)
             except Exception as exc:
                 result = {"success": False, "is_timeout": False, "message": f"账号探活失败: {exc}"}
+            results[account_id] = result
             activity = {
                 "kind": "success" if result.get("success") else "error",
                 "is_error": not result.get("success"),
@@ -1009,6 +1110,7 @@ class PlatformDispatchPolicyScheduler:
         if progress:
             progress("probe", 0, len(due))
         await asyncio.gather(*(probe(account_id) for account_id in due))
+        return results
 
     async def _apply_status_policy(
         self,
