@@ -1487,24 +1487,26 @@ onBeforeUnmount(() => {
         <strong>已排除账号</strong>
         <el-tag size="small" type="info" effect="plain">{{ excludedAccounts.length }}</el-tag>
       </header>
-      <div v-for="account in excludedAccounts" :key="account.id" class="dispatch-excluded-account-row">
-        <div>
-          <strong>{{ account.name || `账号 ${account.id}` }}</strong>
-          <span>#{{ account.id }}</span>
-          <el-tag v-if="account.platform" size="small" effect="plain">{{ account.platform }}</el-tag>
-          <span v-if="account.type">{{ account.type }}</span>
+      <div class="dispatch-excluded-account-grid">
+        <div v-for="account in excludedAccounts" :key="account.id" class="dispatch-excluded-account-row">
+          <div>
+            <strong>{{ account.name || `账号 ${account.id}` }}</strong>
+            <span>#{{ account.id }}</span>
+            <el-tag v-if="account.platform" size="small" effect="plain">{{ account.platform }}</el-tag>
+            <span v-if="account.type">{{ account.type }}</span>
+          </div>
+          <el-tooltip content="取消排除">
+            <el-button
+              circle
+              text
+              :icon="CircleClose"
+              :loading="isExcludedAccountUpdating(account)"
+              :disabled="dispatchMutationDisabled || policySaving"
+              :aria-label="`取消排除 ${account.name || account.id}`"
+              @click="restoreExcludedAccount(account)"
+            />
+          </el-tooltip>
         </div>
-        <el-tooltip content="取消排除">
-          <el-button
-            circle
-            text
-            :icon="CircleClose"
-            :loading="isExcludedAccountUpdating(account)"
-            :disabled="dispatchMutationDisabled || policySaving"
-            :aria-label="`取消排除 ${account.name || account.id}`"
-            @click="restoreExcludedAccount(account)"
-          />
-        </el-tooltip>
       </div>
     </section>
 
@@ -1589,6 +1591,12 @@ onBeforeUnmount(() => {
                   </span>
                 </div>
               </div>
+              <el-tag :type="statusType(accountFilterStatus(account))" size="small" class="dispatch-account-status">
+                {{ statusText(accountFilterStatus(account)) }}
+              </el-tag>
+            </header>
+
+            <div class="dispatch-account-tools">
               <div v-if="probeTimelineRecords(account).length" class="probe-timeline" aria-label="最近探活时间轴">
                 <div class="probe-timeline-bars">
                   <el-tooltip
@@ -1611,10 +1619,7 @@ onBeforeUnmount(() => {
                   <span>NOW</span>
                 </div>
               </div>
-              <div class="dispatch-account-state">
-                <el-tag :type="statusType(accountFilterStatus(account))" size="small">
-                  {{ statusText(accountFilterStatus(account)) }}
-                </el-tag>
+              <div class="dispatch-account-actions">
                 <el-tooltip content="单独探活">
                   <el-button
                     circle
@@ -1665,9 +1670,13 @@ onBeforeUnmount(() => {
                   />
                 </el-tooltip>
               </div>
-            </header>
+            </div>
 
-            <p v-if="account.status === 'error' && account.error_message" class="dispatch-account-error">
+            <p
+              v-if="account.status === 'error' && account.error_message"
+              class="dispatch-account-error"
+              :title="account.error_message"
+            >
               {{ account.error_message }}
             </p>
 
@@ -1681,7 +1690,7 @@ onBeforeUnmount(() => {
                   <small><strong>短期</strong>{{ healthPartText(account.health_short_score ?? account.healthShortScore, 70) }}</small>
                   <small><strong>长期</strong>{{ healthPartText(account.health_long_score ?? account.healthLongScore, 30) }}</small>
                 </div>
-                <small>{{ evidenceText(account) }}</small>
+                <small :title="evidenceText(account)">{{ evidenceText(account) }}</small>
               </div>
               <div>
                 <span>并发</span>
@@ -1698,17 +1707,35 @@ onBeforeUnmount(() => {
                 <strong>{{ account.rate_multiplier ?? account.rateMultiplier ?? "-" }}</strong>
                 <small>{{ account.schedulable === false ? "不可调度" : "可调度" }}</small>
               </div>
-              <p v-if="account.decision_reason || account.decisionReason">
+              <p
+                v-if="account.decision_reason || account.decisionReason"
+                :title="`${account.decision_reason || account.decisionReason}${account.last_policy_action_at || account.lastPolicyActionAt ? ` · ${formatTime(account.last_policy_action_at || account.lastPolicyActionAt)}` : ''}`"
+              >
                 {{ account.decision_reason || account.decisionReason }}
                 <span v-if="account.last_policy_action_at || account.lastPolicyActionAt"> · {{ formatTime(account.last_policy_action_at || account.lastPolicyActionAt) }}</span>
               </p>
             </div>
 
-            <section class="short-evidence">
-              <header>
-                <strong>短期健康证据</strong>
-                <span>{{ shortEvidenceRecords(account).length }} 条</span>
-              </header>
+            <details class="short-evidence">
+              <summary>
+                <span class="short-evidence-summary">
+                  <strong>短期健康证据</strong>
+                  <template v-if="shortEvidenceRecords(account).length">
+                    <el-tag
+                      :type="(shortEvidenceRecords(account)[0].source_kind || shortEvidenceRecords(account)[0].sourceKind) === 'error' ? 'danger' : 'success'"
+                      size="small"
+                    >
+                      {{ (shortEvidenceRecords(account)[0].source_kind || shortEvidenceRecords(account)[0].sourceKind) === "error" ? "错误" : "成功" }}
+                    </el-tag>
+                    <span>{{ evidenceCategoryText(shortEvidenceRecords(account)[0].category) }}</span>
+                    <small>
+                      {{ Number(shortEvidenceRecords(account)[0].score).toFixed(1) }} · {{ evidenceTime(shortEvidenceRecords(account)[0]) }}
+                    </small>
+                  </template>
+                  <span v-else>暂无记录</span>
+                </span>
+                <span class="short-evidence-count">{{ shortEvidenceRecords(account).length }} 条</span>
+              </summary>
               <div v-if="shortEvidenceRecords(account).length" class="short-evidence-table">
                 <div class="short-evidence-head" aria-hidden="true">
                   <span>结果</span><span>分数</span><span>类型</span><span>状态与信息</span><span>时间</span>
@@ -1729,7 +1756,7 @@ onBeforeUnmount(() => {
                 </div>
               </div>
               <div v-else class="short-evidence-empty">短期证据中暂无使用成功或错误记录</div>
-            </section>
+            </details>
           </article>
         </div>
       </section>
@@ -2252,9 +2279,18 @@ onBeforeUnmount(() => {
   font-size: 12px;
 }
 
+.dispatch-excluded-account-grid {
+  background: var(--panel-soft);
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr);
+  padding: 8px;
+}
+
 .dispatch-excluded-account-row {
   background: var(--panel);
-  border-top: 1px solid var(--line);
+  border: 1px solid var(--line);
+  border-radius: 6px;
   gap: 10px;
   min-height: 44px;
   padding: 6px 8px 6px 12px;
@@ -2326,9 +2362,10 @@ onBeforeUnmount(() => {
 }
 
 .dispatch-account-grid {
+  align-items: start;
   display: grid;
-  gap: 14px;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 720px), 1fr));
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .dispatch-account-card {
@@ -2343,37 +2380,62 @@ onBeforeUnmount(() => {
   align-items: flex-start;
   border-bottom: 1px solid var(--line);
   display: flex;
-  gap: 12px;
-  justify-content: flex-start;
-  padding: 14px 16px;
+  gap: 8px;
+  justify-content: space-between;
+  padding: 10px 12px 9px;
 }
 
 .dispatch-account-identity {
   display: grid;
-  gap: 6px;
+  gap: 4px;
   min-width: 0;
 }
 
 .dispatch-account-name,
 .dispatch-account-meta,
-.dispatch-account-state {
+.dispatch-account-actions {
   align-items: center;
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 5px 7px;
 }
 
 .dispatch-account-name h3 {
-  font-size: 16px;
+  display: -webkit-box;
+  font-size: 15px;
+  line-height: 1.25;
   margin: 0;
   overflow-wrap: anywhere;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.dispatch-account-name span,
+.dispatch-account-meta span {
+  font-size: 11px;
+}
+
+.dispatch-account-status {
+  flex: none;
 }
 
 .probe-model-meta {
-  max-width: min(320px, 100%);
+  max-width: min(200px, 100%);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.dispatch-account-tools {
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 8px;
+  justify-content: space-between;
+  min-height: 39px;
+  padding: 5px 8px 5px 12px;
 }
 
 .probe-timeline {
@@ -2433,44 +2495,107 @@ onBeforeUnmount(() => {
   overflow-wrap: anywhere;
 }
 
-.dispatch-account-state {
+.dispatch-account-actions {
   flex: none;
   margin-left: auto;
+}
+
+.dispatch-account-actions :deep(.el-button.is-circle) {
+  height: 28px;
+  padding: 6px;
+  width: 28px;
 }
 
 .dispatch-account-error {
   background: #fff5f4;
   border-bottom: 1px solid #fecdca;
   color: var(--danger);
+  display: -webkit-box;
+  font-size: 12px;
+  line-height: 1.4;
   margin: 0;
+  overflow: hidden;
   overflow-wrap: anywhere;
-  padding: 9px 16px;
+  padding: 7px 12px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .short-evidence {
+  background: var(--panel);
+}
+
+.short-evidence > summary {
+  align-items: center;
+  cursor: pointer;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 10px minmax(0, 1fr) auto;
+  list-style: none;
+  min-height: 36px;
+  padding: 6px 10px;
+}
+
+.short-evidence > summary::-webkit-details-marker {
+  display: none;
+}
+
+.short-evidence > summary::before {
+  border-bottom: 1.5px solid var(--muted);
+  border-right: 1.5px solid var(--muted);
+  content: "";
+  height: 5px;
+  transform: rotate(-45deg);
+  transition: transform 120ms ease;
+  width: 5px;
+}
+
+.short-evidence[open] > summary::before {
+  transform: rotate(45deg) translate(-1px, -1px);
+}
+
+.short-evidence[open] > summary {
   border-bottom: 1px solid var(--line);
 }
 
-.short-evidence > header {
+.short-evidence-summary {
   align-items: center;
-  background: var(--panel);
   display: flex;
-  justify-content: space-between;
-  padding: 9px 16px;
+  gap: 5px 7px;
+  min-width: 0;
+  overflow: hidden;
 }
 
-.short-evidence > header strong {
+.short-evidence-summary strong {
+  flex: none;
   font-size: 12px;
 }
 
-.short-evidence > header span,
+.short-evidence-summary > span,
+.short-evidence-summary > small,
+.short-evidence-count,
 .short-evidence-empty {
   color: var(--muted);
   font-size: 11px;
 }
 
+.short-evidence-summary > span,
+.short-evidence-summary > small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.short-evidence-summary > small {
+  min-width: 0;
+}
+
+.short-evidence-count {
+  white-space: nowrap;
+}
+
 .short-evidence-table {
-  max-height: 330px;
+  max-height: 260px;
   overflow: auto;
 }
 
@@ -2481,7 +2606,7 @@ onBeforeUnmount(() => {
   gap: 8px;
   grid-template-columns: 68px 58px 90px minmax(180px, 1fr) 145px;
   min-width: 620px;
-  padding: 7px 16px;
+  padding: 6px 10px;
 }
 
 .short-evidence-head {
@@ -2524,40 +2649,41 @@ onBeforeUnmount(() => {
 
 .short-evidence-empty {
   background: var(--panel-soft);
-  padding: 12px 16px;
+  padding: 10px 12px;
 }
 
 .account-policy-metrics {
   background: var(--panel-soft);
   border-bottom: 1px solid var(--line);
   display: grid;
-  grid-template-columns: 1.3fr repeat(3, minmax(100px, 1fr));
-  padding: 10px 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .account-policy-metrics > div {
   align-content: start;
-  border-right: 1px solid var(--line);
   display: grid;
-  gap: 3px;
+  gap: 2px;
   min-width: 0;
-  padding: 0 12px;
+  padding: 8px 10px;
 }
 
-.account-policy-metrics > div:first-child {
-  padding-left: 0;
+.account-policy-metrics > div:nth-child(odd) {
+  border-right: 1px solid var(--line);
 }
 
-.account-policy-metrics > div:nth-child(4) {
-  border-right: 0;
-  padding-right: 0;
+.account-policy-metrics > div:nth-child(-n + 2) {
+  border-bottom: 1px solid var(--line);
 }
 
 .account-policy-metrics span,
 .account-policy-metrics small {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 10px;
+  line-height: 1.35;
+  min-width: 0;
+  overflow: hidden;
   overflow-wrap: anywhere;
+  text-overflow: ellipsis;
 }
 
 .account-policy-metrics strong {
@@ -2565,9 +2691,10 @@ onBeforeUnmount(() => {
 }
 
 .health-score-breakdown {
-  display: grid;
-  gap: 1px;
-  margin-top: 2px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1px 7px;
+  margin-top: 1px;
 }
 
 .health-score-breakdown small {
@@ -2584,10 +2711,16 @@ onBeforeUnmount(() => {
 
 .account-policy-metrics > p {
   color: var(--muted);
+  display: -webkit-box;
   font-size: 11px;
   grid-column: 1 / -1;
-  margin: 8px 0 0;
+  line-height: 1.4;
+  margin: 0;
+  overflow: hidden;
   overflow-wrap: anywhere;
+  padding: 7px 10px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .dispatch-excluded-groups {
@@ -2635,6 +2768,27 @@ onBeforeUnmount(() => {
 .dispatch-excluded-row span {
   color: var(--muted);
   font-size: 12px;
+}
+
+@media (min-width: 768px) {
+  .dispatch-excluded-account-grid,
+  .dispatch-account-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1100px) {
+  .dispatch-excluded-account-grid,
+  .dispatch-account-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1500px) {
+  .dispatch-excluded-account-grid,
+  .dispatch-account-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 760px) {
@@ -2700,7 +2854,7 @@ onBeforeUnmount(() => {
   }
 
   .dispatch-account-head {
-    padding: 12px;
+    padding: 10px 12px 9px;
   }
 
   .dispatch-group-head {
@@ -2708,24 +2862,8 @@ onBeforeUnmount(() => {
     gap: 8px;
   }
 
-  .dispatch-account-state {
-    align-items: flex-end;
-    flex-direction: column;
-  }
-
-  .account-policy-metrics {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    padding: 10px 12px;
-  }
-
-  .account-policy-metrics > div {
-    border-bottom: 1px solid var(--line);
-    padding: 8px;
-  }
-
-  .account-policy-metrics > div:nth-child(2),
-  .account-policy-metrics > div:nth-child(4) {
-    border-right: 0;
+  .short-evidence-summary > small {
+    display: none;
   }
 
 }
