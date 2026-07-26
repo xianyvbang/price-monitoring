@@ -209,6 +209,18 @@ const groupSections = computed(() => {
 const activeCount = computed(() => includedAccounts.value.filter((account) => account.status === "active").length);
 const errorCount = computed(() => includedAccounts.value.filter((account) => account.status === "error").length);
 const policySummary = computed(() => policyRuntime.value?.summary || {});
+const groupAvailabilityByKey = computed(() => {
+  const entries = Array.isArray(policySummary.value.group_availability)
+    ? policySummary.value.group_availability
+    : [];
+  return new Map(entries.map((item) => [item.pool_key, item]));
+});
+function groupAvailabilityTarget(item) {
+  const available = Number(item?.available_accounts) || 0;
+  const minimum = Number(item?.minimum_target ?? policyConfig.minimum_available_accounts) || 0;
+  const healthy = Number(item?.healthy_target ?? policyConfig.healthy_target_accounts) || minimum;
+  return available < minimum || !policyConfig.return_pool_enabled ? minimum : healthy;
+}
 const policyProgressPercent = computed(() => {
   const value = Number(policySummary.value.percent);
   return Number.isFinite(value) ? Math.min(100, Math.max(0, Math.round(value))) : 0;
@@ -1253,9 +1265,9 @@ onBeforeUnmount(() => {
         <span v-if="!policyConfig.auto_scoring_enabled">自动评分和自动调度均关闭；后台不再读取证据或重算健康分。</span>
         <span v-else-if="!policyConfig.enabled">自动评分开启：后台增量读取请求证据、按到期规则探活并计算健康分，不修改 Sub2API 账号状态或调度参数。</span>
         <span v-else-if="!policyConfig.return_pool_enabled && !policyConfig.smart_expand_enabled && !policyConfig.load_factor_enabled && !policyConfig.price_protection_enabled">
-          四项可选策略均关闭；仍会在 Sub2API 关闭异常账号的调度。健康可用账号低于 {{ policyConfig.minimum_available_accounts }} 个时，会将符合条件的调度关闭账号逐个重新开启。
+          四项可选策略均关闭；仍会在 Sub2API 关闭异常账号的调度。任一分组低于每组最低保障 {{ policyConfig.minimum_available_accounts }} 个时，会将该分组中符合条件的调度关闭账号逐个重新开启。
         </span>
-        <span v-else>每 {{ policyConfig.probe_interval_seconds }} 秒评估托管账号；每轮最多在 Sub2API 关闭或开启 1 个账号的调度，其余策略独立执行。</span>
+        <span v-else>每 {{ policyConfig.probe_interval_seconds }} 秒评估托管账号；每个分组独立执行最低保障与健康回池，每轮最多在 Sub2API 关闭或开启 1 个账号的调度。</span>
       </div>
 
       <div class="policy-strategies">
@@ -1270,7 +1282,7 @@ onBeforeUnmount(() => {
         </label>
         <label class="policy-strategy">
           <el-switch v-model="policyConfig.return_pool_enabled" />
-          <span><strong>健康回池</strong><small>健康可用账号不足时，逐步重新开启 Sub2API 账号调度，直至达到 {{ policyConfig.healthy_target_accounts }} 个</small></span>
+          <span><strong>健康回池</strong><small>每个分组健康可用账号不足时，逐步重新开启该分组的 Sub2API 账号调度，直至每组达到 {{ policyConfig.healthy_target_accounts }} 个</small></span>
         </label>
         <label class="policy-strategy">
           <el-switch v-model="policyConfig.smart_expand_enabled" />
@@ -1289,9 +1301,9 @@ onBeforeUnmount(() => {
       <div class="policy-runtime">
         <div><span>托管账号</span><strong>{{ policySummary.managed_accounts ?? accounts.length }}</strong></div>
         <div>
-          <span>Sub2API 当前健康可用</span>
+          <span>健康可用总数（账号去重）</span>
           <strong>{{ policySummary.available_accounts == null ? "尚无数据" : `${policySummary.available_accounts} 个` }}</strong>
-          <small>最低保障 {{ policyConfig.minimum_available_accounts }} 个 · 健康回池目标 {{ policyConfig.healthy_target_accounts }} 个</small>
+          <small>每组最低保障 {{ policyConfig.minimum_available_accounts }} 个 · 每组健康回池目标 {{ policyConfig.healthy_target_accounts }} 个</small>
         </div>
         <div><span>实时并发</span><strong>{{ metricText(policySummary.current_concurrency) }} / {{ metricText(policySummary.capacity) }}</strong></div>
         <div><span>最近轮次</span><strong>{{ policyRuntime.last_finished_at ? formatTime(policyRuntime.last_finished_at) : "尚未执行" }}</strong></div>
@@ -1305,8 +1317,8 @@ onBeforeUnmount(() => {
             <div class="policy-input-grid">
               <label><span>调度间隔（秒）</span><el-input-number v-model="policyConfig.probe_interval_seconds" :min="5" :step="5" /></label>
               <label><span>健康门槛</span><el-input-number v-model="policyConfig.health_threshold" :min="0" :max="100" /></label>
-              <label><span>最低保障账号数</span><el-input-number v-model="policyConfig.minimum_available_accounts" :min="1" /></label>
-              <label><span>健康回池目标数</span><el-input-number v-model="policyConfig.healthy_target_accounts" :min="1" /></label>
+              <label><span>每组最低保障数</span><el-input-number v-model="policyConfig.minimum_available_accounts" :min="1" /></label>
+              <label><span>每组健康回池目标数</span><el-input-number v-model="policyConfig.healthy_target_accounts" :min="1" /></label>
               <label><span>证据有效倍数</span><el-input-number v-model="policyConfig.evidence_ttl_multiplier" :min="1" /></label>
               <label><span>默认探活模型</span><el-input v-model="policyConfig.default_probe_model" clearable placeholder="留空使用 Sub2API 默认模型" /></label>
             </div>
@@ -1478,6 +1490,9 @@ onBeforeUnmount(() => {
             </el-tag>
             <span>{{ section.accounts.length }} 个账号</span>
             <span>OAuth {{ groupOAuthCount(section.accounts) }} 个</span>
+            <span v-if="groupAvailabilityByKey.get(section.key)" class="group-availability">
+              健康可用 {{ groupAvailabilityByKey.get(section.key).available_accounts }} / 每组目标 {{ groupAvailabilityTarget(groupAvailabilityByKey.get(section.key)) }}
+            </span>
             <span v-if="section.group.id" class="group-probe-model" :title="groupProbeModel(section.group) || policyConfig.default_probe_model || 'Sub2API 默认'">
               探活：{{ groupProbeModelText(section.group) }}
             </span>

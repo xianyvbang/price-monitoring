@@ -475,7 +475,24 @@ async def test_policy_change_can_rearm_timer_without_starting_an_automatic_round
 @pytest.mark.asyncio
 async def test_minimum_pool_recovers_manually_unschedulable_account_with_all_subpolicies_off(tmp_path):
     db = make_db(tmp_path)
-    accounts = [{"id": 1, "name": "one", "status": "active", "schedulable": False, "concurrency": 20}]
+    accounts = [
+        {
+            "id": 1,
+            "name": "group-ten",
+            "status": "active",
+            "schedulable": True,
+            "concurrency": 20,
+            "group_ids": [10],
+        },
+        {
+            "id": 2,
+            "name": "group-twenty",
+            "status": "active",
+            "schedulable": False,
+            "concurrency": 20,
+            "group_ids": [20],
+        },
+    ]
     prepare_cache(db, accounts)
     db.save_platform_dispatch_policy({**POLICY_DEFAULTS, "enabled": True}, "https://sub.example")
     client = PolicyClient(accounts)
@@ -483,10 +500,101 @@ async def test_minimum_pool_recovers_manually_unschedulable_account_with_all_sub
 
     summary = await scheduler.run_once()
 
-    assert client.probes == [1]
-    assert client.updates == [(1, "schedulable", True)]
-    assert summary["scheduling_action"].startswith("开启调度 one")
+    assert client.probes == [1, 2]
+    assert client.updates == [(2, "schedulable", True)]
+    assert summary["scheduling_action"].startswith("开启调度 group-twenty")
+    assert "分组 20 低于每组最低保障" in summary["scheduling_action"]
     assert summary["status_action"] == summary["scheduling_action"]
+    assert summary["available_accounts"] == 1
+    assert summary["group_availability"] == [
+        {
+            "pool_key": "group-10",
+            "group_id": 10,
+            "group_name": "分组 10",
+            "managed_accounts": 1,
+            "available_accounts": 1,
+            "minimum_target": 1,
+            "healthy_target": 3,
+        },
+        {
+            "pool_key": "group-20",
+            "group_id": 20,
+            "group_name": "分组 20",
+            "managed_accounts": 1,
+            "available_accounts": 0,
+            "minimum_target": 1,
+            "healthy_target": 3,
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_health_return_target_is_applied_per_group(tmp_path):
+    db = make_db(tmp_path)
+    accounts = [
+        {"id": 1, "name": "ten-a", "status": "active", "schedulable": True, "group_ids": [10]},
+        {"id": 2, "name": "ten-b", "status": "active", "schedulable": True, "group_ids": [10]},
+        {"id": 3, "name": "twenty-a", "status": "active", "schedulable": True, "group_ids": [20]},
+        {"id": 4, "name": "twenty-b", "status": "active", "schedulable": False, "group_ids": [20]},
+    ]
+    prepare_cache(db, accounts)
+    db.save_platform_dispatch_policy(
+        {
+            **POLICY_DEFAULTS,
+            "enabled": True,
+            "return_pool_enabled": True,
+            "healthy_target_accounts": 2,
+        },
+        "https://sub.example",
+    )
+    client = PolicyClient(accounts)
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+
+    summary = await scheduler.run_once()
+
+    assert summary["available_accounts"] == 3
+    assert client.updates == [(4, "schedulable", True)]
+    assert "分组 20 低于每组健康回池目标" in summary["scheduling_action"]
+
+
+@pytest.mark.asyncio
+async def test_recovery_prefers_account_covering_more_deficient_groups(tmp_path):
+    db = make_db(tmp_path)
+    accounts = {
+        1: {
+            "id": 1,
+            "name": "multi-group",
+            "status": "active",
+            "schedulable": False,
+            "group_ids": [10, 20],
+        },
+        2: {
+            "id": 2,
+            "name": "single-group",
+            "status": "active",
+            "schedulable": False,
+            "group_ids": [10],
+        },
+    }
+    client = PolicyClient(list(accounts.values()))
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+    probe_at = datetime.now(timezone.utc).isoformat()
+    health = {1: healthy_state(80), 2: healthy_state(90)}
+    health[1]["latest_probe_success_at"] = probe_at
+    health[2]["latest_probe_success_at"] = probe_at
+
+    action = await scheduler._apply_schedulable_policy(
+        client,
+        client.site_url,
+        accounts,
+        health,
+        [],
+        {**POLICY_DEFAULTS, "enabled": True},
+        180,
+    )
+
+    assert client.updates == [(1, "schedulable", True)]
+    assert "分组 10、分组 20 低于每组最低保障" in action
 
 
 @pytest.mark.asyncio

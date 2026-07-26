@@ -105,6 +105,7 @@ FATAL_USAGE_MARKERS = (
     "配额耗尽",
 )
 TIMEOUT_MARKERS = ("timeout", "timed out", "deadline exceeded", "context deadline", "超时")
+UNGROUPED_POOL_KEY = "ungrouped"
 
 
 def validate_policy_config(payload: Any, current: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -831,7 +832,7 @@ class PlatformDispatchPolicyScheduler:
             progress("dispatch" if config["enabled"] else "finalizing", len(accounts), len(accounts))
         if config["enabled"]:
             scheduling_action = await self._apply_schedulable_policy(
-                client, site_url, accounts, health, available_ids, config, ttl_seconds
+                client, site_url, accounts, health, available_ids, config, ttl_seconds, group_map
             )
             if config["smart_expand_enabled"] and concurrency_data is not None:
                 await self._apply_concurrency_policy(
@@ -854,6 +855,9 @@ class PlatformDispatchPolicyScheduler:
             "status_action": scheduling_action,
             "warnings": list(dict.fromkeys(warnings)),
             "groups": len(public_groups),
+            "group_availability": _group_availability_summary(
+                accounts, available_ids, group_map, config
+            ),
         }
         return summary
 
@@ -1121,6 +1125,7 @@ class PlatformDispatchPolicyScheduler:
         available_ids: list[int],
         config: dict[str, Any],
         ttl_seconds: int,
+        group_map: dict[int, dict[str, Any]] | None = None,
     ) -> str:
         fatal: list[tuple[int, str]] = []
         threshold: list[tuple[int, str]] = []
@@ -1158,28 +1163,53 @@ class PlatformDispatchPolicyScheduler:
             account_id, reason = min(threshold, key=lambda pair: ((health[pair[0]]["health_score"] or 0), pair[0]))
             candidate = (account_id, False, reason)
         else:
-            target = int(config["minimum_available_accounts"])
-            reason = "可用池低于保护下限"
-            if config["return_pool_enabled"] and len(available_ids) >= target:
-                target = int(config["healthy_target_accounts"])
-                reason = "可用池低于健康目标"
-            if len(available_ids) < target:
+            pools = _group_availability_summary(accounts, available_ids, group_map or {}, config)
+            minimum = int(config["minimum_available_accounts"])
+            deficient = {
+                item["pool_key"]: minimum - int(item["available_accounts"])
+                for item in pools
+                if int(item["available_accounts"]) < minimum
+            }
+            reason_suffix = "低于每组最低保障"
+            if not deficient and config["return_pool_enabled"]:
+                healthy_target = int(config["healthy_target_accounts"])
+                deficient = {
+                    item["pool_key"]: healthy_target - int(item["available_accounts"])
+                    for item in pools
+                    if int(item["available_accounts"]) < healthy_target
+                }
+                reason_suffix = "低于每组健康回池目标"
+            if deficient:
                 now = datetime.now(timezone.utc)
-                recovery: list[int] = []
+                pool_names = {item["pool_key"]: str(item["group_name"]) for item in pools}
+                recovery: list[tuple[int, list[str]]] = []
                 for account_id, account in accounts.items():
                     item = health[account_id]
                     probe_at = _parse_datetime(item.get("latest_probe_success_at"))
+                    covered = [
+                        key for key in _account_pool_keys(account) if _pool_key(key) in deficient
+                    ]
                     if (
                         str(account.get("status") or "inactive") == "active"
                         and account.get("schedulable") is False
+                        and covered
                         and item["evidence_fresh"]
                         and (item["health_score"] or 0) >= float(config["health_threshold"])
                         and probe_at is not None
                         and probe_at >= now - timedelta(seconds=ttl_seconds)
                     ):
-                        recovery.append(account_id)
+                        recovery.append((account_id, [_pool_key(key) for key in covered]))
                 if recovery:
-                    account_id = max(recovery, key=lambda value: ((health[value]["health_score"] or 0), -value))
+                    account_id, covered = max(
+                        recovery,
+                        key=lambda value: (
+                            len(value[1]),
+                            health[value[0]]["health_score"] or 0,
+                            -value[0],
+                        ),
+                    )
+                    names = "、".join(pool_names[key] for key in covered)
+                    reason = f"{names} {reason_suffix}"
                     candidate = (account_id, True, reason)
         if candidate is None:
             return ""
@@ -1427,6 +1457,52 @@ def _account_group_ids(account: dict[str, Any]) -> list[int]:
         parsed = _optional_int(value)
         if parsed and parsed not in result:
             result.append(parsed)
+    return result
+
+
+def _account_pool_keys(account: dict[str, Any]) -> list[int | str]:
+    group_ids = _account_group_ids(account)
+    return group_ids if group_ids else [UNGROUPED_POOL_KEY]
+
+
+def _pool_key(value: int | str) -> str:
+    return UNGROUPED_POOL_KEY if value == UNGROUPED_POOL_KEY else f"group-{value}"
+
+
+def _group_availability_summary(
+    accounts: dict[int, dict[str, Any]],
+    available_ids: list[int],
+    group_map: dict[int, dict[str, Any]],
+    config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    members: dict[int | str, set[int]] = {}
+    for account_id, account in accounts.items():
+        for key in _account_pool_keys(account):
+            members.setdefault(key, set()).add(account_id)
+
+    available = set(available_ids)
+    result: list[dict[str, Any]] = []
+    for key in sorted(
+        members,
+        key=lambda value: (value == UNGROUPED_POOL_KEY, value if isinstance(value, int) else 0),
+    ):
+        group_id = key if isinstance(key, int) else None
+        group = group_map.get(group_id) if group_id is not None else None
+        result.append(
+            {
+                "pool_key": _pool_key(key),
+                "group_id": group_id,
+                "group_name": (
+                    "未分组池"
+                    if group_id is None
+                    else str((group or {}).get("name") or f"分组 {group_id}")
+                ),
+                "managed_accounts": len(members[key]),
+                "available_accounts": len(members[key] & available),
+                "minimum_target": int(config["minimum_available_accounts"]),
+                "healthy_target": int(config["healthy_target_accounts"]),
+            }
+        )
     return result
 
 
