@@ -405,6 +405,7 @@ function applyDispatchPayload(payload) {
   accounts.value = (payload.accounts || []).map((account) => ({
     ...account,
     is_enabled: account.is_enabled ?? account.isEnabled ?? account.status === "active",
+    schedulable: account.schedulable !== false,
     probe_records: account.probe_records || account.probeRecords || [],
     short_evidence_records: account.short_evidence_records || account.shortEvidenceRecords || []
   }));
@@ -909,20 +910,21 @@ async function resumeJob() {
   }
 }
 
-async function toggleAccount(account, enabled) {
+async function toggleAccountSchedulable(account, schedulable) {
   updatingIds.value = new Set([...updatingIds.value, account.id]);
   try {
-    const payload = await api.setPlatformDispatchEnabled(account.id, enabled);
+    const payload = await api.setPlatformDispatchSchedulable(account.id, schedulable);
     const updated = payload.account || {};
-    account.status = updated.status || (enabled ? "active" : "inactive");
+    account.status = updated.status || account.status;
     account.filter_status = updated.filter_status || updated.filterStatus || account.status;
     account.filterStatus = account.filter_status;
-    account.is_enabled = updated.is_enabled ?? updated.isEnabled ?? enabled;
+    account.is_enabled = updated.is_enabled ?? updated.isEnabled ?? account.is_enabled;
+    account.schedulable = updated.schedulable ?? schedulable;
     account.error_message = updated.error_message || updated.errorMessage || "";
-    ElMessage.success(`${account.name} 已在 Sub2API ${enabled ? "启用" : "停用"}`);
+    ElMessage.success(`${account.name} 已在 Sub2API ${schedulable ? "开启" : "关闭"}调度`);
   } catch (error) {
-    account.is_enabled = !enabled;
-    ElMessage.error(error.message || "更新 Sub2API 账号状态失败");
+    account.schedulable = !schedulable;
+    ElMessage.error(error.message || "更新 Sub2API 账号调度开关失败");
   } finally {
     const next = new Set(updatingIds.value);
     next.delete(account.id);
@@ -974,9 +976,11 @@ function accountFilterStatus(account) {
   return account.filter_status || account.filterStatus || account.status || "inactive";
 }
 
-function accountSwitchText(account, enabled) {
+function accountSwitchText(account, schedulable) {
   const status = accountFilterStatus(account);
-  if (!enabled) return status === "error" ? "错误" : "已停用";
+  if (!schedulable) return "调度关闭";
+  if (status === "inactive") return "账号停用";
+  if (status === "error") return "账号错误";
   return {
     active: "调度中",
     rate_limited: "限流中",
@@ -985,9 +989,10 @@ function accountSwitchText(account, enabled) {
   }[status] || "已启用";
 }
 
-function accountSwitchColor(account, enabled) {
+function accountSwitchColor(account, schedulable) {
   const status = accountFilterStatus(account);
-  if (!enabled) return status === "error" ? "var(--danger)" : "#909399";
+  if (!schedulable) return "#909399";
+  if (status === "inactive" || status === "error") return "var(--danger)";
   if (status === "active") return "var(--success)";
   if (status === "rate_limited" || status === "temp_unschedulable") return "var(--warning)";
   if (status === "unschedulable") return "var(--muted)";
@@ -1600,9 +1605,9 @@ onBeforeUnmount(() => {
                     @click="excludeAccount(account)"
                   />
                 </el-tooltip>
-                <el-tooltip content="直接修改该账号在 Sub2API 中的启用/停用状态">
+                <el-tooltip content="与 Sub2API 账号列表的调度开关一致，控制该账号是否参与请求调度">
                   <el-switch
-                    v-model="account.is_enabled"
+                    v-model="account.schedulable"
                     inline-prompt
                     :width="78"
                     :active-text="accountSwitchText(account, true)"
@@ -1611,8 +1616,8 @@ onBeforeUnmount(() => {
                     :inactive-color="accountSwitchColor(account, false)"
                     :loading="isUpdating(account.id)"
                     :disabled="dispatchMutationDisabled || isUpdating(account.id)"
-                    :aria-label="`${account.name} 的 Sub2API 账号状态：${accountSwitchText(account, account.is_enabled)}`"
-                    @change="toggleAccount(account, $event)"
+                    :aria-label="`${account.name} 的 Sub2API 调度开关：${accountSwitchText(account, account.schedulable)}`"
+                    @change="toggleAccountSchedulable(account, $event)"
                   />
                 </el-tooltip>
               </div>

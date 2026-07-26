@@ -281,6 +281,17 @@ class Sub2ApiAdminClient:
     async def update_account_status(self, account_id: int, enabled: bool) -> dict[str, Any]:
         return await self.update_account_fields(account_id, {"status": "active" if enabled else "inactive"})
 
+    async def update_account_schedulable(self, account_id: int, schedulable: bool) -> dict[str, Any]:
+        payload = await self._request(
+            "POST",
+            f"/api/v1/admin/accounts/{int(account_id)}/schedulable",
+            json={"schedulable": bool(schedulable)},
+        )
+        account = _unwrap_sub2api_data(payload)
+        if not isinstance(account, dict):
+            raise Sub2ApiAdminError("Sub2API 账号调度状态更新响应格式不正确", status_code=502)
+        return public_dispatch_account(account, [])
+
     async def update_account_fields(self, account_id: int, fields: dict[str, Any]) -> dict[str, Any]:
         allowed = {"status", "concurrency", "load_factor"}
         payload_fields = {key: value for key, value in fields.items() if key in allowed}

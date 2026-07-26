@@ -2041,24 +2041,26 @@ async def api_platform_dispatch_excluded_group_delete(request: Request, group_id
     return platform_dispatch_cache_response()
 
 
-@app.post("/api/platform-dispatch/accounts/{account_id}/enabled")
-async def api_platform_dispatch_account_enabled(request: Request, account_id: int):
+@app.post("/api/platform-dispatch/accounts/{account_id}/schedulable")
+async def api_platform_dispatch_account_schedulable(request: Request, account_id: int):
     require_user(request)
     if platform_dispatch_policy_scheduler.lock.locked():
         return JSONResponse({"ok": False, "message": "自动调度策略正在执行"}, status_code=409)
     payload = await request.json()
-    if not isinstance(payload, dict) or not isinstance(
-        payload.get("is_enabled", payload.get("isEnabled", payload.get("enabled"))), bool
-    ):
-        return JSONResponse({"ok": False, "message": "is_enabled 必须是布尔值"}, status_code=400)
-    enabled = payload.get("is_enabled", payload.get("isEnabled", payload.get("enabled")))
+    if not isinstance(payload, dict) or not isinstance(payload.get("schedulable"), bool):
+        return JSONResponse({"ok": False, "message": "schedulable 必须是布尔值"}, status_code=400)
+    schedulable = payload["schedulable"]
     try:
         async with platform_dispatch_policy_scheduler.lock:
-            account = await sub2api_admin_client().update_account_status(account_id, enabled)
+            account = await sub2api_admin_client().update_account_schedulable(account_id, schedulable)
     except Sub2ApiAdminError as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=exc.status_code)
     db.update_platform_dispatch_cached_account(account)
-    db.add_log("info", "platform-dispatch", f"Sub2API 账号 {account.get('name') or account_id}: {'启用' if enabled else '停用'}")
+    db.add_log(
+        "info",
+        "platform-dispatch",
+        f"Sub2API 账号 {account.get('name') or account_id}: {'开启' if schedulable else '关闭'}调度",
+    )
     return {"ok": True, "account": account}
 
 

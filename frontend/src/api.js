@@ -50,7 +50,7 @@ export const api = {
   probePlatformDispatchAccount: (id) => request(`/api/platform-dispatch/accounts/${id}/probe`, { method: "POST" }),
   setPlatformDispatchProbeModel: (id, model) => request(`/api/platform-dispatch/accounts/${id}/probe-model`, { method: "PUT", body: JSON.stringify({ model }) }),
   setPlatformDispatchGroupProbeModel: (id, model) => request(`/api/platform-dispatch/groups/${id}/probe-model`, { method: "PUT", body: JSON.stringify({ model }) }),
-  setPlatformDispatchEnabled: (id, value) => request(`/api/platform-dispatch/accounts/${id}/enabled`, { method: "POST", body: JSON.stringify({ is_enabled: value }) }),
+  setPlatformDispatchSchedulable: (id, value) => request(`/api/platform-dispatch/accounts/${id}/schedulable`, { method: "POST", body: JSON.stringify({ schedulable: value }) }),
   accounts: (params = {}) => request(`/api/accounts${queryString(params)}`),
   account: (id) => request(`/api/accounts/${id}`),
   createAccount: (payload) => request("/api/accounts", { method: "POST", body: JSON.stringify(payload) }),

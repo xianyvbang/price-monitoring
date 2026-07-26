@@ -475,6 +475,24 @@ async def test_sub2api_admin_updates_account_status(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_sub2api_admin_updates_account_schedulable(monkeypatch):
+    DummyAsyncClient.requests = []
+    DummyAsyncClient.responses = [
+        DummyResponse({"code": 0, "data": {"id": 9, "name": "remote", "status": "active", "schedulable": False}})
+    ]
+    monkeypatch.setattr("app.services.sub2api_admin.httpx.AsyncClient", DummyAsyncClient)
+
+    account = await Sub2ApiAdminClient("https://sub.example/", "admin-key").update_account_schedulable(9, False)
+
+    assert account["status"] == "active"
+    assert account["schedulable"] is False
+    request = DummyAsyncClient.requests[0]
+    assert request["method"] == "POST"
+    assert request["url"] == "https://sub.example/api/v1/admin/accounts/9/schedulable"
+    assert request["json"] == {"schedulable": False}
+
+
+@pytest.mark.asyncio
 async def test_sub2api_admin_probe_sends_configured_model_and_omits_empty_model(monkeypatch):
     configured_response = DummyResponse(None)
     configured_response.text = 'data: {"type":"done"}'
@@ -619,13 +637,14 @@ def test_platform_dispatch_syncs_pages_without_loading_activity_and_preserves_ca
                 "pages": 2,
             }
 
-        async def update_account_status(self, account_id, enabled):
-            self.updated.append((account_id, enabled))
+        async def update_account_schedulable(self, account_id, schedulable):
+            self.updated.append((account_id, schedulable))
             return {
                 "id": account_id,
                 "name": "remote",
-                "status": "active" if enabled else "inactive",
-                "is_enabled": enabled,
+                "status": "active",
+                "is_enabled": True,
+                "schedulable": schedulable,
             }
 
     fake = FakeAdminClient()
@@ -642,8 +661,8 @@ def test_platform_dispatch_syncs_pages_without_loading_activity_and_preserves_ca
         )
         job = wait_for_dispatch_job(client)
         response = client.get("/api/platform-dispatch")
-        invalid = client.post("/api/platform-dispatch/accounts/9/enabled", json={"is_enabled": "yes"})
-        updated = client.post("/api/platform-dispatch/accounts/9/enabled", json={"is_enabled": False})
+        invalid = client.post("/api/platform-dispatch/accounts/9/schedulable", json={"schedulable": "yes"})
+        updated = client.post("/api/platform-dispatch/accounts/9/schedulable", json={"schedulable": False})
         after_update = client.get("/api/platform-dispatch")
 
     assert page.status_code == 200
@@ -671,8 +690,10 @@ def test_platform_dispatch_syncs_pages_without_loading_activity_and_preserves_ca
     assert response.json()["activities_refreshed_at"] == "2026-07-25T01:00:00+00:00"
     assert invalid.status_code == 400
     assert updated.status_code == 200
-    assert updated.json()["account"]["status"] == "inactive"
-    assert after_update.json()["accounts"][0]["status"] == "inactive"
+    assert updated.json()["account"]["status"] == "active"
+    assert updated.json()["account"]["schedulable"] is False
+    assert after_update.json()["accounts"][0]["status"] == "active"
+    assert after_update.json()["accounts"][0]["schedulable"] is False
     assert after_update.json()["accounts"][0]["recent_activity"] == [{"id": "old-activity"}]
     assert fake.updated == [(9, False)]
 
