@@ -1895,6 +1895,18 @@ async def api_platform_dispatch_policy_run(request: Request):
     return {"ok": True, "summary": summary, **platform_dispatch_policy_response()}
 
 
+@app.post("/api/platform-dispatch/policy/stop")
+async def api_platform_dispatch_policy_stop(request: Request):
+    require_user(request)
+    stopped = await platform_dispatch_policy_scheduler.stop_automatic_round()
+    config_value = db.get_platform_dispatch_policy(POLICY_DEFAULTS)["config"]
+    mode = "自动调度" if config_value.get("enabled") else "自动评分"
+    message = f"本轮{mode}已停止，下次仍按原计划执行" if stopped else "当前没有正在执行的自动轮次"
+    if stopped:
+        db.add_log("info", "platform-dispatch-policy", message)
+    return {**platform_dispatch_policy_response(), "stopped": stopped, "message": message}
+
+
 @app.get("/api/platform-dispatch/actions")
 async def api_platform_dispatch_actions(request: Request, page: int = 1, page_size: int = 50):
     require_user(request)
@@ -4592,14 +4604,19 @@ def platform_dispatch_policy_response() -> dict[str, Any]:
     actions = db.list_platform_dispatch_actions(1, 10)["items"]
     runtime = dict(policy["runtime"])
     is_running = platform_dispatch_policy_scheduler.lock.locked()
+    automatic_running = platform_dispatch_policy_scheduler.automatic_round_running
     runtime["is_running"] = is_running
     runtime["isRunning"] = is_running
+    runtime["automatic_running"] = automatic_running
+    runtime["automaticRunning"] = automatic_running
     return {
         "ok": True,
         "config": policy["config"],
         "runtime": runtime,
         "is_running": is_running,
         "isRunning": is_running,
+        "automatic_running": automatic_running,
+        "automaticRunning": automatic_running,
         "accounts": states,
         "actions": actions,
     }

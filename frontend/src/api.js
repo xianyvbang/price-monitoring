@@ -37,6 +37,7 @@ export const api = {
   platformDispatchPolicy: () => request("/api/platform-dispatch/policy"),
   savePlatformDispatchPolicy: (payload) => request("/api/platform-dispatch/policy", { method: "PUT", body: JSON.stringify(payload) }),
   runPlatformDispatchPolicy: () => request("/api/platform-dispatch/policy/run", { method: "POST" }),
+  stopPlatformDispatchPolicy: () => request("/api/platform-dispatch/policy/stop", { method: "POST" }),
   platformDispatchActions: (params = {}) => request(`/api/platform-dispatch/actions${queryString(params)}`),
   syncPlatformDispatch: (payload) => request("/api/platform-dispatch/sync", { method: "POST", body: JSON.stringify(payload) }),
   refreshPlatformDispatchEvidence: () => request("/api/platform-dispatch/evidence/refresh", { method: "POST" }),

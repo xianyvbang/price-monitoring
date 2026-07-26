@@ -88,6 +88,13 @@ def test_platform_dispatch_policy_api_defaults_validation_and_save(tmp_path, mon
         assert initial.json()["config"]["excluded_account_ids"] == [1430, 1431]
         assert initial.json()["is_running"] is False
         assert initial.json()["runtime"]["is_running"] is False
+        assert initial.json()["automatic_running"] is False
+        assert initial.json()["runtime"]["automatic_running"] is False
+
+        stopped = client.post("/api/platform-dispatch/policy/stop")
+        assert stopped.status_code == 200
+        assert stopped.json()["stopped"] is False
+        assert stopped.json()["message"] == "当前没有正在执行的自动轮次"
 
         invalid = client.put(
             "/api/platform-dispatch/policy",

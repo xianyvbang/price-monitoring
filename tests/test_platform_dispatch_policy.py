@@ -439,6 +439,68 @@ async def test_disabling_automatic_scoring_cancels_active_round_and_keeps_schedu
 
 
 @pytest.mark.asyncio
+async def test_stopping_current_automatic_round_keeps_configuration_and_scheduler_alive(tmp_path):
+    db = make_db(tmp_path)
+    accounts = [{"id": 1, "name": "one", "status": "active", "concurrency": 10}]
+    prepare_cache(db, accounts)
+    config = {
+        **POLICY_DEFAULTS,
+        "enabled": True,
+        "auto_scoring_enabled": True,
+        "probe_interval_seconds": 5,
+    }
+    db.save_platform_dispatch_policy(config, "https://sub.example")
+
+    class BlockingPolicyClient(PolicyClient):
+        def __init__(self, client_accounts):
+            super().__init__(client_accounts)
+            self.first_read_started = asyncio.Event()
+            self.first_read_cancelled = asyncio.Event()
+            self.next_read_started = asyncio.Event()
+            self.account_reads = 0
+
+        async def list_accounts(self, **kwargs):
+            self.account_reads += 1
+            if self.account_reads == 1:
+                self.first_read_started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    self.first_read_cancelled.set()
+                    raise
+            self.next_read_started.set()
+            return await super().list_accounts(**kwargs)
+
+    client = BlockingPolicyClient(accounts)
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+    scheduler.start()
+    try:
+        await asyncio.wait_for(client.first_read_started.wait(), timeout=1)
+        assert scheduler.automatic_round_running is True
+
+        stopped = await scheduler.stop_automatic_round()
+
+        assert stopped is True
+        await asyncio.wait_for(client.first_read_cancelled.wait(), timeout=1)
+        assert scheduler.automatic_round_running is False
+        policy = db.get_platform_dispatch_policy(POLICY_DEFAULTS)
+        assert policy["config"]["enabled"] is True
+        assert policy["config"]["auto_scoring_enabled"] is True
+        assert policy["runtime"]["status"] == "idle"
+        assert policy["runtime"]["summary"] == {
+            "phase": "stopped",
+            "message": "本轮自动调度已停止",
+        }
+        assert scheduler._task is not None and not scheduler._task.done()
+        assert scheduler._run_after_change is False
+
+        await asyncio.wait_for(client.next_read_started.wait(), timeout=7)
+        assert client.account_reads == 2
+    finally:
+        await scheduler.stop()
+
+
+@pytest.mark.asyncio
 async def test_policy_change_can_rearm_timer_without_starting_an_automatic_round(tmp_path, monkeypatch):
     db = make_db(tmp_path)
     scheduler = PlatformDispatchPolicyScheduler(db, lambda: None)

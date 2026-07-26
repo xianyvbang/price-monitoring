@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { ArrowDown, ArrowRight, Check, CircleClose, Hide, Refresh, RefreshLeft, Search, Setting, Timer, VideoPlay } from "@element-plus/icons-vue";
+import { ArrowDown, ArrowRight, Check, CircleClose, Hide, Refresh, RefreshLeft, Search, Setting, Timer, VideoPause, VideoPlay } from "@element-plus/icons-vue";
 import { api } from "../api";
 import { formatTime } from "../utils";
 
@@ -64,6 +64,7 @@ const policyLoading = ref(false);
 const policySaving = ref(false);
 const autoScoringSaving = ref(false);
 const policyRunning = ref(false);
+const policyStopping = ref(false);
 const policyRuntime = ref({});
 const policyActions = ref([]);
 const excludedAccountText = ref("1430, 1431");
@@ -237,6 +238,9 @@ const policyProgressDetail = computed(() => {
 const policyAutoRunning = computed(() => {
   return Boolean(policyRuntime.value?.is_running ?? policyRuntime.value?.isRunning ?? policyRuntime.value?.status === "running");
 });
+const policyAutomaticRunning = computed(() => {
+  return Boolean(policyRuntime.value?.automatic_running ?? policyRuntime.value?.automaticRunning);
+});
 const dispatchMutationDisabled = computed(() => controlsDisabled.value || policyAutoRunning.value || probingAccountIds.value.size > 0);
 const policyStatusText = computed(() => {
   if (policyAutoRunning.value) return policyConfig.enabled ? "正在自动调度" : "正在评分";
@@ -398,6 +402,20 @@ async function runPolicyNow() {
     ElMessage.error(error.message || "执行自动调度失败");
   } finally {
     policyRunning.value = false;
+  }
+}
+
+async function stopAutomaticPolicyRound() {
+  policyStopping.value = true;
+  try {
+    const payload = await api.stopPlatformDispatchPolicy();
+    applyPolicyRuntimePayload(payload);
+    if (payload.stopped) ElMessage.success(payload.message || "本轮自动执行已停止");
+    else ElMessage.info(payload.message || "当前没有正在执行的自动轮次");
+  } catch (error) {
+    ElMessage.error(error.message || "停止本轮自动执行失败");
+  } finally {
+    policyStopping.value = false;
   }
 }
 
@@ -1233,7 +1251,18 @@ onBeforeUnmount(() => {
         </div>
         <div class="policy-actions">
           <el-button :loading="policySaving" :disabled="controlsDisabled || policyRunning || autoScoringSaving" @click="savePolicy">保存策略</el-button>
-          <el-tooltip content="立即执行一轮">
+          <el-tooltip v-if="policyAutomaticRunning" content="停止本轮，下次仍按原计划执行">
+            <el-button
+              circle
+              type="danger"
+              :icon="VideoPause"
+              :loading="policyStopping"
+              :disabled="policyStopping"
+              aria-label="停止本轮自动执行"
+              @click="stopAutomaticPolicyRound"
+            />
+          </el-tooltip>
+          <el-tooltip v-else content="立即执行一轮">
             <el-button
               circle
               type="primary"

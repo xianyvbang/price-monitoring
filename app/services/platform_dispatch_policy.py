@@ -445,6 +445,20 @@ class PlatformDispatchPolicyScheduler:
                 await automatic_run_task
         self._automatic_run_task = None
 
+    @property
+    def automatic_round_running(self) -> bool:
+        task = self._automatic_run_task
+        return bool(task and not task.done())
+
+    async def stop_automatic_round(self) -> bool:
+        task = self._automatic_run_task
+        if task is None or task.done():
+            return False
+        task.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await task
+        return True
+
     def notify_changed(self, *, run_immediately: bool = True) -> None:
         if run_immediately:
             self._run_after_change = True
@@ -502,12 +516,20 @@ class PlatformDispatchPolicyScheduler:
                 return await self._run_once_locked()
             except asyncio.CancelledError:
                 if automatic:
+                    config = self.db.get_platform_dispatch_policy(POLICY_DEFAULTS)["config"]
+                    automatic_enabled = bool(config.get("auto_scoring_enabled", True))
+                    mode = "自动调度" if config.get("enabled") else "自动评分"
+                    summary = (
+                        {"phase": "stopped", "message": f"本轮{mode}已停止"}
+                        if automatic_enabled
+                        else {"message": "自动评分已关闭"}
+                    )
                     self.db.update_platform_dispatch_policy_runtime(
                         POLICY_DEFAULTS,
                         status="idle",
                         last_finished_at=utc_now(),
                         last_error="",
-                        summary={"message": "自动评分已关闭"},
+                        summary=summary,
                     )
                 raise
 
