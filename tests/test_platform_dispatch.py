@@ -129,6 +129,10 @@ def test_platform_dispatch_policy_api_defaults_validation_and_save(tmp_path, mon
         run = client.post("/api/platform-dispatch/policy/run")
         assert run.status_code == 200
         assert run.json()["summary"]["managed_accounts"] == 0
+        persisted = client.get("/api/platform-dispatch/policy")
+        assert persisted.status_code == 200
+        assert persisted.json()["config"]["enabled"] is False
+        assert persisted.json()["config"]["auto_scoring_enabled"] is False
 
         actions = client.get("/api/platform-dispatch/actions?page=1&page_size=10")
         assert actions.status_code == 200

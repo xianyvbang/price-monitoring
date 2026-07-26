@@ -286,22 +286,66 @@ def prepare_cache(db, accounts):
 
 
 @pytest.mark.asyncio
-async def test_master_off_only_collects_and_never_probes_or_writes(tmp_path):
+async def test_scoring_only_probes_without_remote_policy_writes(tmp_path, monkeypatch):
     db = make_db(tmp_path)
     accounts = [{"id": 1, "name": "one", "status": "inactive", "concurrency": 10}]
     prepare_cache(db, accounts)
     client = PolicyClient(accounts)
     scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+    progress_updates = []
+    update_progress = db.update_platform_dispatch_policy_progress
+
+    def capture_progress(summary):
+        progress_updates.append(dict(summary))
+        update_progress(summary)
+
+    monkeypatch.setattr(db, "update_platform_dispatch_policy_progress", capture_progress)
 
     await scheduler.run_once()
 
-    assert client.probes == []
+    assert client.probes == [1]
     assert client.updates == []
     assert client.realtime_reads == 0
+    evidence = db.list_platform_dispatch_evidence("https://sub.example", 1)
+    assert evidence[0]["source_kind"] == "probe"
+    assert evidence[0]["score"] == 100
+    phases = [item["phase"] for item in progress_updates]
+    assert {"loading", "evidence", "probe", "scoring", "finalizing"}.issubset(phases)
+    assert [item["percent"] for item in progress_updates] == sorted(
+        item["percent"] for item in progress_updates
+    )
+    runtime_summary = db.get_platform_dispatch_policy(POLICY_DEFAULTS)["runtime"]["summary"]
+    assert runtime_summary["phase"] == "completed"
+    assert runtime_summary["percent"] == 100
 
 
 @pytest.mark.asyncio
-async def test_automatic_scoring_can_be_disabled_without_blocking_manual_run(tmp_path):
+async def test_recent_usage_does_not_suppress_due_probe(tmp_path):
+    db = make_db(tmp_path)
+    accounts = [{"id": 1, "name": "one", "status": "active", "concurrency": 10}]
+    prepare_cache(db, accounts)
+    db.add_platform_dispatch_evidence(
+        "https://sub.example",
+        {
+            "account_id": 1,
+            "source_kind": "usage",
+            "source_id": "recent-usage",
+            "category": "healthy",
+            "score": 100,
+            "occurred_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    client = PolicyClient(accounts)
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+
+    await scheduler.run_once(automatic=True)
+    await scheduler.run_once(automatic=True)
+
+    assert client.probes == [1]
+
+
+@pytest.mark.asyncio
+async def test_automatic_scoring_can_be_disabled_without_blocking_manual_probe(tmp_path):
     db = make_db(tmp_path)
     accounts = [{"id": 1, "name": "one", "status": "inactive", "concurrency": 10}]
     prepare_cache(db, accounts)
@@ -325,7 +369,7 @@ async def test_automatic_scoring_can_be_disabled_without_blocking_manual_run(tmp
     assert skipped == {"skipped": True, "message": "自动评分已关闭"}
     assert factory_calls == 1
     assert manual["managed_accounts"] == 1
-    assert client.probes == []
+    assert client.probes == [1]
     assert client.updates == []
 
 
@@ -364,6 +408,10 @@ async def test_disabling_automatic_scoring_cancels_active_round_and_keeps_schedu
         await asyncio.wait_for(client.first_read_started.wait(), timeout=1)
         automatic_run_task = scheduler._automatic_run_task
         assert automatic_run_task is not None
+        running = db.get_platform_dispatch_policy(POLICY_DEFAULTS)["runtime"]
+        assert running["status"] == "running"
+        assert running["summary"]["phase"] == "loading"
+        assert running["summary"]["percent"] == 2
 
         db.save_platform_dispatch_policy(
             {**POLICY_DEFAULTS, "enabled": False, "auto_scoring_enabled": False},

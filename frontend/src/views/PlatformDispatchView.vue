@@ -61,6 +61,7 @@ const appliedRefreshFilter = reactive({ platform: "", type: "", status: "", incl
 const refreshForm = reactive({ platform: "", type: "", status: "", include_ungrouped: true });
 const policyLoading = ref(false);
 const policySaving = ref(false);
+const autoScoringSaving = ref(false);
 const policyRunning = ref(false);
 const policyRuntime = ref({});
 const policyActions = ref([]);
@@ -207,6 +208,19 @@ const groupSections = computed(() => {
 const activeCount = computed(() => includedAccounts.value.filter((account) => account.status === "active").length);
 const errorCount = computed(() => includedAccounts.value.filter((account) => account.status === "error").length);
 const policySummary = computed(() => policyRuntime.value?.summary || {});
+const policyProgressPercent = computed(() => {
+  const value = Number(policySummary.value.percent);
+  return Number.isFinite(value) ? Math.min(100, Math.max(0, Math.round(value))) : 0;
+});
+const policyProgressMessage = computed(() => policySummary.value.message || "正在准备评分");
+const policyProgressDetail = computed(() => {
+  const processed = Number(policySummary.value.processed);
+  const total = Number(policySummary.value.total);
+  if (Number.isFinite(processed) && Number.isFinite(total) && total > 0) {
+    return `${processed} / ${total} 个账号`;
+  }
+  return "";
+});
 const policyAutoRunning = computed(() => {
   return Boolean(policyRuntime.value?.is_running ?? policyRuntime.value?.isRunning ?? policyRuntime.value?.status === "running");
 });
@@ -321,8 +335,27 @@ function toggleAutomaticDispatch(enabled) {
   if (enabled) policyConfig.auto_scoring_enabled = true;
 }
 
-function toggleAutomaticScoring(enabled) {
+async function toggleAutomaticScoring(enabled) {
+  const previousAutoScoringEnabled = !enabled;
+  const previousDispatchEnabled = policyConfig.enabled;
   if (!enabled) policyConfig.enabled = false;
+  autoScoringSaving.value = true;
+  try {
+    const payload = await api.savePlatformDispatchPolicy({
+      auto_scoring_enabled: Boolean(enabled),
+      enabled: Boolean(policyConfig.enabled)
+    });
+    policyConfig.auto_scoring_enabled = Boolean(payload.config?.auto_scoring_enabled);
+    policyConfig.enabled = Boolean(payload.config?.enabled);
+    applyPolicyRuntimePayload(payload);
+    ElMessage.success(enabled ? "自动评分已开启" : "自动评分已关闭");
+  } catch (error) {
+    policyConfig.auto_scoring_enabled = previousAutoScoringEnabled;
+    policyConfig.enabled = previousDispatchEnabled;
+    ElMessage.error(error.message || "更新自动评分开关失败");
+  } finally {
+    autoScoringSaving.value = false;
+  }
 }
 
 async function savePolicy() {
@@ -1145,7 +1178,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div class="policy-actions">
-          <el-button :loading="policySaving" :disabled="controlsDisabled || policyRunning" @click="savePolicy">保存策略</el-button>
+          <el-button :loading="policySaving" :disabled="controlsDisabled || policyRunning || autoScoringSaving" @click="savePolicy">保存策略</el-button>
           <el-tooltip content="立即执行一轮">
             <el-button
               circle
@@ -1160,10 +1193,23 @@ onBeforeUnmount(() => {
         </div>
       </header>
 
+      <div v-if="policyAutoRunning" class="policy-progress">
+        <div class="policy-progress-head">
+          <strong>{{ policyProgressMessage }}</strong>
+          <span v-if="policyProgressDetail">{{ policyProgressDetail }}</span>
+        </div>
+        <el-progress
+          :percentage="policyProgressPercent"
+          :status="policyRuntime.status === 'failed' ? 'exception' : undefined"
+          striped
+          striped-flow
+        />
+      </div>
+
       <div class="policy-behavior" :class="{ 'is-active': policyConfig.enabled || policyConfig.auto_scoring_enabled }">
         <strong>当前行为</strong>
         <span v-if="!policyConfig.auto_scoring_enabled">自动评分和自动调度均关闭；后台不再读取证据或重算健康分。</span>
-        <span v-else-if="!policyConfig.enabled">自动评分开启：后台增量读取证据并计算健康分，不探活、不写远端。</span>
+        <span v-else-if="!policyConfig.enabled">自动评分开启：后台增量读取请求证据、按到期规则探活并计算健康分，不写远端。</span>
         <span v-else-if="!policyConfig.return_pool_enabled && !policyConfig.smart_expand_enabled && !policyConfig.load_factor_enabled && !policyConfig.price_protection_enabled">
           四项策略均关闭；仍会自动停用异常账号，并在可用池低于 {{ policyConfig.minimum_available_accounts }} 个时回池。
         </span>
@@ -1172,8 +1218,13 @@ onBeforeUnmount(() => {
 
       <div class="policy-strategies">
         <label class="policy-strategy">
-          <el-switch v-model="policyConfig.auto_scoring_enabled" @change="toggleAutomaticScoring" />
-          <span><strong>自动评分</strong><small>定时获取证据并计算健康分</small></span>
+          <el-switch
+            v-model="policyConfig.auto_scoring_enabled"
+            :loading="autoScoringSaving"
+            :disabled="policySaving || autoScoringSaving"
+            @change="toggleAutomaticScoring"
+          />
+          <span><strong>自动评分</strong><small>定时获取证据、探活并计算健康分</small></span>
         </label>
         <label class="policy-strategy">
           <el-switch v-model="policyConfig.return_pool_enabled" />
@@ -1745,6 +1796,27 @@ onBeforeUnmount(() => {
 .policy-actions {
   flex: none;
   gap: 8px;
+}
+
+.policy-progress {
+  background: var(--panel-soft);
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 8px;
+  padding: 11px 18px;
+}
+
+.policy-progress-head {
+  align-items: center;
+  display: flex;
+  font-size: 12px;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.policy-progress-head span {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 
 .policy-behavior {

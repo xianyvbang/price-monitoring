@@ -281,10 +281,14 @@ def calculate_health(evidence: list[dict[str, Any]], now: datetime, ttl_seconds:
     evidence_at = str(ordered[0].get("occurred_at") or "") if ordered else ""
     latest_at = _parse_datetime(evidence_at)
     fresh = latest_at is not None and latest_at >= now - timedelta(seconds=max(1, ttl_seconds))
+    latest_probe_at = ""
     probe_success_at = ""
     for item in ordered:
+        if not latest_probe_at and item.get("source_kind") == "probe":
+            latest_probe_at = str(item.get("occurred_at") or "")
         if item.get("is_probe_success"):
             probe_success_at = str(item.get("occurred_at") or "")
+        if latest_probe_at and probe_success_at:
             break
     return {
         "health_score": health_score,
@@ -293,6 +297,7 @@ def calculate_health(evidence: list[dict[str, Any]], now: datetime, ttl_seconds:
         "evidence_count": len(ordered),
         "evidence_at": evidence_at,
         "evidence_fresh": fresh,
+        "latest_probe_at": latest_probe_at,
         "latest_probe_success_at": probe_success_at,
         "evidence": ordered,
     }
@@ -511,7 +516,6 @@ class PlatformDispatchPolicyScheduler:
             accounts,
             health,
             config,
-            ttl_seconds,
             force=True,
             progress=progress,
         )
@@ -570,17 +574,68 @@ class PlatformDispatchPolicyScheduler:
         site_url = client.site_url
         if cache.get("source_site_url") != site_url:
             raise Sub2ApiAdminError("平台调度缓存与当前 Sub2API 站点不一致", status_code=409)
+        initial_progress = {
+            "phase": "loading",
+            "processed": 0,
+            "total": len(cache.get("accounts") or []),
+            "percent": 2,
+            "message": "正在读取托管账号",
+        }
         self.db.update_platform_dispatch_policy_runtime(
-            POLICY_DEFAULTS, source_site_url=site_url, status="running", last_started_at=started_at, last_error="",
+            POLICY_DEFAULTS,
+            source_site_url=site_url,
+            status="running",
+            last_started_at=started_at,
+            last_error="",
+            summary=initial_progress,
         )
+
+        def update_progress(phase: str, processed: int, total: int) -> None:
+            denominator = max(1, total)
+            if phase == "evidence":
+                percent = 5 + round(processed * 55 / denominator)
+                message = f"正在获取评分证据，{processed} / {total}"
+            elif phase == "probe":
+                percent = 60 + round(processed * 25 / denominator)
+                message = f"正在探活账号，{processed} / {total}"
+            elif phase == "scoring":
+                percent = 85 + round(processed * 10 / denominator)
+                message = f"正在计算健康分，{processed} / {total}"
+            elif phase == "dispatch":
+                percent = 97
+                message = "正在应用调度策略"
+            elif phase == "finalizing":
+                percent = 97
+                message = "正在汇总评分结果"
+            else:
+                percent = 2
+                message = "正在读取托管账号"
+            self.db.update_platform_dispatch_policy_progress(
+                {
+                    "phase": phase,
+                    "processed": max(0, int(processed)),
+                    "total": max(0, int(total)),
+                    "percent": min(99, max(0, int(percent))),
+                    "message": message,
+                }
+            )
         try:
-            summary = await self._evaluate(client, cache, config)
+            summary = await self._evaluate(client, cache, config, update_progress)
         except Exception as exc:
             self.db.update_platform_dispatch_policy_runtime(
                 POLICY_DEFAULTS, source_site_url=site_url, status="failed",
                 last_finished_at=utc_now(), last_error=str(exc),
             )
             raise
+        summary.update(
+            {
+                "phase": "completed",
+                "processed": int(summary.get("managed_accounts") or 0),
+                "total": int(summary.get("managed_accounts") or 0),
+                "percent": 100,
+                "message": "评分与调度已完成" if config["enabled"] else "健康评分已完成",
+            }
+        )
         self.db.update_platform_dispatch_policy_runtime(
             POLICY_DEFAULTS, source_site_url=site_url, status="succeeded",
             last_finished_at=utc_now(), last_error="", summary=summary,
@@ -588,7 +643,11 @@ class PlatformDispatchPolicyScheduler:
         return summary
 
     async def _evaluate(
-        self, client: Sub2ApiAdminClient, cache: dict[str, Any], config: dict[str, Any]
+        self,
+        client: Sub2ApiAdminClient,
+        cache: dict[str, Any],
+        config: dict[str, Any],
+        progress: Callable[[str, int, int], None] | None = None,
     ) -> dict[str, Any]:
         site_url = client.site_url
         excluded_ids = {int(value) for value in config["excluded_account_ids"]}
@@ -600,6 +659,8 @@ class PlatformDispatchPolicyScheduler:
         refresh_filter = cache.get("refresh_filter") or {}
         platform = str(refresh_filter.get("platform") or "")
         account_type = str(refresh_filter.get("type") or "")
+        if progress:
+            progress("loading", 0, len(managed_ids))
         remote_accounts, groups = await asyncio.gather(
             client.list_accounts(platform=platform or None, account_type=account_type or None),
             client.list_groups(platform=platform or None),
@@ -612,7 +673,7 @@ class PlatformDispatchPolicyScheduler:
         managed_ids.intersection_update(accounts)
         group_map = {int(group["id"]): group for group in groups if isinstance(group, dict) and _optional_int(group.get("id"))}
 
-        warnings = await self._refresh_evidence(client, site_url, accounts)
+        warnings = await self._refresh_evidence(client, site_url, accounts, progress=progress)
         now = datetime.now(timezone.utc)
         ttl_seconds = int(config["probe_interval_seconds"]) * int(config["evidence_ttl_multiplier"])
         health = {
@@ -622,14 +683,13 @@ class PlatformDispatchPolicyScheduler:
             for account_id in managed_ids
         }
 
-        if config["enabled"]:
-            await self._probe_due_accounts(client, site_url, accounts, health, config, ttl_seconds)
-            health = {
-                account_id: calculate_health(
-                    self.db.list_platform_dispatch_evidence(site_url, account_id), now, ttl_seconds
-                )
-                for account_id in managed_ids
-            }
+        await self._probe_due_accounts(client, site_url, accounts, health, config, progress=progress)
+        health = {
+            account_id: calculate_health(
+                self.db.list_platform_dispatch_evidence(site_url, account_id), now, ttl_seconds
+            )
+            for account_id in managed_ids
+        }
 
         concurrency_data: dict[str, Any] | None = None
         availability_data: dict[str, Any] | None = None
@@ -659,7 +719,9 @@ class PlatformDispatchPolicyScheduler:
         }
 
         available_ids: list[int] = []
-        for account_id, account in accounts.items():
+        if progress:
+            progress("scoring", 0, len(accounts))
+        for processed, (account_id, account) in enumerate(accounts.items(), start=1):
             item = health[account_id]
             state = states.get(account_id) or {}
             runtime_available = _runtime_available(account, availability_by_id.get(account_id))
@@ -696,8 +758,12 @@ class PlatformDispatchPolicyScheduler:
                 evidence_fresh=1 if item["evidence_fresh"] else 0,
                 latest_probe_success_at=item["latest_probe_success_at"] or None,
             )
+            if progress:
+                progress("scoring", processed, len(accounts))
 
         status_action = ""
+        if progress:
+            progress("dispatch" if config["enabled"] else "finalizing", len(accounts), len(accounts))
         if config["enabled"]:
             status_action = await self._apply_status_policy(
                 client, site_url, accounts, health, available_ids, config, ttl_seconds
@@ -867,6 +933,8 @@ class PlatformDispatchPolicyScheduler:
             if progress:
                 progress("evidence", completed, len(accounts))
 
+        if progress:
+            progress("evidence", 0, len(accounts))
         await asyncio.gather(*(load(account_id) for account_id in accounts))
         return warnings
 
@@ -877,7 +945,6 @@ class PlatformDispatchPolicyScheduler:
         accounts: dict[int, dict[str, Any]],
         health: dict[int, dict[str, Any]],
         config: dict[str, Any],
-        ttl_seconds: int,
         *,
         force: bool = False,
         progress: Callable[[str, int, int], None] | None = None,
@@ -932,12 +999,15 @@ class PlatformDispatchPolicyScheduler:
                 progress("probe", completed, len(due))
 
         due: list[int] = []
+        probe_interval_seconds = max(1, int(config["probe_interval_seconds"]))
         for account_id, account in accounts.items():
             item = health[account_id]
-            latest = _parse_datetime(item.get("evidence_at"))
+            latest_probe = _parse_datetime(item.get("latest_probe_at"))
             inactive = str(account.get("status") or "inactive") != "active"
-            if force or inactive or latest is None or latest < now - timedelta(seconds=max(1, ttl_seconds // 3)):
+            if force or inactive or latest_probe is None or latest_probe < now - timedelta(seconds=probe_interval_seconds):
                 due.append(account_id)
+        if progress:
+            progress("probe", 0, len(due))
         await asyncio.gather(*(probe(account_id) for account_id in due))
 
     async def _apply_status_policy(

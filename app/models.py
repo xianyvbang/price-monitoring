@@ -1264,6 +1264,13 @@ class Database:
         with self.connect() as conn:
             conn.execute(f"UPDATE platform_dispatch_policy SET {assignments} WHERE id = 1", tuple(updates.values()))
 
+    def update_platform_dispatch_policy_progress(self, summary: dict[str, Any]) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE platform_dispatch_policy SET summary_json = ?, updated_at = ? WHERE id = 1",
+                (json.dumps(summary, ensure_ascii=False, separators=(",", ":")), utc_now()),
+            )
+
     def disable_platform_dispatch_policy(self, defaults: dict[str, Any], source_site_url: str = "") -> None:
         policy = self.get_platform_dispatch_policy(defaults)
         config = dict(policy["config"])
