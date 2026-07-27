@@ -1322,6 +1322,30 @@ def test_platform_dispatch_response_filters_stale_cache_against_excluded_groups(
     assert [group["id"] for group in payload["excluded_groups"]] == [11, 19]
 
 
+def test_platform_dispatch_policy_loads_only_three_recent_actions_by_default(tmp_path, monkeypatch):
+    test_db = setup_test_db(tmp_path, monkeypatch)
+    test_db.set_setting("sub2api_site_url", "https://sub.example")
+    for index in range(5):
+        test_db.add_platform_dispatch_action(
+            "https://sub.example",
+            account_id=index + 1,
+            account_name=f"account-{index + 1}",
+            action="disable_scheduling",
+            reason=f"reason-{index + 1}",
+        )
+
+    with TestClient(app) as client:
+        login(client)
+        policy = client.get("/api/platform-dispatch/policy")
+        history = client.get("/api/platform-dispatch/actions", params={"page": 1, "page_size": 50})
+
+    assert policy.status_code == 200
+    assert [action["account_id"] for action in policy.json()["actions"]] == [5, 4, 3]
+    assert history.status_code == 200
+    assert history.json()["total"] == 5
+    assert [action["account_id"] for action in history.json()["items"]] == [5, 4, 3, 2, 1]
+
+
 def test_platform_dispatch_sync_can_exclude_ungrouped_accounts(tmp_path, monkeypatch):
     test_db = setup_test_db(tmp_path, monkeypatch)
     test_db.set_setting("sub2api_site_url", "https://sub.example")

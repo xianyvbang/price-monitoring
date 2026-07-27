@@ -1596,7 +1596,7 @@ onMounted(async () => {
           <strong>最近动作</strong>
           <el-button link type="primary" :icon="ArrowRight" @click="openActionHistory">查看全部</el-button>
         </div>
-        <span v-for="action in policyActions.slice(0, 3)" :key="action.id" :class="{ 'is-error': action.status === 'failed' }">
+        <span v-for="action in policyActions" :key="action.id" :class="{ 'is-error': action.status === 'failed' }">
           {{ actionText(action) }} · {{ formatTime(action.created_at) }}
         </span>
       </div>

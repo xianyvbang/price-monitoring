@@ -4702,7 +4702,7 @@ def platform_dispatch_policy_response() -> dict[str, Any]:
         state["shortEvidenceRecords"] = short_evidence_records
         state["recent_request_records"] = recent_request_records
         state["recentRequestRecords"] = recent_request_records
-    actions = db.list_platform_dispatch_actions(1, 10)["items"]
+    actions = db.list_platform_dispatch_actions(1, 3)["items"]
     runtime = dict(policy["runtime"])
     is_running = platform_dispatch_policy_scheduler.lock.locked()
     automatic_running = platform_dispatch_policy_scheduler.automatic_round_running
