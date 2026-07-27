@@ -92,6 +92,8 @@ def test_platform_dispatch_policy_api_defaults_validation_and_save(tmp_path, mon
         assert initial.json()["runtime"]["is_running"] is False
         assert initial.json()["automatic_running"] is False
         assert initial.json()["runtime"]["automatic_running"] is False
+        assert "next_run_at" in initial.json()
+        assert initial.json()["runtime"]["next_run_at"] == initial.json()["next_run_at"]
 
         stopped = client.post("/api/platform-dispatch/policy/stop")
         assert stopped.status_code == 200
@@ -354,6 +356,7 @@ def test_platform_dispatch_account_probe_api_uses_configured_model_and_updates_h
     with TestClient(app) as client:
         login(client)
         response = client.post("/api/platform-dispatch/accounts/1/probe")
+        cache = client.get("/api/platform-dispatch")
         missing = client.post("/api/platform-dispatch/accounts/99/probe")
         test_db.create_platform_dispatch_job("active-job", "accounts_sync", {}, "https://sub.example")
         conflict = client.post("/api/platform-dispatch/accounts/1/probe")
@@ -367,7 +370,8 @@ def test_platform_dispatch_account_probe_api_uses_configured_model_and_updates_h
         "health_score": 100.0,
     }
     assert probe_client.probes == [(1, "group-model")]
-    state = response.json()["accounts"][0]
+    assert "accounts" not in response.json()
+    state = cache.json()["accounts"][0]
     assert state["health_score"] == 100.0
     assert state["probe_records"][0]["is_probe_success"] is True
     assert missing.status_code == 404
@@ -961,8 +965,9 @@ def test_platform_dispatch_evidence_refresh_reloads_history_probes_and_recalcula
     assert cached_accounts[1]["recent_activity"] == [{"id": "old-2"}]
     assert response.json()["activities_refreshed_at"]
     assert any("usage unavailable" in warning for warning in response.json()["warnings"])
-    states = {item["account_id"]: item for item in policy.json()["accounts"]}
-    assert states[1]["evidence_count"] == 8
+    assert "accounts" not in policy.json()
+    states = {item["id"]: item for item in cached_accounts}
+    assert states[1]["health_evidence_count"] == 8
     assert states[1]["probe_records"][0]["is_probe_success"] is True
     short_evidence = states[1]["short_evidence_records"]
     assert states[1]["shortEvidenceRecords"] == short_evidence
@@ -983,7 +988,7 @@ def test_platform_dispatch_evidence_refresh_reloads_history_probes_and_recalcula
         "message",
         "occurred_at",
     } <= short_evidence[0].keys()
-    assert states[2]["evidence_count"] == 1
+    assert states[2]["health_evidence_count"] == 1
     assert states[2]["health_score"] == 10
     assert states[2]["probe_records"][0]["is_probe_success"] is False
     assert states[2]["probe_records"][0]["status_code"] == 503
@@ -1072,7 +1077,8 @@ def test_platform_dispatch_evidence_refresh_keeps_activity_when_history_fails(tm
     assert job["status"] == "succeeded"
     assert cache["accounts"][0]["recent_activity"] == [{"id": "old"}]
     assert cache["activities_refreshed_at"]
-    state = policy["accounts"][0]
+    assert "accounts" not in policy
+    state = cache["accounts"][0]
     assert state["health_score"] == 10
     assert state["probe_records"][0]["category"] == "probe_failure"
 
@@ -1333,6 +1339,7 @@ def test_platform_dispatch_policy_loads_only_three_recent_actions_by_default(tmp
         history = client.get("/api/platform-dispatch/actions", params={"page": 1, "page_size": 50})
 
     assert policy.status_code == 200
+    assert "accounts" not in policy.json()
     assert [action["account_id"] for action in policy.json()["actions"]] == [5, 4, 3]
     assert history.status_code == 200
     assert history.json()["total"] == 5

@@ -678,6 +678,12 @@ async def test_policy_change_can_rearm_timer_without_starting_an_automatic_round
     scheduler.start()
     try:
         await asyncio.wait_for(first_run.wait(), timeout=1)
+        for _ in range(100):
+            if scheduler.next_automatic_run_at:
+                break
+            await asyncio.sleep(0.01)
+        next_run_at = datetime.fromisoformat(scheduler.next_automatic_run_at)
+        assert next_run_at > datetime.now(timezone.utc)
 
         scheduler.notify_changed(run_immediately=False)
         await asyncio.sleep(0.05)

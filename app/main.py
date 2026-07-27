@@ -4668,48 +4668,17 @@ def platform_dispatch_job_response() -> dict[str, Any]:
 
 def platform_dispatch_policy_response() -> dict[str, Any]:
     policy = db.get_platform_dispatch_policy(POLICY_DEFAULTS)
-    site_url = db.get_setting(SUB2API_SITE_URL_SETTING, "").strip().rstrip("/")
-    states = db.list_platform_dispatch_account_states(site_url) if site_url else []
-    probes_by_account = db.list_recent_platform_dispatch_probes(site_url, 15) if site_url else {}
-    requests_by_account = db.list_recent_platform_dispatch_requests(site_url, 10) if site_url else {}
-    ttl_seconds = max(
-        1,
-        int(policy["config"]["probe_interval_seconds"])
-        * int(policy["config"]["evidence_ttl_multiplier"]),
-    )
-    short_evidence_since = (datetime.now(timezone.utc) - timedelta(seconds=ttl_seconds)).isoformat()
-    short_evidence_by_account = (
-        db.list_short_platform_dispatch_evidence(site_url, 10, short_evidence_since)
-        if site_url
-        else {}
-    )
-    for state in states:
-        probe_records = [
-            public_platform_dispatch_evidence(record)
-            for record in probes_by_account.get(int(state["account_id"]), [])
-        ]
-        short_evidence_records = [
-            public_platform_dispatch_evidence(record)
-            for record in short_evidence_by_account.get(int(state["account_id"]), [])
-        ]
-        recent_request_records = [
-            public_platform_dispatch_evidence(record)
-            for record in requests_by_account.get(int(state["account_id"]), [])
-        ]
-        state["probe_records"] = probe_records
-        state["probeRecords"] = probe_records
-        state["short_evidence_records"] = short_evidence_records
-        state["shortEvidenceRecords"] = short_evidence_records
-        state["recent_request_records"] = recent_request_records
-        state["recentRequestRecords"] = recent_request_records
     actions = db.list_platform_dispatch_actions(1, 3)["items"]
     runtime = dict(policy["runtime"])
     is_running = platform_dispatch_policy_scheduler.lock.locked()
     automatic_running = platform_dispatch_policy_scheduler.automatic_round_running
+    next_run_at = platform_dispatch_policy_scheduler.next_automatic_run_at
     runtime["is_running"] = is_running
     runtime["isRunning"] = is_running
     runtime["automatic_running"] = automatic_running
     runtime["automaticRunning"] = automatic_running
+    runtime["next_run_at"] = next_run_at
+    runtime["nextRunAt"] = next_run_at
     return {
         "ok": True,
         "config": policy["config"],
@@ -4718,7 +4687,8 @@ def platform_dispatch_policy_response() -> dict[str, Any]:
         "isRunning": is_running,
         "automatic_running": automatic_running,
         "automaticRunning": automatic_running,
-        "accounts": states,
+        "next_run_at": next_run_at,
+        "nextRunAt": next_run_at,
         "actions": actions,
     }
 
@@ -4817,9 +4787,30 @@ def platform_dispatch_cache_response() -> dict[str, Any]:
             int(item["account_id"]): item
             for item in db.list_platform_dispatch_account_states(source_site_url)
         }
+        probes_by_account = db.list_recent_platform_dispatch_probes(source_site_url, 15)
+        requests_by_account = db.list_recent_platform_dispatch_requests(source_site_url, 10)
+        ttl_seconds = max(
+            1,
+            int(policy["probe_interval_seconds"])
+            * int(policy["evidence_ttl_multiplier"]),
+        )
+        short_evidence_since = (
+            datetime.now(timezone.utc) - timedelta(seconds=ttl_seconds)
+        ).isoformat()
+        short_evidence_by_account = db.list_short_platform_dispatch_evidence(
+            source_site_url, 10, short_evidence_since
+        )
         for account_id, account in account_map.items():
             account.update(public_platform_dispatch_cost_profile(profiles[account_id]))
             state = states.get(account_id) or {}
+            account["health_score"] = state.get("health_score")
+            account["health_short_score"] = state.get("short_score")
+            account["health_long_score"] = state.get("long_score")
+            account["health_evidence_count"] = state.get("evidence_count")
+            account["health_evidence_at"] = state.get("evidence_at")
+            account["health_evidence_fresh"] = bool(state.get("evidence_fresh"))
+            account["target_concurrency"] = state.get("target_concurrency")
+            account["target_load_factor"] = state.get("target_load_factor")
             account["price_protection_blocked"] = bool(state.get("price_protection_blocked"))
             account["priceProtectionBlocked"] = account["price_protection_blocked"]
             account["price_protection_blocked_at"] = state.get("price_protection_blocked_at")
@@ -4832,6 +4823,24 @@ def platform_dispatch_cache_response() -> dict[str, Any]:
             if state.get("last_action_at"):
                 account["last_policy_action_at"] = state["last_action_at"]
                 account["lastPolicyActionAt"] = state["last_action_at"]
+            probe_records = [
+                public_platform_dispatch_evidence(record)
+                for record in probes_by_account.get(account_id, [])
+            ]
+            short_evidence_records = [
+                public_platform_dispatch_evidence(record)
+                for record in short_evidence_by_account.get(account_id, [])
+            ]
+            recent_request_records = [
+                public_platform_dispatch_evidence(record)
+                for record in requests_by_account.get(account_id, [])
+            ]
+            account["probe_records"] = probe_records
+            account["probeRecords"] = probe_records
+            account["short_evidence_records"] = short_evidence_records
+            account["shortEvidenceRecords"] = short_evidence_records
+            account["recent_request_records"] = recent_request_records
+            account["recentRequestRecords"] = recent_request_records
     return {
         "ok": True,
         "has_cache": cache is not None,

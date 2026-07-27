@@ -586,6 +586,7 @@ class PlatformDispatchPolicyScheduler:
         self._stopped = asyncio.Event()
         self._changed = asyncio.Event()
         self._run_after_change = False
+        self._next_automatic_run_at: datetime | None = None
 
     def start(self) -> None:
         if self._task is None or self._task.done():
@@ -594,11 +595,13 @@ class PlatformDispatchPolicyScheduler:
             self._changed = asyncio.Event()
             self._run_after_change = False
             self._automatic_run_task = None
+            self._next_automatic_run_at = None
             self._task = asyncio.create_task(self._run_loop())
 
     async def stop(self) -> None:
         self._stopped.set()
         self._changed.set()
+        self._next_automatic_run_at = None
         automatic_run_task = self._automatic_run_task
         automatic_run_was_running = bool(automatic_run_task and not automatic_run_task.done())
         if automatic_run_was_running and automatic_run_task:
@@ -617,6 +620,11 @@ class PlatformDispatchPolicyScheduler:
     def automatic_round_running(self) -> bool:
         task = self._automatic_run_task
         return bool(task and not task.done())
+
+    @property
+    def next_automatic_run_at(self) -> str:
+        value = self._next_automatic_run_at
+        return value.isoformat() if value is not None else ""
 
     async def stop_automatic_round(self) -> bool:
         task = self._automatic_run_task
@@ -642,6 +650,7 @@ class PlatformDispatchPolicyScheduler:
 
     async def _run_loop(self) -> None:
         while not self._stopped.is_set():
+            self._next_automatic_run_at = None
             self._changed.clear()
             automatic_run_task = asyncio.create_task(self.run_once(automatic=True))
             self._automatic_run_task = automatic_run_task
@@ -661,13 +670,20 @@ class PlatformDispatchPolicyScheduler:
                     break
                 policy = self.db.get_platform_dispatch_policy(POLICY_DEFAULTS)["config"]
                 timeout = max(5, int(policy.get("probe_interval_seconds") or 60))
+                self._next_automatic_run_at = (
+                    datetime.now(timezone.utc) + timedelta(seconds=timeout)
+                    if policy.get("auto_scoring_enabled", True)
+                    else None
+                )
                 self._changed.clear()
                 try:
                     await asyncio.wait_for(self._changed.wait(), timeout=timeout)
                 except asyncio.TimeoutError:
+                    self._next_automatic_run_at = None
                     break
                 if self._run_after_change:
                     self._run_after_change = False
+                    self._next_automatic_run_at = None
                     break
 
     async def run_once(self, *, automatic: bool = False) -> dict[str, Any]:

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { ArrowDown, ArrowRight, Check, CircleClose, Delete, Hide, Link, Refresh, RefreshLeft, Search, Setting, Timer, VideoPause, VideoPlay } from "@element-plus/icons-vue";
 import { api } from "../api";
@@ -81,6 +81,7 @@ const autoScoringSaving = ref(false);
 const policyRunning = ref(false);
 const policyStopping = ref(false);
 const policyRuntime = ref({});
+const countdownNow = ref(Date.now());
 const policyActions = ref([]);
 const actionHistoryDialog = ref(false);
 const actionHistoryLoading = ref(false);
@@ -301,6 +302,21 @@ const policyAutoRunning = computed(() => {
 const policyAutomaticRunning = computed(() => {
   return Boolean(policyRuntime.value?.automatic_running ?? policyRuntime.value?.automaticRunning);
 });
+const policyNextRunAt = computed(() => policyRuntime.value?.next_run_at || policyRuntime.value?.nextRunAt || "");
+const policyCountdownText = computed(() => {
+  if (!policyConfig.enabled) return "未开启";
+  if (policyAutomaticRunning.value || policyAutoRunning.value) return "执行中";
+  const target = Date.parse(policyNextRunAt.value);
+  if (!Number.isFinite(target)) return "等待排期";
+  const seconds = Math.max(0, Math.ceil((target - countdownNow.value) / 1000));
+  if (seconds === 0) return "即将执行";
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainingSeconds = seconds % 60;
+  if (hours > 0) return `${hours} 时 ${String(minutes).padStart(2, "0")} 分 ${String(remainingSeconds).padStart(2, "0")} 秒`;
+  if (minutes > 0) return `${minutes} 分 ${String(remainingSeconds).padStart(2, "0")} 秒`;
+  return `${remainingSeconds} 秒`;
+});
 const dispatchMutationDisabled = computed(() => controlsDisabled.value || policyAutoRunning.value || probingAccountIds.value.size > 0);
 const policyStatusText = computed(() => {
   if (policyAutoRunning.value) return policyConfig.enabled ? "正在自动调度" : "正在评分";
@@ -354,30 +370,16 @@ function applyProbeModelPayload(payload) {
 function applyPolicyRuntimePayload(payload) {
   policyRuntime.value = payload.runtime || {};
   policyActions.value = payload.actions || [];
-  const states = new Map((payload.accounts || []).map((item) => [Number(item.account_id), item]));
-  accounts.value.forEach((account) => {
-    const state = states.get(Number(account.id));
-    if (!state) return;
-    Object.assign(account, {
-      health_score: state.health_score,
-      health_short_score: state.short_score,
-      health_long_score: state.long_score,
-      health_evidence_count: state.evidence_count,
-      health_evidence_at: state.evidence_at,
-      health_evidence_fresh: Boolean(state.evidence_fresh),
-      probe_records: state.probe_records || state.probeRecords || [],
-      short_evidence_records: state.short_evidence_records || state.shortEvidenceRecords || [],
-      recent_request_records: state.recent_request_records || state.recentRequestRecords || [],
-      decision_reason: state.decision_reason || "",
-      target_concurrency: state.target_concurrency,
-      target_load_factor: state.target_load_factor,
-      last_policy_action_at: state.last_action_at
-    });
-  });
 }
 
 async function refreshPolicyRuntime() {
-  applyPolicyRuntimePayload(await api.platformDispatchPolicy());
+  if (policyRuntimeRefreshPending) return;
+  policyRuntimeRefreshPending = true;
+  try {
+    applyPolicyRuntimePayload(await api.platformDispatchPolicy());
+  } finally {
+    policyRuntimeRefreshPending = false;
+  }
 }
 
 async function loadActionHistory(page = actionHistoryPagination.page) {
@@ -939,6 +941,7 @@ async function probeAccount(account) {
   try {
     const payload = await api.probePlatformDispatchAccount(accountId);
     applyPolicyPayload(payload);
+    await loadDispatch();
     const probe = payload.probe || {};
     const model = probe.model || "Sub2API 默认模型";
     if (probe.success) {
@@ -1370,10 +1373,25 @@ function toggleCollapsed(key) {
   collapsedGroups.value = next;
 }
 
+let countdownTimer = null;
+let policyRuntimeTimer = null;
+let policyRuntimeRefreshPending = false;
+
 onMounted(async () => {
+  countdownTimer = window.setInterval(() => {
+    countdownNow.value = Date.now();
+  }, 1000);
+  policyRuntimeTimer = window.setInterval(() => {
+    refreshPolicyRuntime().catch(() => {});
+  }, 5000);
   await loadDispatch();
   await loadPolicy();
   await resumeJob();
+});
+
+onBeforeUnmount(() => {
+  if (countdownTimer !== null) window.clearInterval(countdownTimer);
+  if (policyRuntimeTimer !== null) window.clearInterval(policyRuntimeTimer);
 });
 </script>
 
@@ -1507,7 +1525,14 @@ onMounted(async () => {
         <div><span>实时并发</span><strong>{{ metricText(policySummary.current_concurrency) }} / {{ metricText(policySummary.capacity) }}</strong></div>
         <div><span>成本绑定</span><strong>{{ liveCostSummary.cost_bound_accounts }} / {{ liveCostSummary.managed_accounts }}</strong><small>未绑定 {{ liveCostSummary.cost_unbound_accounts }}</small></div>
         <div><span>价格风险</span><strong>{{ liveCostSummary.price_unsafe_accounts }}</strong><small>过期 {{ liveCostSummary.cost_expired_accounts }} · 下游未知 {{ liveCostSummary.downstream_unknown_accounts }}</small></div>
-        <div><span>最近轮次</span><strong>{{ policyRuntime.last_finished_at ? formatTime(policyRuntime.last_finished_at) : "尚未执行" }}</strong></div>
+        <div>
+          <span>下次自动调度</span>
+          <strong>{{ policyCountdownText }}</strong>
+          <small>
+            <template v-if="policyNextRunAt && policyConfig.enabled">计划 {{ formatTime(policyNextRunAt) }} · </template>
+            最近 {{ policyRuntime.last_finished_at ? formatTime(policyRuntime.last_finished_at) : "尚未执行" }}
+          </small>
+        </div>
       </div>
 
       <details class="policy-settings">
