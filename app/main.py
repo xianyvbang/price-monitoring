@@ -475,6 +475,8 @@ async def _log_response(request: Request, response: Any):
         )
     response.body_iterator = _body_iterator(body)
     response.headers["content-length"] = str(len(body))
+    if request.url.path.startswith("/api/"):
+        response.headers["cache-control"] = "no-store"
     return response
 
 
@@ -4757,9 +4759,11 @@ def public_platform_dispatch_excluded_group(group: dict[str, Any]) -> dict[str, 
 def platform_dispatch_cache_response() -> dict[str, Any]:
     cache = db.get_platform_dispatch_cache()
     site_url = db.get_setting(SUB2API_SITE_URL_SETTING, "")
+    excluded_group_rows = db.list_platform_dispatch_excluded_groups(site_url)
+    excluded_group_ids = {int(group["id"]) for group in excluded_group_rows}
     excluded_groups = [
         public_platform_dispatch_excluded_group(group)
-        for group in db.list_platform_dispatch_excluded_groups(site_url)
+        for group in excluded_group_rows
     ]
     if cache is None:
         accounts: list[dict[str, Any]] = []
@@ -4771,8 +4775,15 @@ def platform_dispatch_cache_response() -> dict[str, Any]:
         refreshed_at = None
         source_site_url = ""
     else:
-        accounts = cache["accounts"]
-        groups = cache["groups"]
+        accounts = filter_platform_dispatch_accounts_by_groups(
+            cache["accounts"], excluded_group_ids
+        )
+        groups = [
+            group
+            for group in cache["groups"]
+            if not isinstance(group, dict)
+            or _platform_dispatch_account_id(group) not in excluded_group_ids
+        ]
         warnings = cache["warnings"]
         refresh_filter = cache["refresh_filter"]
         recent_limit = cache["recent_limit"]

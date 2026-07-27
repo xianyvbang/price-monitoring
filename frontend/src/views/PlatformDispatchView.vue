@@ -178,8 +178,14 @@ const typeOptions = computed(() => {
   return mergeFilterOptions(ACCOUNT_TYPE_FILTER_OPTIONS, accounts.value.map((account) => account.type), appliedRefreshFilter.type);
 });
 
+const excludedGroupIdSet = computed(() => {
+  return new Set(excludedGroups.value.map(excludedGroupId).filter(Boolean));
+});
+
 const groupOptions = computed(() => {
-  return [...groups.value].sort(compareGroups);
+  return groups.value
+    .filter((group) => !excludedGroupIdSet.value.has(Number(group.id)))
+    .sort(compareGroups);
 });
 
 const excludedAccountIdSet = computed(() => {
@@ -191,7 +197,11 @@ const excludedAccountIdSet = computed(() => {
 });
 
 const includedAccounts = computed(() => {
-  return accounts.value.filter((account) => !excludedAccountIdSet.value.has(Number(account.id)));
+  return accounts.value.filter((account) => {
+    if (excludedAccountIdSet.value.has(Number(account.id))) return false;
+    const rawGroupIds = rawAccountGroupIds(account);
+    return !rawGroupIds.length || rawGroupIds.some((id) => !excludedGroupIdSet.value.has(id));
+  });
 });
 
 const excludedAccounts = computed(() => {
@@ -1120,6 +1130,10 @@ function mergeFilterOptions(knownOptions, values, selected = "") {
 }
 
 function accountGroupIds(account) {
+  return rawAccountGroupIds(account).filter((id) => !excludedGroupIdSet.value.has(id));
+}
+
+function rawAccountGroupIds(account) {
   const values = account.group_ids || account.groupIds || [];
   return Array.isArray(values) ? values.map(Number).filter((value) => Number.isInteger(value) && value > 0) : [];
 }

@@ -1287,6 +1287,41 @@ def test_platform_dispatch_sync_filters_excluded_groups_and_refreshes_their_meta
     assert response["excluded_groups"][0]["platform"] == "openai"
 
 
+def test_platform_dispatch_response_filters_stale_cache_against_excluded_groups(tmp_path, monkeypatch):
+    test_db = setup_test_db(tmp_path, monkeypatch)
+    test_db.set_setting("sub2api_site_url", "https://sub.example")
+    test_db.exclude_platform_dispatch_group("https://sub.example", 11, "排除组 11", "openai")
+    test_db.exclude_platform_dispatch_group("https://sub.example", 19, "排除组 19", "openai")
+    test_db.replace_platform_dispatch_cache(
+        "https://sub.example",
+        [
+            {"id": 1, "name": "only-eleven", "group_ids": [11]},
+            {"id": 2, "name": "only-nineteen", "group_ids": [19]},
+            {"id": 3, "name": "mixed", "group_ids": [11, 23]},
+            {"id": 4, "name": "included", "group_ids": [23]},
+        ],
+        [
+            {"id": 11, "name": "排除组 11"},
+            {"id": 19, "name": "排除组 19"},
+            {"id": 23, "name": "保留组"},
+        ],
+        [],
+        {"platform": "", "type": "", "status": ""},
+    )
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.get("/api/platform-dispatch")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    payload = response.json()
+    assert [group["id"] for group in payload["groups"]] == [23]
+    assert [account["id"] for account in payload["accounts"]] == [3, 4]
+    assert payload["accounts"][0]["group_ids"] == [23]
+    assert [group["id"] for group in payload["excluded_groups"]] == [11, 19]
+
+
 def test_platform_dispatch_sync_can_exclude_ungrouped_accounts(tmp_path, monkeypatch):
     test_db = setup_test_db(tmp_path, monkeypatch)
     test_db.set_setting("sub2api_site_url", "https://sub.example")

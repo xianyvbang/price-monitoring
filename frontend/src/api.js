@@ -3,6 +3,7 @@ const JSON_HEADERS = { "Content-Type": "application/json" };
 export async function request(url, options = {}) {
   const response = await fetch(url, {
     credentials: "same-origin",
+    cache: "no-store",
     ...options,
     headers: {
       ...(options.body ? JSON_HEADERS : {}),
