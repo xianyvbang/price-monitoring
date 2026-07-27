@@ -304,11 +304,11 @@ function groupQueryStatus(row) {
 }
 
 function groupQueryStatusText(row) {
-  return { valid: "成功", invalid: "失败", never: "未查询" }[groupQueryStatus(row)] || "未查询";
+  return { valid: "成功", invalid: "失败", deleted: "已删除", never: "未查询" }[groupQueryStatus(row)] || "未查询";
 }
 
 function groupQueryStatusType(row) {
-  return { valid: "success", invalid: "danger" }[groupQueryStatus(row)] || "info";
+  return { valid: "success", invalid: "danger", deleted: "warning" }[groupQueryStatus(row)] || "info";
 }
 
 function syncFilterFromRoute() {
@@ -436,14 +436,7 @@ async function queryGroup(row) {
   row._groupQuerying = true;
   try {
     const result = await api.queryGroup(row.id);
-    const status = result.group_query_status || result.groupQueryStatus || (result.is_valid ? "valid" : "invalid");
-    allRowsForAccount(row.id).forEach((target) => {
-      target.last_group_query_status = status;
-      target.lastGroupQueryStatus = status;
-    });
-    if (result.extra) {
-      await loadDashboard();
-    }
+    await loadDashboard();
     if (result.is_valid === false) {
       ElMessage.error(queryFailureMessage(result, "查组失败"));
     } else {

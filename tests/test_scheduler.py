@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.models import Database
+from app.security import decrypt_value
 from app.services.scheduler import BalanceScheduler, query_all_accounts, query_all_group_rates, query_group_rate_for_account, query_one_account, send_due_reminders
 
 
@@ -164,6 +165,104 @@ async def test_group_query_updates_latest_status_for_success_and_failure(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_group_query_tracks_success_deleted_and_failure_per_monitor_group(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+    account_id = db.upsert_account(_sub2api_account("sub-group-status"))
+    db.replace_account_monitor_groups(
+        account_id,
+        [
+            {"group_id": "basic", "plan_name": "Old Basic", "effective_rate_multiplier": 0.7},
+            {"group_id": "legacy", "plan_name": "Legacy", "effective_rate_multiplier": 1.2},
+        ],
+    )
+    results = [
+        {
+            "is_valid": True,
+            "plan_name": "Basic 倍率 0.8",
+            "extra": json.dumps({"groups": []}, ensure_ascii=False),
+            "available_groups": [
+                {
+                    "id": "basic",
+                    "plan_name": "Basic",
+                    "effective_rate_multiplier": 0.8,
+                }
+            ],
+        },
+        {"is_valid": False, "invalid_message": "upstream unavailable"},
+    ]
+
+    async def fake_query(account, secret_key, timeout, log):
+        return results.pop(0)
+
+    monkeypatch.setattr("app.services.scheduler.query_sub2api_group", fake_query)
+
+    succeeded = await query_group_rate_for_account(db, account_id, notify=False)
+    groups_after_success = {
+        row["id"]: dict(row)
+        for row in db.list_monitor_groups(account_id)
+    }
+    group_ids = {
+        decrypt_value(row["group_id_enc"], "test-key"): row["id"]
+        for row in db.list_monitor_groups(account_id)
+    }
+
+    assert succeeded["group_query_status"] == "valid"
+    assert groups_after_success[group_ids["basic"]]["last_group_query_status"] == "valid"
+    assert groups_after_success[group_ids["legacy"]]["last_group_query_status"] == "deleted"
+    assert groups_after_success[group_ids["basic"]]["effective_rate_multiplier"] == 0.8
+    assert groups_after_success[group_ids["legacy"]]["effective_rate_multiplier"] == 1.2
+    assert len(db.list_group_rate_records(account_id, group_ids["basic"])) == 1
+    assert db.list_group_rate_records(account_id, group_ids["legacy"]) == []
+
+    failed = await query_group_rate_for_account(db, account_id, notify=False)
+    groups_after_failure = [dict(row) for row in db.list_monitor_groups(account_id)]
+
+    assert failed["group_query_status"] == "invalid"
+    assert [group["last_group_query_status"] for group in groups_after_failure] == ["invalid", "invalid"]
+    assert len(db.list_group_rate_records(account_id)) == 1
+
+
+@pytest.mark.asyncio
+async def test_group_query_treats_explicit_empty_available_groups_as_deleted(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+    account_id = db.upsert_account(_sub2api_account("sub-empty-groups"))
+    db.replace_account_monitor_groups(
+        account_id,
+        [{"group_id": "basic", "plan_name": "Basic", "effective_rate_multiplier": 0.8}],
+    )
+
+    async def fake_query(account, secret_key, timeout, log):
+        return {
+            "is_valid": True,
+            "plan_name": "已获取可用分组",
+            "extra": json.dumps(
+                {
+                    "groups": [
+                        {
+                            "id": "basic",
+                            "plan_name": "Stale Basic",
+                            "effective_rate_multiplier": 9.9,
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+            "available_groups": [],
+        }
+
+    monkeypatch.setattr("app.services.scheduler.query_sub2api_group", fake_query)
+
+    await query_group_rate_for_account(db, account_id, notify=False)
+    group = dict(db.list_monitor_groups(account_id)[0])
+
+    assert group["last_group_query_status"] == "deleted"
+    assert group["effective_rate_multiplier"] == 0.8
+    assert db.list_group_rate_records(account_id) == []
+
+
+@pytest.mark.asyncio
 async def test_eliminated_account_skips_group_rate_change_email(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "app.db"), "test-key")
     db.init()
@@ -269,7 +368,16 @@ async def test_query_all_group_rates_queries_selected_newapi_group(tmp_path, mon
 
     async def fake_new_query(account, secret_key, timeout, log):
         called_new.append(account["id"])
-        return _group_result("Pro", 0.7)
+        return {
+            **_group_result("Pro", 0.7),
+            "available_groups": [
+                {
+                    "id": "pro",
+                    "plan_name": "Pro",
+                    "effective_rate_multiplier": 0.7,
+                }
+            ],
+        }
 
     monkeypatch.setattr("app.services.scheduler.query_sub2api_group", fake_sub_query)
     monkeypatch.setattr("app.services.scheduler.query_newapi_group", fake_new_query)

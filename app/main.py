@@ -750,6 +750,8 @@ def public_dashboard_monitor_group(group: dict[str, Any]) -> dict[str, Any]:
         "effectiveRateMultiplier": group.get("effective_rate_multiplier"),
         "last_group_rate_changed": bool(group.get("last_group_rate_changed")),
         "lastGroupRateChanged": bool(group.get("last_group_rate_changed")),
+        "last_group_query_status": group.get("last_group_query_status") or "never",
+        "lastGroupQueryStatus": group.get("last_group_query_status") or "never",
     }
 
 
@@ -801,6 +803,8 @@ def public_dashboard_account(
     row["monitor_group"] = public_group
     row["monitorGroup"] = public_group
     if monitor_group:
+        row["last_group_query_status"] = monitor_group.get("last_group_query_status") or "never"
+        row["lastGroupQueryStatus"] = row["last_group_query_status"]
         row["dashboard_row_id"] = f"{account['id']}:group:{monitor_group['id']}"
         row["dashboardRowId"] = row["dashboard_row_id"]
         row["current_group_id"] = monitor_group.get("group_id")

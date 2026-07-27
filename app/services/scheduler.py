@@ -218,6 +218,13 @@ async def query_group_rate_for_account(db: Database, account_id: int, notify: bo
         group_summaries = _monitor_group_summaries_from_result(db, account_id, result)
         record_results = []
         for item in group_summaries:
+            db.update_monitor_group_query_status(
+                account_id,
+                item["status"],
+                monitor_group_id=item["monitor_group_id"],
+            )
+            if item["status"] == "deleted":
+                continue
             record_result = db.record_group_rate_if_changed(
                 account_id,
                 item["summary"],
@@ -228,11 +235,21 @@ async def query_group_rate_for_account(db: Database, account_id: int, notify: bo
             if record_result["changed"]:
                 db.update_account_group_rate_change_status(account_id, True, monitor_group_id=item["monitor_group_id"])
             record_results.append({**record_result, "monitor_group_id": item["monitor_group_id"], "group_id": item["group_id"]})
-        if not record_results:
+        if not group_summaries:
             record_results = [db.record_group_rate_if_changed(account_id, _group_summary_from_result(result), checked_at)]
             if record_results[0]["changed"]:
                 db.update_account_group_rate_change_status(account_id, True)
-        record_result = next((item for item in record_results if item.get("changed")), record_results[0])
+        record_result = (
+            next((item for item in record_results if item.get("changed")), record_results[0])
+            if record_results
+            else {
+                "inserted": False,
+                "changed": False,
+                "previous_rate": None,
+                "current_rate": None,
+                "record": None,
+            }
+        )
         result["group_rate_record"] = record_result
         result["group_rate_records"] = record_results
         result["groupRateRecords"] = record_results
@@ -273,6 +290,8 @@ async def query_group_rate_for_account(db: Database, account_id: int, notify: bo
                 "alert",
                 f"{account['platform']} / {account['name']} 已淘汰，跳过分组倍率变化邮件",
             )
+    else:
+        db.update_monitor_group_query_status(account_id, "invalid")
     db.add_log(
         "info" if result.get("is_valid") else "error",
         "query",
@@ -447,19 +466,42 @@ def _monitor_group_summaries_from_result(db: Database, account_id: int, result: 
     if available is None:
         available = summary.get("available_groups") if isinstance(summary.get("available_groups"), list) else None
     groups = summary.get("groups") if isinstance(summary.get("groups"), list) else None
-    candidates = available or groups or ([summary.get("group")] if isinstance(summary.get("group"), dict) else [])
+    if available is not None:
+        candidates = available
+    elif groups is not None:
+        candidates = groups
+    else:
+        candidates = [summary["group"]] if isinstance(summary.get("group"), dict) else []
     results = []
     for monitor_group in monitor_groups:
         group_id = str(monitor_group.get("group_id") or "")
-        matched = next((group for group in candidates if isinstance(group, dict) and str(group.get("id") or group.get("name") or "") == group_id), None)
-        if matched is None and str(summary.get("group_id") or "") == group_id and isinstance(summary.get("group"), dict):
+        matched = next(
+            (
+                group
+                for group in candidates
+                if isinstance(group, dict)
+                and str(group.get("id") or group.get("group_id") or group.get("groupId") or group.get("name") or "")
+                == group_id
+            ),
+            None,
+        )
+        if (
+            available is None
+            and matched is None
+            and str(summary.get("group_id") or "") == group_id
+            and isinstance(summary.get("group"), dict)
+        ):
             matched = summary["group"]
         if matched is None:
-            matched = {
-                "id": group_id,
-                "plan_name": monitor_group.get("plan_name") or f"分组 {group_id}",
-                "effective_rate_multiplier": monitor_group.get("effective_rate_multiplier"),
-            }
+            results.append(
+                {
+                    "monitor_group_id": monitor_group["id"],
+                    "group_id": group_id,
+                    "status": "deleted",
+                    "summary": None,
+                }
+            )
+            continue
         group_summary = {
             "title": f"{matched.get('plan_name') or matched.get('name') or group_id} 倍率 {matched.get('effective_rate_multiplier')}",
             "group_id": group_id,
@@ -471,6 +513,7 @@ def _monitor_group_summaries_from_result(db: Database, account_id: int, result: 
             {
                 "monitor_group_id": monitor_group["id"],
                 "group_id": group_id,
+                "status": "valid",
                 "summary": group_summary,
             }
         )

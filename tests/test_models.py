@@ -27,6 +27,23 @@ def test_accounts_group_query_status_migration(tmp_path):
     assert status == "never"
 
 
+def test_monitor_groups_query_status_migration(tmp_path):
+    database_path = tmp_path / "legacy.db"
+    with sqlite3.connect(database_path) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("CREATE TABLE account_monitor_groups (id INTEGER PRIMARY KEY)")
+        Database._migrate_account_monitor_groups_query_status(conn)
+        columns = {row["name"]: row for row in conn.execute("PRAGMA table_info(account_monitor_groups)")}
+        conn.execute("INSERT INTO account_monitor_groups (id) VALUES (1)")
+        status = conn.execute(
+            "SELECT last_group_query_status FROM account_monitor_groups WHERE id = 1"
+        ).fetchone()[0]
+
+    assert columns["last_group_query_status"]["notnull"] == 1
+    assert columns["last_group_query_status"]["dflt_value"] == "'never'"
+    assert status == "never"
+
+
 def test_newapi_uses_api_key_as_access_token_when_missing(tmp_path):
     db = Database(str(tmp_path / "app.db"), "test-key")
     db.init()

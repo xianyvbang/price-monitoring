@@ -171,6 +171,7 @@ class Database:
                     raw_json TEXT,
                     last_checked_at TEXT,
                     last_group_rate_changed INTEGER NOT NULL DEFAULT 0,
+                    last_group_query_status TEXT NOT NULL DEFAULT 'never',
                     sort_order INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -412,6 +413,7 @@ class Database:
             self._migrate_accounts_recharge_ratio(conn)
             self._migrate_accounts_group_rate_changed(conn)
             self._migrate_accounts_group_query_status(conn)
+            self._migrate_account_monitor_groups_query_status(conn)
             self._migrate_accounts_visible(conn)
             self._migrate_accounts_eliminated(conn)
             self._migrate_opencode_go_recovery_email(conn)
@@ -600,6 +602,16 @@ class Database:
         column_names = {row["name"] for row in columns}
         if "last_group_query_status" not in column_names:
             conn.execute("ALTER TABLE accounts ADD COLUMN last_group_query_status TEXT NOT NULL DEFAULT 'never'")
+
+    @staticmethod
+    def _migrate_account_monitor_groups_query_status(conn: sqlite3.Connection) -> None:
+        columns = conn.execute("PRAGMA table_info(account_monitor_groups)").fetchall()
+        column_names = {row["name"] for row in columns}
+        if "last_group_query_status" not in column_names:
+            conn.execute(
+                "ALTER TABLE account_monitor_groups "
+                "ADD COLUMN last_group_query_status TEXT NOT NULL DEFAULT 'never'"
+            )
 
     @staticmethod
     def _migrate_accounts_visible(conn: sqlite3.Connection) -> None:
@@ -1976,7 +1988,7 @@ class Database:
                 """
                 SELECT
                     id, group_id_enc, plan_name, name, effective_rate_multiplier,
-                    last_group_rate_changed, sort_order
+                    last_group_rate_changed, last_group_query_status, sort_order
                 FROM account_monitor_groups
                 WHERE account_id = ?
                 ORDER BY sort_order ASC, id ASC
@@ -2822,6 +2834,29 @@ class Database:
                 WHERE id = ?
                 """,
                 ("valid" if is_valid else "invalid", utc_now(), account_id),
+            )
+
+    def update_monitor_group_query_status(
+        self,
+        account_id: int,
+        status: str,
+        monitor_group_id: int | None = None,
+    ) -> None:
+        if status not in {"never", "valid", "invalid", "deleted"}:
+            raise ValueError("分组查询状态不正确")
+        conditions = "account_id = ?"
+        params: list[Any] = [status, utc_now(), account_id]
+        if monitor_group_id is not None:
+            conditions += " AND id = ?"
+            params.append(monitor_group_id)
+        with self.connect() as conn:
+            conn.execute(
+                f"""
+                UPDATE account_monitor_groups
+                SET last_group_query_status = ?, updated_at = ?
+                WHERE {conditions}
+                """,
+                tuple(params),
             )
 
     def update_account_selected_group(self, account_id: int, group_id: str) -> None:

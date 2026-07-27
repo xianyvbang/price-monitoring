@@ -467,6 +467,9 @@ def test_dashboard_api_repeats_multi_group_account_as_group_rows(tmp_path, monke
     )
     test_db.update_account_group_rate_change_status(account_id, True, group_id="pro")
     test_db.update_account_group_query_status(account_id, False)
+    monitor_groups = test_db.list_monitor_groups(account_id)
+    test_db.update_monitor_group_query_status(account_id, "valid", monitor_group_id=monitor_groups[0]["id"])
+    test_db.update_monitor_group_query_status(account_id, "deleted", monitor_group_id=monitor_groups[1]["id"])
     test_db.update_account_result(account_id, {"is_valid": True, "remaining": 42, "unit": "USD"})
     monkeypatch.setattr("app.main.db", test_db)
     monkeypatch.setattr("app.main.scheduler.db", test_db)
@@ -498,7 +501,9 @@ def test_dashboard_api_repeats_multi_group_account_as_group_rows(tmp_path, monke
     assert rows[0]["last_group_rate_changed"] is False
     assert rows[1]["last_group_rate_changed"] is True
     assert rows[1]["monitor_group"]["last_group_rate_changed"] is True
-    assert [row["last_group_query_status"] for row in rows] == ["invalid", "invalid"]
+    assert [row["last_group_query_status"] for row in rows] == ["valid", "deleted"]
+    assert rows[0]["monitor_group"]["last_group_query_status"] == "valid"
+    assert rows[1]["monitor_group"]["last_group_query_status"] == "deleted"
 
 
 def test_dashboard_api_shows_today_consumption_summary(tmp_path, monkeypatch):
