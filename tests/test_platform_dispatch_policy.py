@@ -91,8 +91,9 @@ def test_health_uses_current_time_window_for_short_evidence():
 
 def test_config_validation_and_deterministic_allocators():
     assert validate_policy_config({"autoScoringEnabled": False})["auto_scoring_enabled"] is False
-    assert validate_policy_config({})["oauth_account_threshold"] == 3
-    assert validate_policy_config({"oauthAccountThreshold": 4})["oauth_account_threshold"] == 4
+    assert "oauth_account_threshold" not in validate_policy_config(
+        {}, {"oauth_account_threshold": 3}
+    )
     probe_models = validate_policy_config(
         {
             "defaultProbeModel": " default-model ",
@@ -113,8 +114,6 @@ def test_config_validation_and_deterministic_allocators():
         validate_policy_config({"account_probe_models": {"1": "x" * 201}})
     with pytest.raises(ValueError, match="自动评分"):
         validate_policy_config({"enabled": True, "auto_scoring_enabled": False})
-    with pytest.raises(ValueError, match="大于 0"):
-        validate_policy_config({"oauth_account_threshold": 0})
     with pytest.raises(ValueError):
         validate_policy_config({"account_min_concurrency": 251, "account_max_concurrency": 250})
     with pytest.raises(ValueError):
@@ -589,7 +588,7 @@ async def test_disabling_automatic_scoring_cancels_active_round_and_keeps_schedu
 
         manual = await scheduler.run_once()
         assert manual["managed_accounts"] == 1
-        assert client.account_reads == 4
+        assert client.account_reads == 2
     finally:
         await scheduler.stop()
 
@@ -624,7 +623,7 @@ async def test_stopping_current_automatic_round_keeps_configuration_and_schedule
                 except asyncio.CancelledError:
                     self.first_read_cancelled.set()
                     raise
-            if self.account_reads >= 3:
+            if self.account_reads >= 2:
                 self.next_read_started.set()
             return await super().list_accounts(**kwargs)
 
@@ -652,7 +651,7 @@ async def test_stopping_current_automatic_round_keeps_configuration_and_schedule
         assert scheduler._run_after_change is False
 
         await asyncio.wait_for(client.next_read_started.wait(), timeout=7)
-        assert client.account_reads >= 3
+        assert client.account_reads >= 2
     finally:
         await scheduler.stop()
 
@@ -692,7 +691,7 @@ async def test_policy_change_can_rearm_timer_without_starting_an_automatic_round
 
 
 @pytest.mark.asyncio
-async def test_oauth_group_statistics_count_only_normal_schedulable_accounts(tmp_path):
+async def test_oauth_accounts_do_not_affect_apikey_scheduling(tmp_path):
     db = make_db(tmp_path)
     accounts = [
         {
@@ -705,153 +704,22 @@ async def test_oauth_group_statistics_count_only_normal_schedulable_accounts(tmp
             "group_ids": [10],
         }
     ]
-    groups = [
-        {"id": 10, "name": "Ten", "platform": "openai"},
-        {"id": 20, "name": "Twenty", "platform": "openai"},
-        {"id": 30, "name": "Thirty", "platform": "openai"},
-    ]
     oauth_accounts = [
-        {"id": 101, "type": "oauth", "status": "active", "schedulable": True, "group_ids": [10, 20]},
-        {"id": 101, "type": "oauth", "status": "active", "schedulable": True, "group_ids": [10, 20]},
-        {"id": 102, "type": "oauth", "status": "active", "schedulable": False, "group_ids": [10]},
-        {"id": 103, "type": "oauth", "status": "inactive", "schedulable": True, "group_ids": [10]},
-        {"id": 104, "type": "oauth", "status": "active", "rate_limit_reset_at": "2999-01-01T00:00:00Z", "group_ids": [10]},
-        {"id": 105, "type": "oauth", "status": "active", "overload_until": "2999-01-01T00:00:00Z", "group_ids": [10]},
-        {"id": 106, "type": "oauth", "status": "active", "temp_unschedulable_until": "2999-01-01T00:00:00Z", "group_ids": [10]},
-        {"id": 107, "type": "oauth", "status": "active", "group_ids": [20]},
-        {"id": 108, "type": "oauth", "status": "active", "group_ids": [999]},
+        {"id": 100 + index, "type": "oauth", "status": "active", "group_ids": [10]}
+        for index in range(12)
     ]
-    prepare_cache(db, accounts, groups)
-    client = PolicyClient(accounts, groups, oauth_accounts)
-    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
-
-    summary = await scheduler.run_once()
-
-    statistics = {item["group_id"]: item for item in summary["oauth_group_statistics"]}
-    assert statistics[10] == {
-        "group_id": 10,
-        "group_name": "Ten",
-        "normal_oauth_accounts": 1,
-        "oauth_account_threshold": 3,
-        "threshold_exceeded": False,
-        "affected_apikey_accounts": 0,
-    }
-    assert statistics[20]["normal_oauth_accounts"] == 2
-    assert statistics[30]["normal_oauth_accounts"] == 0
-    assert [read.get("account_type") for read in client.account_read_filters] == [None, "oauth"]
-    assert client.account_read_filters[1].get("status") == "active"
-    assert client.updates == []
-
-
-@pytest.mark.asyncio
-async def test_oauth_threshold_requires_all_groups_and_switches_one_apikey_per_round(tmp_path):
-    db = make_db(tmp_path)
-    accounts = [
-        {"id": 1, "name": "single", "type": "apikey", "status": "active", "schedulable": True, "group_ids": [10]},
-        {"id": 2, "name": "multi", "type": "apikey", "status": "active", "schedulable": True, "group_ids": [10, 20]},
-        {"id": 3, "name": "unknown", "type": "apikey", "status": "active", "schedulable": True, "group_ids": [999]},
-        {"id": 4, "name": "ungrouped", "type": "apikey", "status": "active", "schedulable": True, "group_ids": []},
-    ]
-    groups = [{"id": 10, "name": "Ten"}, {"id": 20, "name": "Twenty"}]
-    oauth_accounts = [
-        *[
-            {"id": 100 + index, "type": "oauth", "status": "active", "group_ids": [10]}
-            for index in range(4)
-        ],
-        *[
-            {"id": 200 + index, "type": "oauth", "status": "active", "group_ids": [20]}
-            for index in range(3)
-        ],
-    ]
+    groups = [{"id": 10, "name": "Ten", "platform": "openai"}]
     prepare_cache(db, accounts, groups)
     db.save_platform_dispatch_policy({**POLICY_DEFAULTS, "enabled": True}, "https://sub.example")
     client = PolicyClient(accounts, groups, oauth_accounts)
     scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
 
-    first = await scheduler.run_once()
+    summary = await scheduler.run_once()
 
-    first_statistics = {item["group_id"]: item for item in first["oauth_group_statistics"]}
-    assert client.updates == [(1, "schedulable", False)]
-    assert first_statistics[10]["threshold_exceeded"] is True
-    assert first_statistics[10]["affected_apikey_accounts"] == 1
-    assert first_statistics[20]["threshold_exceeded"] is False
-    assert first_statistics[20]["affected_apikey_accounts"] == 0
-
-    oauth_accounts.append(
-        {"id": 203, "type": "oauth", "status": "active", "group_ids": [20]}
-    )
-    second = await scheduler.run_once()
-
-    second_statistics = {item["group_id"]: item for item in second["oauth_group_statistics"]}
-    assert client.updates == [(1, "schedulable", False)]
-    assert second["scheduling_action"] == ""
-    assert second_statistics[10]["affected_apikey_accounts"] == 2
-    assert second_statistics[20]["affected_apikey_accounts"] == 1
-
-
-@pytest.mark.asyncio
-async def test_oauth_policy_prefers_lowest_health_and_blocks_recovery_until_threshold_clears(tmp_path):
-    db = make_db(tmp_path)
-    accounts = {
-        1: {"id": 1, "name": "healthier", "type": "apikey", "status": "active", "schedulable": True, "group_ids": [10]},
-        2: {"id": 2, "name": "lower", "type": "apikey", "status": "active", "schedulable": True, "group_ids": [10]},
-    }
-    client = PolicyClient(list(accounts.values()), [{"id": 10, "name": "Ten"}])
-    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
-    health = {1: healthy_state(90), 2: healthy_state(70)}
-
-    action = await scheduler._apply_schedulable_policy(
-        client,
-        client.site_url,
-        accounts,
-        health,
-        [1, 2],
-        {**POLICY_DEFAULTS, "enabled": True},
-        180,
-        {10: {"id": 10, "name": "Ten"}},
-        oauth_affected_ids={1, 2},
-        oauth_group_counts={10: 4},
-    )
-
-    assert client.updates == [(2, "schedulable", False)]
-    assert "Ten 正常 OAuth 4 个" in action
-    assert "严格超过阈值 3" in action
-    assert "APIKey 调度" in db.list_platform_dispatch_actions(1, 10)["items"][0]["reason"]
-
-    accounts[1]["schedulable"] = False
-    client.accounts[0]["schedulable"] = False
-    client.updates.clear()
-    probe_at = datetime.now(timezone.utc).isoformat()
-    health[1]["latest_probe_success_at"] = probe_at
-    blocked = await scheduler._apply_schedulable_policy(
-        client,
-        client.site_url,
-        {1: accounts[1]},
-        {1: health[1]},
-        [],
-        {**POLICY_DEFAULTS, "enabled": True},
-        180,
-        {10: {"id": 10, "name": "Ten"}},
-        oauth_affected_ids={1},
-        oauth_group_counts={10: 4},
-    )
-    assert blocked == ""
+    assert [read.get("account_type") for read in client.account_read_filters] == [None]
+    assert "oauth_group_statistics" not in summary
+    assert summary["scheduling_action"] == ""
     assert client.updates == []
-
-    recovered = await scheduler._apply_schedulable_policy(
-        client,
-        client.site_url,
-        {1: accounts[1]},
-        {1: health[1]},
-        [],
-        {**POLICY_DEFAULTS, "enabled": True},
-        180,
-        {10: {"id": 10, "name": "Ten"}},
-        oauth_affected_ids=set(),
-        oauth_group_counts={10: 3},
-    )
-    assert client.updates == [(1, "schedulable", True)]
-    assert recovered.startswith("开启调度 healthier")
 
 
 def failing_state(score=50.0, *, category="probe_failure", count=3):
@@ -1012,35 +880,6 @@ async def test_fatal_failure_can_disable_last_schedulable_account(tmp_path):
 
     assert action.startswith("关闭调度 fatal")
     assert client.updates == [(1, "schedulable", False)]
-
-
-@pytest.mark.asyncio
-async def test_oauth_read_failure_stops_round_before_probes_or_remote_writes(tmp_path):
-    db = make_db(tmp_path)
-    accounts = [
-        {"id": 1, "name": "one", "type": "apikey", "status": "active", "group_ids": [10]}
-    ]
-    groups = [{"id": 10, "name": "Ten"}]
-    prepare_cache(db, accounts, groups)
-    db.save_platform_dispatch_policy({**POLICY_DEFAULTS, "enabled": True}, "https://sub.example")
-
-    class FailingOAuthClient(PolicyClient):
-        async def list_accounts(self, **kwargs):
-            if str(kwargs.get("account_type") or "").casefold() == "oauth":
-                raise RuntimeError("oauth read failed")
-            return await super().list_accounts(**kwargs)
-
-    client = FailingOAuthClient(accounts, groups)
-    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
-
-    with pytest.raises(RuntimeError, match="oauth read failed"):
-        await scheduler.run_once()
-
-    assert client.probes == []
-    assert client.updates == []
-    runtime = db.get_platform_dispatch_policy(POLICY_DEFAULTS)["runtime"]
-    assert runtime["status"] == "failed"
-    assert runtime["last_error"] == "oauth read failed"
 
 
 @pytest.mark.asyncio
@@ -1350,63 +1189,6 @@ async def test_smart_expansion_floors_low_and_preserves_above_max(tmp_path):
 
     assert client.updates == [(1, "concurrency", 52)]
     assert accounts[2]["concurrency"] == 300
-
-
-@pytest.mark.asyncio
-async def test_oauth_affected_accounts_are_excluded_from_capacity_and_load_writes(tmp_path):
-    db = make_db(tmp_path)
-    accounts = {
-        1: {
-            "id": 1,
-            "name": "oauth-covered",
-            "status": "active",
-            "schedulable": True,
-            "concurrency": 10,
-            "load_factor": 20,
-        },
-        2: {
-            "id": 2,
-            "name": "eligible",
-            "status": "active",
-            "schedulable": True,
-            "concurrency": 10,
-            "load_factor": 20,
-        },
-    }
-    client = PolicyClient(list(accounts.values()))
-    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
-    health = {1: healthy_state(), 2: healthy_state()}
-    cost_profiles = {
-        account_id: {"cost_available": True, "upstream_cost_multiplier": 1.0}
-        for account_id in accounts
-    }
-
-    await scheduler._apply_concurrency_policy(
-        client,
-        client.site_url,
-        accounts,
-        health,
-        {1: {"current_in_use": 10}, 2: {"current_in_use": 10}},
-        cost_profiles,
-        {**POLICY_DEFAULTS, "smart_expand_enabled": True},
-        excluded_account_ids={1},
-    )
-    assert client.field_payloads
-    assert {account_id for account_id, _ in client.field_payloads} == {2}
-
-    client.field_payloads.clear()
-    client.updates.clear()
-    await scheduler._apply_load_policy(
-        client,
-        client.site_url,
-        accounts,
-        health,
-        cost_profiles,
-        {**POLICY_DEFAULTS, "load_factor_enabled": True},
-        excluded_account_ids={1},
-    )
-    assert client.field_payloads
-    assert {account_id for account_id, _ in client.field_payloads} == {2}
 
 
 @pytest.mark.asyncio

@@ -87,7 +87,7 @@ def test_platform_dispatch_policy_api_defaults_validation_and_save(tmp_path, mon
         assert initial.json()["config"]["group_probe_models"] == {}
         assert initial.json()["config"]["account_probe_models"] == {}
         assert initial.json()["config"]["excluded_account_ids"] == []
-        assert initial.json()["config"]["oauth_account_threshold"] == 3
+        assert "oauth_account_threshold" not in initial.json()["config"]
         assert initial.json()["is_running"] is False
         assert initial.json()["runtime"]["is_running"] is False
         assert initial.json()["automatic_running"] is False
@@ -104,12 +104,6 @@ def test_platform_dispatch_policy_api_defaults_validation_and_save(tmp_path, mon
         )
         assert invalid.status_code == 400
 
-        invalid_oauth_threshold = client.put(
-            "/api/platform-dispatch/policy",
-            json={"oauth_account_threshold": 0},
-        )
-        assert invalid_oauth_threshold.status_code == 400
-
         saved = client.put(
             "/api/platform-dispatch/policy",
             json={
@@ -119,7 +113,6 @@ def test_platform_dispatch_policy_api_defaults_validation_and_save(tmp_path, mon
                 "load_factor_enabled": False,
                 "price_protection_enabled": False,
                 "probe_interval_seconds": 125,
-                "oauthAccountThreshold": 4,
                 "excluded_account_ids": [7, 8],
             },
         )
@@ -127,7 +120,7 @@ def test_platform_dispatch_policy_api_defaults_validation_and_save(tmp_path, mon
         assert saved.json()["config"]["enabled"] is True
         assert saved.json()["config"]["auto_scoring_enabled"] is True
         assert saved.json()["config"]["probe_interval_seconds"] == 125
-        assert saved.json()["config"]["oauth_account_threshold"] == 4
+        assert "oauth_account_threshold" not in saved.json()["config"]
         assert saved.json()["config"]["excluded_account_ids"] == [7, 8]
 
         incompatible = client.put(

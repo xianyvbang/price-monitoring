@@ -103,7 +103,6 @@ const policyConfig = reactive({
   evidence_ttl_multiplier: 3,
   minimum_available_accounts: 1,
   healthy_target_accounts: 3,
-  oauth_account_threshold: 3,
   total_concurrency: 900,
   account_min_concurrency: 20,
   account_max_concurrency: 250,
@@ -276,12 +275,6 @@ const groupAvailabilityByKey = computed(() => {
     ? policySummary.value.group_availability
     : [];
   return new Map(entries.map((item) => [item.pool_key, item]));
-});
-const oauthGroupStatisticsById = computed(() => {
-  const entries = Array.isArray(policySummary.value.oauth_group_statistics)
-    ? policySummary.value.oauth_group_statistics
-    : [];
-  return new Map(entries.map((item) => [Number(item.group_id), item]));
 });
 function groupAvailabilityTarget(item) {
   const available = Number(item?.available_accounts) || 0;
@@ -1151,26 +1144,6 @@ function statusType(status) {
   return "info";
 }
 
-function groupOAuthStatistic(group) {
-  const groupId = Number(group?.id);
-  return Number.isInteger(groupId) && groupId > 0
-    ? oauthGroupStatisticsById.value.get(groupId) || null
-    : null;
-}
-
-function groupOAuthStatusText(group) {
-  const statistic = groupOAuthStatistic(group);
-  if (!statistic) return "正常 OAuth 尚无实时数据";
-  const count = Number(statistic.normal_oauth_accounts) || 0;
-  const threshold = Number(statistic.oauth_account_threshold ?? policyConfig.oauth_account_threshold) || 0;
-  return `正常 OAuth ${count} 个 / 阈值 ${threshold}`;
-}
-
-function groupOAuthThresholdText(group) {
-  const affected = Number(groupOAuthStatistic(group)?.affected_apikey_accounts) || 0;
-  return affected > 0 ? `APIKey 停调 ${affected} 个` : "OAuth 已超阈值";
-}
-
 function statusText(status) {
   return STATUS_FILTER_OPTIONS.find((option) => option.value === status)?.label || status || "-";
 }
@@ -1489,11 +1462,11 @@ onMounted(async () => {
       <div class="policy-behavior" :class="{ 'is-active': policyConfig.enabled || policyConfig.auto_scoring_enabled }">
         <strong>当前行为</strong>
         <span v-if="!policyConfig.auto_scoring_enabled">自动评分和自动调度均关闭；后台不再读取证据或重算健康分。</span>
-        <span v-else-if="!policyConfig.enabled">自动评分开启：后台增量读取请求证据、探活并统计各分组正常 OAuth 数量，不修改 Sub2API 账号状态或调度参数。</span>
+        <span v-else-if="!policyConfig.enabled">自动评分开启：后台增量读取请求证据、探活并计算健康评分，不修改 Sub2API 账号状态或调度参数。</span>
         <span v-else-if="!policyConfig.return_pool_enabled && !policyConfig.smart_expand_enabled && !policyConfig.load_factor_enabled && !policyConfig.price_protection_enabled">
-          四项可选策略均关闭；仍会关闭异常账号，并在账号所属全部分组的正常 OAuth 都超过 {{ policyConfig.oauth_account_threshold }} 个时逐个停止 APIKey 调度。任一分组低于每组最低保障 {{ policyConfig.minimum_available_accounts }} 个时，会将符合条件且未受 OAuth 规则限制的账号逐个重新开启。
+          四项可选策略均关闭；仍会关闭异常账号。任一分组低于每组最低保障 {{ policyConfig.minimum_available_accounts }} 个时，会将符合条件的账号逐个重新开启。
         </span>
-        <span v-else>每 {{ policyConfig.probe_interval_seconds }} 秒评估托管账号并实时统计正常 OAuth；每个分组独立执行阈值限制、最低保障与健康回池，每轮最多在 Sub2API 关闭或开启 1 个账号的调度。</span>
+        <span v-else>每 {{ policyConfig.probe_interval_seconds }} 秒评估托管账号；每个分组独立执行最低保障与健康回池，每轮最多在 Sub2API 关闭或开启 1 个账号的调度。</span>
       </div>
 
       <div class="policy-strategies">
@@ -1547,7 +1520,6 @@ onMounted(async () => {
               <label><span>健康门槛</span><el-input-number v-model="policyConfig.health_threshold" :min="0" :max="100" /></label>
               <label><span>每组最低保障数</span><el-input-number v-model="policyConfig.minimum_available_accounts" :min="1" /></label>
               <label><span>每组健康回池目标数</span><el-input-number v-model="policyConfig.healthy_target_accounts" :min="1" /></label>
-              <label><span>正常 OAuth 停调阈值</span><el-input-number v-model="policyConfig.oauth_account_threshold" :min="1" /></label>
               <label><span>证据有效倍数</span><el-input-number v-model="policyConfig.evidence_ttl_multiplier" :min="1" /></label>
               <label><span>默认探活模型</span><el-input v-model="policyConfig.default_probe_model" clearable placeholder="可选的全局默认模型" /></label>
             </div>
@@ -1587,7 +1559,6 @@ onMounted(async () => {
 
       <div class="policy-rules">
         <p><strong>Sub2API 调度开关</strong><span>认证、余额和用量上限异常时立即关闭账号调度；价格安全且健康达标时，可重新开启系统或人员手动关闭的 active 账号。</span></p>
-        <p><strong>OAuth 容量</strong><span>每轮实时统计可调度 OAuth；APIKey 所属全部分组均严格超过阈值时逐个停调，阈值解除后按健康与最低保障规则恢复。</span></p>
         <p><strong>系统计算</strong><span>短期只统计当前时间向前 {{ Number(policyConfig.probe_interval_seconds) * Number(policyConfig.evidence_ttl_multiplier) }} 秒内最多 10 条证据，最新一条与其余均值各 50%；窗口外数据只参与最近 60 条长期均值，最终评分为短期 70% + 长期 30%。</span></p>
       </div>
 
@@ -1726,15 +1697,6 @@ onMounted(async () => {
               {{ section.group.status === "active" ? "启用" : "停用" }}
             </el-tag>
             <span>{{ section.accounts.length }} 个账号</span>
-            <span v-if="section.group.id">{{ groupOAuthStatusText(section.group) }}</span>
-            <el-tag
-              v-if="groupOAuthStatistic(section.group)?.threshold_exceeded"
-              size="small"
-              type="warning"
-              effect="plain"
-            >
-              {{ groupOAuthThresholdText(section.group) }}
-            </el-tag>
             <span v-if="groupAvailabilityByKey.get(section.key)" class="group-availability">
               健康可用 {{ groupAvailabilityByKey.get(section.key).available_accounts }} / 每组目标 {{ groupAvailabilityTarget(groupAvailabilityByKey.get(section.key)) }}
             </span>
