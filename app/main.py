@@ -4669,7 +4669,17 @@ def platform_dispatch_policy_response() -> dict[str, Any]:
     site_url = db.get_setting(SUB2API_SITE_URL_SETTING, "").strip().rstrip("/")
     states = db.list_platform_dispatch_account_states(site_url) if site_url else []
     probes_by_account = db.list_recent_platform_dispatch_probes(site_url, 15) if site_url else {}
-    short_evidence_by_account = db.list_short_platform_dispatch_evidence(site_url, 10) if site_url else {}
+    ttl_seconds = max(
+        1,
+        int(policy["config"]["probe_interval_seconds"])
+        * int(policy["config"]["evidence_ttl_multiplier"]),
+    )
+    short_evidence_since = (datetime.now(timezone.utc) - timedelta(seconds=ttl_seconds)).isoformat()
+    short_evidence_by_account = (
+        db.list_short_platform_dispatch_evidence(site_url, 10, short_evidence_since)
+        if site_url
+        else {}
+    )
     for state in states:
         probe_records = [
             public_platform_dispatch_evidence(record)

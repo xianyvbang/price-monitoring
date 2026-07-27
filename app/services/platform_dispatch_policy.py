@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 from uuid import uuid4
 
-from app.models import Database, utc_now
+from app.models import Database, filter_platform_dispatch_accounts_by_groups, utc_now
 from app.services.sub2api_admin import (
     Sub2ApiAdminClient,
     Sub2ApiAdminError,
@@ -283,18 +283,24 @@ def classify_activity(activity: dict[str, Any], *, probe: bool = False) -> dict[
 def calculate_health(evidence: list[dict[str, Any]], now: datetime, ttl_seconds: int) -> dict[str, Any]:
     ordered = sorted(evidence, key=lambda item: _timestamp(item.get("occurred_at")), reverse=True)[:60]
     scores = [float(item.get("score") or 0) for item in ordered]
-    short_values = scores[:10]
+    now_utc = now.replace(tzinfo=timezone.utc) if now.tzinfo is None else now.astimezone(timezone.utc)
+    cutoff = now_utc - timedelta(seconds=max(1, ttl_seconds))
+    recent = [
+        item
+        for item in ordered
+        if (occurred_at := _parse_datetime(item.get("occurred_at"))) is not None
+        and occurred_at >= cutoff
+    ]
+    short_values = [float(item.get("score") or 0) for item in recent[:10]]
+    long_score = sum(scores) / len(scores) if scores else None
     if not short_values:
-        short_score = long_score = health_score = None
+        short_score = health_score = None
     else:
         short_score = short_values[0]
         if len(short_values) > 1:
             short_score = short_values[0] * 0.5 + (sum(short_values[1:]) / len(short_values[1:])) * 0.5
-        long_score = sum(scores) / len(scores)
         health_score = short_score * 0.7 + long_score * 0.3
     evidence_at = str(ordered[0].get("occurred_at") or "") if ordered else ""
-    latest_at = _parse_datetime(evidence_at)
-    fresh = latest_at is not None and latest_at >= now - timedelta(seconds=max(1, ttl_seconds))
     latest_probe_at = ""
     probe_success_at = ""
     for item in ordered:
@@ -310,10 +316,10 @@ def calculate_health(evidence: list[dict[str, Any]], now: datetime, ttl_seconds:
         "long_score": long_score,
         "evidence_count": len(ordered),
         "evidence_at": evidence_at,
-        "evidence_fresh": fresh,
+        "evidence_fresh": bool(recent),
         "latest_probe_at": latest_probe_at,
         "latest_probe_success_at": probe_success_at,
-        "evidence": ordered,
+        "evidence": recent,
     }
 
 
@@ -962,11 +968,18 @@ class PlatformDispatchPolicyScheduler:
             and _optional_int(group.get("id"))
             and int(group["id"]) not in excluded_group_ids
         ]
+        filtered_remote_accounts = filter_platform_dispatch_accounts_by_groups(
+            remote_accounts,
+            excluded_group_ids,
+        )
         accounts = {
-            int(account["id"]): _without_excluded_account_groups(account, excluded_group_ids)
-            for account in remote_accounts
+            int(account["id"]): account
+            for account in filtered_remote_accounts
             if isinstance(account, dict) and _optional_int(account.get("id")) in managed_ids
         }
+        removed_managed_ids = managed_ids - set(accounts)
+        if removed_managed_ids:
+            self.db.remove_platform_dispatch_cached_accounts(site_url, removed_managed_ids)
         managed_ids.intersection_update(accounts)
         group_map = {int(group["id"]): group for group in groups if isinstance(group, dict) and _optional_int(group.get("id"))}
         oauth_members_by_group = _normal_oauth_members_by_group(
@@ -1528,23 +1541,35 @@ class PlatformDispatchPolicyScheduler:
             )
             if failure_count >= int(config["failure_threshold"]) and (item["health_score"] or 0) < float(config["failure_health_threshold"]):
                 threshold.append((account_id, f"最近 {config['failure_window']} 次异常达到 {failure_count} 次"))
-            elif slow_count >= int(config["slow_threshold"]):
+            elif (
+                slow_count >= int(config["slow_threshold"])
+                and (item["health_score"] or 0)
+                < float(config["failure_health_threshold"])
+            ):
                 threshold.append((account_id, f"最近 {config['slow_window']} 次慢首字达到 {slow_count} 次"))
 
         candidate: tuple[int, bool, str] | None = None
-        if fatal:
-            account_id, reason = min(fatal, key=lambda pair: ((health[pair[0]]["health_score"] or 0), pair[0]))
-            candidate = (account_id, False, reason)
-        elif threshold:
-            account_id, reason = min(threshold, key=lambda pair: ((health[pair[0]]["health_score"] or 0), pair[0]))
-            candidate = (account_id, False, reason)
-        elif oauth_candidates := [
+        minimum = int(config["minimum_available_accounts"])
+        eligible_threshold = [
+            item
+            for item in threshold
+            if _preserves_schedulable_pool_minimum(accounts, item[0], minimum)
+        ]
+        oauth_candidates = [
             account_id
             for account_id in oauth_affected_ids
             if account_id in accounts
             and str(accounts[account_id].get("status") or "inactive") == "active"
             and accounts[account_id].get("schedulable") is not False
-        ]:
+            and _preserves_schedulable_pool_minimum(accounts, account_id, minimum)
+        ]
+        if fatal:
+            account_id, reason = min(fatal, key=lambda pair: ((health[pair[0]]["health_score"] or 0), pair[0]))
+            candidate = (account_id, False, reason)
+        elif eligible_threshold:
+            account_id, reason = min(eligible_threshold, key=lambda pair: ((health[pair[0]]["health_score"] or 0), pair[0]))
+            candidate = (account_id, False, reason)
+        elif oauth_candidates:
             account_id = min(
                 oauth_candidates,
                 key=lambda value: (health[value]["health_score"] or 0, value),
@@ -1594,7 +1619,6 @@ class PlatformDispatchPolicyScheduler:
 
         if candidate is None:
             pools = _group_availability_summary(accounts, available_ids, group_map or {}, config)
-            minimum = int(config["minimum_available_accounts"])
             deficient = {
                 item["pool_key"]: minimum - int(item["available_accounts"])
                 for item in pools
@@ -1791,31 +1815,41 @@ class PlatformDispatchPolicyScheduler:
 
         now = datetime.now(timezone.utc)
         final_targets: dict[int, int] = {}
+        load_factor_writes: dict[int, bool] = {}
         for account_id in eligible:
             account = accounts[account_id]
             target = base_targets[account_id]
             final_targets[account_id] = target
             current = _effective_load_factor(account)
             self.db.upsert_platform_dispatch_account_state(site_url, account_id, target_load_factor=target)
-
-        priority_targets = _load_factor_priority_targets(final_targets)
-        for account_id in eligible:
-            account = accounts[account_id]
-            target = final_targets[account_id]
-            current = _effective_load_factor(account)
             relative = abs(target - current) * 100 / max(1, current)
             state = states.get(account_id) or {}
             last_write = _parse_datetime(state.get("last_load_factor_write_at"))
             cooling = last_write is not None and last_write > now - timedelta(seconds=int(config["load_change_cooldown_seconds"]))
-            if relative < float(config["load_change_threshold_percent"]) or cooling:
-                continue
-            fields = {"load_factor": target}
+            should_write_load_factor = (
+                target != current
+                and relative >= float(config["load_change_threshold_percent"])
+                and not cooling
+            )
+            load_factor_writes[account_id] = should_write_load_factor
+
+        for account_id in eligible:
+            account = accounts[account_id]
+            fields: dict[str, Any] = {}
+            if load_factor_writes[account_id]:
+                fields["load_factor"] = final_targets[account_id]
             current_priority = _optional_int(account.get("priority"))
-            target_priority = priority_targets[account_id]
-            if current_priority != target_priority:
-                fields["priority"] = target_priority
+            if current_priority != 1:
+                fields["priority"] = 1
+            if not fields:
+                continue
             if await self._write_account_fields(client, site_url, account, fields, "负载因子调权"):
-                self.db.upsert_platform_dispatch_account_state(site_url, account_id, last_load_factor_write_at=utc_now())
+                if load_factor_writes[account_id]:
+                    self.db.upsert_platform_dispatch_account_state(
+                        site_url,
+                        account_id,
+                        last_load_factor_write_at=utc_now(),
+                    )
 
     def _account_weight(self, cost_multiplier: float, health: dict[str, Any], config: dict[str, Any]) -> float:
         score = max(0.0, float(health.get("health_score") or 0))
@@ -2025,36 +2059,29 @@ def _oauth_group_statistics(
     return result
 
 
-def _without_excluded_account_groups(
-    account: dict[str, Any], excluded_group_ids: set[int]
-) -> dict[str, Any]:
-    if not excluded_group_ids:
-        return account
-    filtered = dict(account)
-    group_ids = [
-        group_id
-        for group_id in _account_group_ids(account)
-        if group_id not in excluded_group_ids
-    ]
-    filtered.pop("group_id", None)
-    filtered.pop("groupId", None)
-    filtered.pop("plans", None)
-    filtered["group_ids"] = group_ids
-    filtered["groupIds"] = group_ids
-    if isinstance(account.get("groups"), list):
-        filtered["groups"] = [
-            group
-            for group in account["groups"]
-            if not isinstance(group, dict)
-            or _optional_int(group.get("id", group.get("group_id", group.get("groupId"))))
-            not in excluded_group_ids
-        ]
-    return filtered
-
-
 def _account_pool_keys(account: dict[str, Any]) -> list[int | str]:
     group_ids = _account_group_ids(account)
     return group_ids if group_ids else [UNGROUPED_POOL_KEY]
+
+
+def _preserves_schedulable_pool_minimum(
+    accounts: dict[int, dict[str, Any]],
+    account_id: int,
+    minimum: int,
+) -> bool:
+    account = accounts.get(account_id)
+    if account is None:
+        return False
+    schedulable_counts: dict[int | str, int] = {}
+    for item in accounts.values():
+        if (
+            str(item.get("status") or "inactive") != "active"
+            or item.get("schedulable") is False
+        ):
+            continue
+        for key in _account_pool_keys(item):
+            schedulable_counts[key] = schedulable_counts.get(key, 0) + 1
+    return all(schedulable_counts.get(key, 0) > minimum for key in _account_pool_keys(account))
 
 
 def _pool_key(value: int | str) -> str:
@@ -2096,16 +2123,6 @@ def _group_availability_summary(
             }
         )
     return result
-
-
-def _load_factor_priority_targets(targets: dict[int, int]) -> dict[int, int]:
-    if not targets:
-        return {}
-    highest = max(targets.values())
-    return {
-        account_id: max(1, highest - target + 1)
-        for account_id, target in targets.items()
-    }
 
 
 def _optional_int(value: Any) -> int | None:

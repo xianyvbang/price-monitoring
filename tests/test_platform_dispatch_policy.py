@@ -58,6 +58,35 @@ def test_health_classification_and_formula():
         [{"score": 100, "occurred_at": (now - timedelta(seconds=181)).isoformat()}], now, 180
     )
     assert expired["evidence_fresh"] is False
+    assert expired["short_score"] is None
+    assert expired["long_score"] == 100
+    assert expired["health_score"] is None
+    assert expired["evidence"] == []
+
+
+def test_health_uses_current_time_window_for_short_evidence():
+    now = datetime(2026, 7, 26, 8, tzinfo=timezone.utc)
+    stale_failure = {
+        "source_kind": "error",
+        "category": "fatal_auth",
+        "score": 0,
+        "occurred_at": (now - timedelta(seconds=181)).isoformat(),
+    }
+    recent_success = {
+        "source_kind": "usage",
+        "category": "healthy",
+        "score": 100,
+        "occurred_at": (now - timedelta(seconds=30)).isoformat(),
+    }
+
+    result = calculate_health([stale_failure, recent_success], now, 180)
+
+    assert result["short_score"] == 100
+    assert result["long_score"] == 50
+    assert result["health_score"] == 85
+    assert result["evidence_fresh"] is True
+    assert result["evidence_count"] == 2
+    assert result["evidence"] == [recent_success]
 
 
 def test_config_validation_and_deterministic_allocators():
@@ -98,6 +127,7 @@ def test_config_validation_and_deterministic_allocators():
 def test_evidence_deduplicates_and_keeps_latest_60(tmp_path):
     db = make_db(tmp_path)
     site = "https://sub.example"
+    started_at = datetime(2026, 7, 26, 8, tzinfo=timezone.utc)
     for index in range(65):
         db.add_platform_dispatch_evidence(
             site,
@@ -107,7 +137,7 @@ def test_evidence_deduplicates_and_keeps_latest_60(tmp_path):
                 "source_id": str(index),
                 "category": "healthy",
                 "score": 100,
-                "occurred_at": f"2026-07-26T08:{index:02d}:00+00:00",
+                "occurred_at": (started_at + timedelta(minutes=index)).isoformat(),
             },
         )
     assert not db.add_platform_dispatch_evidence(
@@ -167,7 +197,7 @@ def test_recent_probe_records_are_grouped_and_limited_per_account(tmp_path):
     assert len(db.list_platform_dispatch_evidence(site, 1)) == 60
 
 
-def test_short_evidence_filters_usage_and_errors_after_ranking_latest_ten(tmp_path):
+def test_short_evidence_returns_all_sources_after_ranking_latest_ten(tmp_path):
     db = make_db(tmp_path)
     site = "https://sub.example"
     started_at = datetime(2026, 7, 26, 8, tzinfo=timezone.utc)
@@ -230,10 +260,71 @@ def test_short_evidence_filters_usage_and_errors_after_ranking_latest_ten(tmp_pa
 
     grouped = db.list_short_platform_dispatch_evidence(site)
 
-    assert [item["source_id"] for item in grouped[1]] == ["included-error", "included-usage"]
+    assert [item["source_id"] for item in grouped[1]] == [
+        *[f"probe-{index}" for index in reversed(range(8))],
+        "included-error",
+        "included-usage",
+    ]
     assert "older-error" not in {item["source_id"] for item in grouped[1]}
-    assert 2 not in grouped
+    assert [item["source_id"] for item in grouped[2]] == [
+        f"all-probe-{index}" for index in reversed(range(10))
+    ]
     assert [item["source_id"] for item in grouped[3]] == ["few-error", "few-usage"]
+
+
+def test_evidence_order_uses_absolute_time_across_timezone_offsets(tmp_path):
+    db = make_db(tmp_path)
+    site = "https://sub.example"
+    for source_kind, source_id, score, occurred_at in (
+        ("usage", "usage-before", 65, "2026-07-27T10:54:13+08:00"),
+        ("probe", "probe-after", 10, "2026-07-27T02:56:46+00:00"),
+    ):
+        db.add_platform_dispatch_evidence(
+            site,
+            {
+                "account_id": 1,
+                "source_kind": source_kind,
+                "source_id": source_id,
+                "category": "slow" if source_kind == "usage" else "probe_failure",
+                "score": score,
+                "occurred_at": occurred_at,
+            },
+        )
+
+    records = db.list_platform_dispatch_evidence(site, 1)
+    short_records = db.list_short_platform_dispatch_evidence(site)
+
+    assert [item["source_id"] for item in records] == ["probe-after", "usage-before"]
+    assert [item["source_id"] for item in short_records[1]] == ["probe-after", "usage-before"]
+
+
+def test_short_evidence_excludes_records_before_current_window(tmp_path):
+    db = make_db(tmp_path)
+    site = "https://sub.example"
+    now = datetime(2026, 7, 26, 8, tzinfo=timezone.utc)
+    for source_id, occurred_at in (
+        ("stale", now - timedelta(seconds=181)),
+        ("boundary", now - timedelta(seconds=180)),
+        ("recent", now - timedelta(seconds=30)),
+    ):
+        db.add_platform_dispatch_evidence(
+            site,
+            {
+                "account_id": 1,
+                "source_kind": "usage",
+                "source_id": source_id,
+                "category": "healthy",
+                "score": 100,
+                "occurred_at": occurred_at.isoformat(),
+            },
+        )
+
+    grouped = db.list_short_platform_dispatch_evidence(
+        site,
+        since=(now - timedelta(seconds=180)).isoformat(),
+    )
+
+    assert [item["source_id"] for item in grouped[1]] == ["recent", "boundary"]
 
 
 class PolicyClient:
@@ -645,10 +736,8 @@ async def test_oauth_threshold_requires_all_groups_and_switches_one_apikey_per_r
     second = await scheduler.run_once()
 
     second_statistics = {item["group_id"]: item for item in second["oauth_group_statistics"]}
-    assert client.updates == [
-        (1, "schedulable", False),
-        (2, "schedulable", False),
-    ]
+    assert client.updates == [(1, "schedulable", False)]
+    assert second["scheduling_action"] == ""
     assert second_statistics[10]["affected_apikey_accounts"] == 2
     assert second_statistics[20]["affected_apikey_accounts"] == 1
 
@@ -716,6 +805,166 @@ async def test_oauth_policy_prefers_lowest_health_and_blocks_recovery_until_thre
     )
     assert client.updates == [(1, "schedulable", True)]
     assert recovered.startswith("开启调度 healthier")
+
+
+def failing_state(score=50.0, *, category="probe_failure", count=3):
+    state = healthy_state(score)
+    state["evidence"] = [
+        {
+            "category": category,
+            "status_code": 503,
+            "occurred_at": f"2026-07-26T08:00:0{index}+00:00",
+        }
+        for index in range(count)
+    ]
+    return state
+
+
+def slow_state(score=50.0, count=5):
+    state = healthy_state(score)
+    state["evidence"] = [
+        {
+            "category": "slow",
+            "first_token_ms": 16000,
+            "occurred_at": f"2026-07-26T08:00:0{index}+00:00",
+        }
+        for index in range(count)
+    ]
+    return state
+
+
+@pytest.mark.asyncio
+async def test_slow_first_token_does_not_disable_account_above_failure_health_threshold(tmp_path):
+    db = make_db(tmp_path)
+    accounts = {
+        1: {"id": 1, "name": "healthy-slow", "status": "active", "schedulable": True, "group_ids": [10]},
+        2: {"id": 2, "name": "peer", "status": "active", "schedulable": True, "group_ids": [10]},
+    }
+    client = PolicyClient(list(accounts.values()))
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+
+    action = await scheduler._apply_schedulable_policy(
+        client,
+        client.site_url,
+        accounts,
+        {1: slow_state(65), 2: healthy_state()},
+        [1, 2],
+        {**POLICY_DEFAULTS, "enabled": True},
+        180,
+    )
+
+    assert action == ""
+    assert client.updates == []
+
+
+@pytest.mark.asyncio
+async def test_threshold_policy_keeps_last_schedulable_account_in_each_pool(tmp_path):
+    db = make_db(tmp_path)
+    accounts = {
+        1: {"id": 1, "name": "failing", "status": "active", "schedulable": True, "group_ids": [10]},
+        2: {"id": 2, "name": "peer", "status": "active", "schedulable": True, "group_ids": [10]},
+    }
+    client = PolicyClient(list(accounts.values()))
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+    health = {1: failing_state(), 2: healthy_state()}
+
+    first = await scheduler._apply_schedulable_policy(
+        client,
+        client.site_url,
+        accounts,
+        health,
+        [2],
+        {**POLICY_DEFAULTS, "enabled": True},
+        180,
+    )
+
+    assert first.startswith("关闭调度 failing")
+    assert client.updates == [(1, "schedulable", False)]
+
+    health[2] = failing_state()
+    client.updates.clear()
+    second = await scheduler._apply_schedulable_policy(
+        client,
+        client.site_url,
+        accounts,
+        health,
+        [],
+        {**POLICY_DEFAULTS, "enabled": True},
+        180,
+    )
+
+    assert second == ""
+    assert client.updates == []
+
+
+@pytest.mark.asyncio
+async def test_threshold_policy_keeps_multi_group_account_needed_by_any_pool(tmp_path):
+    db = make_db(tmp_path)
+    accounts = {
+        1: {"id": 1, "name": "multi", "status": "active", "schedulable": True, "group_ids": [10, 20]},
+        2: {"id": 2, "name": "ten-peer", "status": "active", "schedulable": True, "group_ids": [10]},
+    }
+    client = PolicyClient(list(accounts.values()))
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+
+    action = await scheduler._apply_schedulable_policy(
+        client,
+        client.site_url,
+        accounts,
+        {1: slow_state(50), 2: healthy_state()},
+        [2],
+        {**POLICY_DEFAULTS, "enabled": True},
+        180,
+    )
+
+    assert action == ""
+    assert client.updates == []
+
+
+@pytest.mark.asyncio
+async def test_threshold_policy_keeps_last_schedulable_ungrouped_account(tmp_path):
+    db = make_db(tmp_path)
+    accounts = {
+        1: {"id": 1, "name": "ungrouped", "status": "active", "schedulable": True, "group_ids": []},
+    }
+    client = PolicyClient(list(accounts.values()))
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+
+    action = await scheduler._apply_schedulable_policy(
+        client,
+        client.site_url,
+        accounts,
+        {1: failing_state()},
+        [],
+        {**POLICY_DEFAULTS, "enabled": True},
+        180,
+    )
+
+    assert action == ""
+    assert client.updates == []
+
+
+@pytest.mark.asyncio
+async def test_fatal_failure_can_disable_last_schedulable_account(tmp_path):
+    db = make_db(tmp_path)
+    accounts = {
+        1: {"id": 1, "name": "fatal", "status": "active", "schedulable": True, "group_ids": [10]},
+    }
+    client = PolicyClient(list(accounts.values()))
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+
+    action = await scheduler._apply_schedulable_policy(
+        client,
+        client.site_url,
+        accounts,
+        {1: failing_state(0, category="fatal_auth", count=1)},
+        [],
+        {**POLICY_DEFAULTS, "enabled": True},
+        180,
+    )
+
+    assert action.startswith("关闭调度 fatal")
+    assert client.updates == [(1, "schedulable", False)]
 
 
 @pytest.mark.asyncio
@@ -1147,7 +1396,7 @@ async def test_load_factor_deadband_and_cooldown_use_upstream_cost(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_load_factor_adjustment_also_updates_priority_order(tmp_path):
+async def test_load_factor_adjustment_flattens_all_priorities_to_one(tmp_path):
     db = make_db(tmp_path)
     accounts = {
         1: {
@@ -1196,9 +1445,74 @@ async def test_load_factor_adjustment_also_updates_priority_order(tmp_path):
     assert payloads[1]["load_factor"] > payloads[2]["load_factor"]
     assert payloads[1]["load_factor"] + payloads[2]["load_factor"] == 120
     assert payloads[1]["priority"] == 1
-    assert payloads[2]["priority"] == payloads[1]["load_factor"] - payloads[2]["load_factor"] + 1
+    assert payloads[2]["priority"] == 1
     assert accounts[1]["priority"] == 1
-    assert accounts[2]["priority"] == payloads[2]["priority"]
+    assert accounts[2]["priority"] == 1
+
+
+@pytest.mark.asyncio
+async def test_load_factor_policy_repairs_priority_to_one_when_load_factor_is_unchanged(tmp_path):
+    db = make_db(tmp_path)
+    accounts = {
+        1: {
+            "id": 1,
+            "name": "lower-cost",
+            "status": "active",
+            "concurrency": 20,
+            "load_factor": 20,
+            "priority": 50,
+        },
+        2: {
+            "id": 2,
+            "name": "higher-cost",
+            "status": "active",
+            "concurrency": 20,
+            "load_factor": 20,
+            "priority": 50,
+        },
+    }
+    client = PolicyClient(list(accounts.values()))
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+    config = {
+        **POLICY_DEFAULTS,
+        "load_factor_enabled": True,
+        "load_factor_total": 120,
+        "account_min_load_factor": 20,
+        "load_change_threshold_percent": 0,
+    }
+    health = {1: healthy_state(), 2: healthy_state()}
+    costs = {
+        1: {"cost_available": True, "upstream_cost_multiplier": 1},
+        2: {"cost_available": True, "upstream_cost_multiplier": 2},
+    }
+
+    await scheduler._apply_load_policy(
+        client,
+        client.site_url,
+        accounts,
+        health,
+        costs,
+        config,
+    )
+    assert accounts[1]["priority"] == 1
+    assert accounts[2]["priority"] == 1
+    state_before = db.get_platform_dispatch_account_state(client.site_url, 1)
+
+    accounts[1]["priority"] = 999
+    client.field_payloads.clear()
+    client.updates.clear()
+    await scheduler._apply_load_policy(
+        client,
+        client.site_url,
+        accounts,
+        health,
+        costs,
+        config,
+    )
+
+    assert client.field_payloads == [(1, {"priority": 1})]
+    state_after = db.get_platform_dispatch_account_state(client.site_url, 1)
+    assert state_after["last_load_factor_write_at"] == state_before["last_load_factor_write_at"]
 
 
 def test_cost_profiles_use_monitor_group_rate_recharge_ratio_and_expire(tmp_path):
@@ -1408,3 +1722,46 @@ async def test_dispatch_refreshes_local_rates_and_ignores_excluded_groups(tmp_pa
     assert summary["price_unsafe_accounts"] == 0
     assert cache["accounts"][0]["group_ids"] == [9]
     assert [(group["id"], group["rate_multiplier"]) for group in cache["groups"]] == [(9, 1.2)]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_removes_cached_account_when_only_excluded_group_remains(tmp_path):
+    db = make_db(tmp_path)
+    prepare_cache(
+        db,
+        [
+            {
+                "id": 1,
+                "name": "changed-membership",
+                "status": "active",
+                "schedulable": True,
+                "group_ids": [8, 9],
+            }
+        ],
+        [{"id": 8, "name": "excluded"}, {"id": 9, "name": "included"}],
+    )
+    db.exclude_platform_dispatch_group("https://sub.example", 8, "excluded", "openai")
+    remote_accounts = [
+        {
+            "id": 1,
+            "name": "changed-membership",
+            "status": "active",
+            "schedulable": True,
+            "group_ids": [8],
+        }
+    ]
+    client = PolicyClient(
+        remote_accounts,
+        [{"id": 8, "name": "excluded"}, {"id": 9, "name": "included"}],
+    )
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+
+    summary = await scheduler.run_once()
+    cache = db.get_platform_dispatch_cache()
+
+    assert summary["managed_accounts"] == 0
+    assert summary["available_accounts"] == 0
+    assert cache["accounts"] == []
+    assert [group["id"] for group in cache["groups"]] == [9]
+    assert client.probes == []
+    assert client.updates == []

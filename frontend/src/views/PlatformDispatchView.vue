@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import { computed, onMounted, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { ArrowDown, ArrowRight, Check, CircleClose, Delete, Hide, Link, Refresh, RefreshLeft, Search, Setting, Timer, VideoPause, VideoPlay } from "@element-plus/icons-vue";
 import { api } from "../api";
@@ -82,6 +82,14 @@ const policyRunning = ref(false);
 const policyStopping = ref(false);
 const policyRuntime = ref({});
 const policyActions = ref([]);
+const actionHistoryDialog = ref(false);
+const actionHistoryLoading = ref(false);
+const actionHistory = ref([]);
+const actionHistoryPagination = reactive({
+  page: 1,
+  page_size: 50,
+  total: 0
+});
 const excludedAccountText = ref("");
 const policyConfig = reactive({
   enabled: false,
@@ -119,10 +127,6 @@ const policyConfig = reactive({
   account_probe_models: {},
   excluded_account_ids: []
 });
-let jobPollTimer = null;
-let policyPollTimer = null;
-let disposed = false;
-
 const jobActive = computed(() => isActiveJobStatus(job.value?.status));
 const jobFailed = computed(() => job.value?.status === "failed");
 const groupedCostSourceOptions = computed(() => {
@@ -356,31 +360,31 @@ function applyPolicyRuntimePayload(payload) {
   });
 }
 
-function stopPolicyPolling() {
-  if (policyPollTimer !== null) {
-    window.clearTimeout(policyPollTimer);
-    policyPollTimer = null;
-  }
-}
-
-function schedulePolicyPoll() {
-  stopPolicyPolling();
-  if (!disposed) policyPollTimer = window.setTimeout(pollPolicyRuntime, policyAutoRunning.value ? 1000 : 3000);
-}
-
-async function pollPolicyRuntime() {
-  policyPollTimer = null;
-  try {
-    await refreshPolicyRuntime();
-  } catch {
-    // Keep the last known state; the next poll will retry.
-  } finally {
-    schedulePolicyPoll();
-  }
-}
-
 async function refreshPolicyRuntime() {
   applyPolicyRuntimePayload(await api.platformDispatchPolicy());
+}
+
+async function loadActionHistory(page = actionHistoryPagination.page) {
+  actionHistoryLoading.value = true;
+  try {
+    const payload = await api.platformDispatchActions({
+      page,
+      page_size: actionHistoryPagination.page_size
+    });
+    actionHistory.value = payload.items || [];
+    actionHistoryPagination.page = Number(payload.page) || page;
+    actionHistoryPagination.page_size = Number(payload.page_size || payload.pageSize) || actionHistoryPagination.page_size;
+    actionHistoryPagination.total = Number(payload.total) || 0;
+  } catch (error) {
+    ElMessage.error(error.message || "加载动作记录失败");
+  } finally {
+    actionHistoryLoading.value = false;
+  }
+}
+
+async function openActionHistory() {
+  actionHistoryDialog.value = true;
+  await loadActionHistory(1);
 }
 
 function parseExcludedAccountIds() {
@@ -604,8 +608,12 @@ async function startAccountSync() {
     const payload = await api.syncPlatformDispatch({ ...refreshForm });
     if (!setJobFromPayload(payload)) throw new Error("服务器未返回任务信息");
     syncDialogMode.value = "progress";
-    if (jobActive.value) scheduleJobPoll();
-    else await finishStartedJob();
+    if (jobActive.value) {
+      syncDialog.value = false;
+      ElMessage.success("账号同步任务已启动");
+    } else {
+      await finishStartedJob();
+    }
   } catch (error) {
     ElMessage.error(error.message || "启动账号同步失败");
   } finally {
@@ -628,7 +636,7 @@ async function startEvidenceRefresh() {
   try {
     const payload = await api.refreshPlatformDispatchEvidence();
     if (!setJobFromPayload(payload)) throw new Error("服务器未返回任务信息");
-    if (jobActive.value) scheduleJobPoll();
+    if (jobActive.value) ElMessage.success("健康证据获取任务已启动");
     else await finishStartedJob();
   } catch (error) {
     ElMessage.error(error.message || "启动健康证据获取失败");
@@ -658,7 +666,6 @@ async function excludeGroup(group) {
   } catch (error) {
     if (error.status === 409) {
       await refreshPolicyRuntime().catch(() => {});
-      schedulePolicyPoll();
     }
     ElMessage.error(error.message || "排除分组失败");
   } finally {
@@ -685,7 +692,6 @@ async function excludeUngroupedAccounts() {
   } catch (error) {
     if (error.status === 409) {
       await refreshPolicyRuntime().catch(() => {});
-      schedulePolicyPoll();
     }
     ElMessage.error(error.message || "屏蔽未分组账号失败");
   } finally {
@@ -704,7 +710,6 @@ async function restoreExcludedGroup(group) {
   } catch (error) {
     if (error.status === 409) {
       await refreshPolicyRuntime().catch(() => {});
-      schedulePolicyPoll();
     }
     ElMessage.error(error.message || "取消排除分组失败");
   } finally {
@@ -732,7 +737,6 @@ async function excludeAccount(account) {
   } catch (error) {
     if (error.status === 409) {
       await refreshPolicyRuntime().catch(() => {});
-      schedulePolicyPoll();
     }
     ElMessage.error(error.message || "排除账号失败");
   } finally {
@@ -750,7 +754,6 @@ async function restoreExcludedAccount(account) {
   } catch (error) {
     if (error.status === 409) {
       await refreshPolicyRuntime().catch(() => {});
-      schedulePolicyPoll();
     }
     ElMessage.error(error.message || "恢复账号失败");
   } finally {
@@ -882,7 +885,6 @@ async function configureProbeModel(account) {
   } catch (error) {
     if (error.status === 409) {
       await refreshPolicyRuntime().catch(() => {});
-      schedulePolicyPoll();
     }
     ElMessage.error(error.message || "保存探活模型失败");
   } finally {
@@ -929,7 +931,6 @@ async function probeAccount(account) {
   } catch (error) {
     if (error.status === 409) {
       await refreshPolicyRuntime().catch(() => {});
-      schedulePolicyPoll();
     }
     ElMessage.error(error.message || "账号探活失败");
   } finally {
@@ -973,7 +974,6 @@ async function configureGroupProbeModel(group) {
   } catch (error) {
     if (error.status === 409) {
       await refreshPolicyRuntime().catch(() => {});
-      schedulePolicyPoll();
     }
     ElMessage.error(error.message || "保存分组探活模型失败");
   } finally {
@@ -1049,18 +1049,6 @@ function isSuccessfulJobStatus(status) {
   return ["completed", "succeeded", "success"].includes(status);
 }
 
-function stopJobPolling() {
-  if (jobPollTimer !== null) {
-    window.clearTimeout(jobPollTimer);
-    jobPollTimer = null;
-  }
-}
-
-function scheduleJobPoll() {
-  stopJobPolling();
-  if (!disposed && jobActive.value) jobPollTimer = window.setTimeout(pollJob, 1000);
-}
-
 async function finishStartedJob() {
   await loadDispatch();
   if (evidenceJob.value) await refreshPolicyRuntime().catch(() => {});
@@ -1071,46 +1059,10 @@ async function finishStartedJob() {
   }
 }
 
-async function pollJob() {
-  jobPollTimer = null;
-  const wasActive = jobActive.value;
-  try {
-    const payload = await api.platformDispatchJob();
-    setJobFromPayload(payload);
-    if (jobActive.value) {
-      scheduleJobPoll();
-      return;
-    }
-    if (wasActive) {
-      await finishStartedJob();
-    }
-  } catch (error) {
-    if (wasActive) {
-      scheduleJobPoll();
-    } else if (error.status !== 404) {
-      ElMessage.error(error.message || "读取平台调度任务状态失败");
-    }
-  }
-}
-
 async function resumeJob() {
   try {
     const payload = await api.platformDispatchJob();
     setJobFromPayload(payload);
-    if (jobActive.value) {
-      if (job.value.kind === "accounts_sync") {
-        const savedFilter = job.value.filter || {};
-        Object.assign(refreshForm, {
-          platform: savedFilter.platform || "",
-          type: savedFilter.type || "",
-          status: savedFilter.status || "",
-          include_ungrouped: savedFilter.include_ungrouped ?? savedFilter.includeUngrouped ?? true
-        });
-        syncDialogMode.value = "progress";
-        syncDialog.value = true;
-      }
-      scheduleJobPoll();
-    }
   } catch (error) {
     if (error.status !== 404) ElMessage.error(error.message || "读取平台调度任务状态失败");
   }
@@ -1302,7 +1254,6 @@ function shortEvidenceRecords(account) {
   const records = account.short_evidence_records || account.shortEvidenceRecords || [];
   if (!Array.isArray(records)) return [];
   return records
-    .filter((record) => ["usage", "error"].includes(record.source_kind || record.sourceKind))
     .map((record, index) => ({
       record,
       index,
@@ -1317,6 +1268,49 @@ function shortEvidenceRecords(account) {
     })
     .slice(0, 10)
     .map(({ record }) => record);
+}
+
+function shortEvidenceRows(account) {
+  const records = shortEvidenceRecords(account);
+  const count = records.length;
+  return records.map((record, index) => {
+    const score = Number(record.score);
+    const weight = count === 1 ? 1 : index === 0 ? 0.5 : 0.5 / (count - 1);
+    return {
+      record,
+      weight,
+      contribution: Number.isFinite(score) ? score * weight : null
+    };
+  });
+}
+
+function shortEvidenceFormula(account) {
+  const rows = shortEvidenceRows(account);
+  if (!rows.length) return "";
+  const latestScore = Number(rows[0].record.score);
+  if (rows.length === 1) return `${latestScore.toFixed(1)} × 100% = ${latestScore.toFixed(1)}`;
+  const remainingScores = rows.slice(1).map((item) => Number(item.record.score));
+  const remainingAverage = remainingScores.reduce((total, score) => total + score, 0) / remainingScores.length;
+  const total = latestScore * 0.5 + remainingAverage * 0.5;
+  return `最新 ${latestScore.toFixed(1)} × 50% + 其余 ${remainingScores.length} 条均值 ${remainingAverage.toFixed(1)} × 50% = ${total.toFixed(1)}`;
+}
+
+function shortEvidenceResultText(record) {
+  const sourceKind = record.source_kind || record.sourceKind;
+  if (sourceKind === "probe") return probeSucceeded(record) ? "探活成功" : "探活失败";
+  if (sourceKind === "error") return "错误";
+  if (sourceKind === "usage") return "使用成功";
+  return sourceKind || "未知";
+}
+
+function shortEvidenceFailed(record) {
+  const sourceKind = record.source_kind || record.sourceKind;
+  return sourceKind === "error" || (sourceKind === "probe" && !probeSucceeded(record));
+}
+
+function shortEvidenceWeightText(weight) {
+  const percent = Number(weight) * 100;
+  return `${percent.toFixed(percent < 10 ? 1 : 0)}%`;
 }
 
 function probeSucceeded(record) {
@@ -1368,9 +1362,31 @@ function metricText(value) {
 }
 
 function actionText(action) {
-  const name = action.account_name || (action.account_id ? `账号 #${action.account_id}` : "系统");
-  const result = action.status === "failed" ? `失败：${action.error || action.reason}` : action.reason;
-  return `${name} · ${result || action.action}`;
+  return `${actionAccountText(action)} · ${actionResultText(action)}`;
+}
+
+function actionAccountText(action) {
+  return action.account_name || (action.account_id ? `账号 #${action.account_id}` : "系统");
+}
+
+function actionResultText(action) {
+  if (action.status === "failed") return `失败：${action.error || action.reason || action.action}`;
+  return action.reason || action.action || "已完成";
+}
+
+function actionChangeText(action) {
+  const fieldLabels = {
+    schedulable: "调度状态",
+    concurrency: "并发",
+    load_factor: "负载因子",
+    priority: "Index",
+    status: "账号状态"
+  };
+  const field = String(action.field || "");
+  if (!field) return "";
+  const oldValue = action.old_value === null || action.old_value === undefined || action.old_value === "" ? "-" : action.old_value;
+  const newValue = action.new_value === null || action.new_value === undefined || action.new_value === "" ? "-" : action.new_value;
+  return `${fieldLabels[field] || field}：${oldValue} -> ${newValue}`;
 }
 
 function isCollapsed(key) {
@@ -1385,17 +1401,9 @@ function toggleCollapsed(key) {
 }
 
 onMounted(async () => {
-  disposed = false;
   await loadDispatch();
   await loadPolicy();
-  schedulePolicyPoll();
-  resumeJob();
-});
-
-onBeforeUnmount(() => {
-  disposed = true;
-  stopJobPolling();
-  stopPolicyPolling();
+  await resumeJob();
 });
 </script>
 
@@ -1583,11 +1591,14 @@ onBeforeUnmount(() => {
       <div class="policy-rules">
         <p><strong>Sub2API 调度开关</strong><span>认证、余额和用量上限异常时立即关闭账号调度；价格安全且健康达标时，可重新开启系统或人员手动关闭的 active 账号。</span></p>
         <p><strong>OAuth 容量</strong><span>每轮实时统计可调度 OAuth；APIKey 所属全部分组均严格超过阈值时逐个停调，阈值解除后按健康与最低保障规则恢复。</span></p>
-        <p><strong>系统计算</strong><span>短期为最新证据与前 9 次均值各 50%，最终评分为短期 70% + 最近 60 次均值 30%。</span></p>
+        <p><strong>系统计算</strong><span>短期只统计当前时间向前 {{ Number(policyConfig.probe_interval_seconds) * Number(policyConfig.evidence_ttl_multiplier) }} 秒内最多 10 条证据，最新一条与其余均值各 50%；窗口外数据只参与最近 60 条长期均值，最终评分为短期 70% + 长期 30%。</span></p>
       </div>
 
       <div v-if="policyActions.length" class="policy-recent-actions">
-        <strong>最近动作</strong>
+        <div class="policy-recent-actions-head">
+          <strong>最近动作</strong>
+          <el-button link type="primary" :icon="ArrowRight" @click="openActionHistory">查看全部</el-button>
+        </div>
         <span v-for="action in policyActions.slice(0, 3)" :key="action.id" :class="{ 'is-error': action.status === 'failed' }">
           {{ actionText(action) }} · {{ formatTime(action.created_at) }}
         </span>
@@ -1954,10 +1965,10 @@ onBeforeUnmount(() => {
                   <strong>短期健康证据</strong>
                   <template v-if="shortEvidenceRecords(account).length">
                     <el-tag
-                      :type="(shortEvidenceRecords(account)[0].source_kind || shortEvidenceRecords(account)[0].sourceKind) === 'error' ? 'danger' : 'success'"
+                      :type="shortEvidenceFailed(shortEvidenceRecords(account)[0]) ? 'danger' : 'success'"
                       size="small"
                     >
-                      {{ (shortEvidenceRecords(account)[0].source_kind || shortEvidenceRecords(account)[0].sourceKind) === "error" ? "错误" : "成功" }}
+                      {{ shortEvidenceResultText(shortEvidenceRecords(account)[0]) }}
                     </el-tag>
                     <span>{{ evidenceCategoryText(shortEvidenceRecords(account)[0].category) }}</span>
                     <small>
@@ -1969,25 +1980,31 @@ onBeforeUnmount(() => {
                 <span class="short-evidence-count">{{ shortEvidenceRecords(account).length }} 条</span>
               </summary>
               <div v-if="shortEvidenceRecords(account).length" class="short-evidence-table">
+                <div class="short-evidence-formula">
+                  <span>短期分算式</span>
+                  <strong>{{ shortEvidenceFormula(account) }}</strong>
+                </div>
                 <div class="short-evidence-head" aria-hidden="true">
-                  <span>结果</span><span>分数</span><span>类型</span><span>状态与信息</span><span>时间</span>
+                  <span>结果</span><span>原始分</span><span>权重</span><span>贡献</span><span>类型</span><span>状态与信息</span><span>时间</span>
                 </div>
                 <div
-                  v-for="record in shortEvidenceRecords(account)"
-                  :key="record.id"
+                  v-for="item in shortEvidenceRows(account)"
+                  :key="item.record.id"
                   class="short-evidence-row"
-                  :class="{ 'is-error': (record.source_kind || record.sourceKind) === 'error' }"
+                  :class="{ 'is-error': shortEvidenceFailed(item.record) }"
                 >
-                  <el-tag :type="(record.source_kind || record.sourceKind) === 'error' ? 'danger' : 'success'" size="small">
-                    {{ (record.source_kind || record.sourceKind) === "error" ? "错误" : "使用成功" }}
+                  <el-tag :type="shortEvidenceFailed(item.record) ? 'danger' : 'success'" size="small">
+                    {{ shortEvidenceResultText(item.record) }}
                   </el-tag>
-                  <strong>{{ Number(record.score).toFixed(1) }}</strong>
-                  <span>{{ evidenceCategoryText(record.category) }}</span>
-                  <span class="short-evidence-message" :title="evidenceDetail(record)">{{ evidenceDetail(record) }}</span>
-                  <span>{{ evidenceTime(record) }}</span>
+                  <strong>{{ Number(item.record.score).toFixed(1) }}</strong>
+                  <span>{{ shortEvidenceWeightText(item.weight) }}</span>
+                  <strong>{{ item.contribution == null ? "-" : item.contribution.toFixed(1) }}</strong>
+                  <span>{{ evidenceCategoryText(item.record.category) }}</span>
+                  <span class="short-evidence-message" :title="evidenceDetail(item.record)">{{ evidenceDetail(item.record) }}</span>
+                  <span>{{ evidenceTime(item.record) }}</span>
                 </div>
               </div>
-              <div v-else class="short-evidence-empty">短期证据中暂无使用成功或错误记录</div>
+              <div v-else class="short-evidence-empty">当前时间窗口内暂无短期证据</div>
             </details>
           </article>
         </div>
@@ -1998,6 +2015,58 @@ onBeforeUnmount(() => {
       v-else-if="loaded && !loading"
       :description="hasCache ? '没有符合条件的账号' : '暂无本地缓存数据'"
     />
+
+    <el-dialog
+      v-model="actionHistoryDialog"
+      title="全部动作"
+      width="min(860px, calc(100vw - 24px))"
+      destroy-on-close
+    >
+      <div class="policy-action-history-toolbar">
+        <span>共 {{ actionHistoryPagination.total }} 条</span>
+        <el-tooltip content="刷新">
+          <el-button
+            circle
+            text
+            :icon="Refresh"
+            :loading="actionHistoryLoading"
+            aria-label="刷新动作记录"
+            @click="loadActionHistory()"
+          />
+        </el-tooltip>
+      </div>
+      <div v-loading="actionHistoryLoading" class="policy-action-history-list">
+        <article
+          v-for="action in actionHistory"
+          :key="action.id"
+          class="policy-action-history-row"
+          :class="{ 'is-error': action.status === 'failed' }"
+        >
+          <div class="policy-action-history-head">
+            <strong>{{ actionAccountText(action) }}</strong>
+            <el-tag :type="action.status === 'failed' ? 'danger' : 'success'" size="small" effect="plain">
+              {{ action.status === "failed" ? "失败" : "成功" }}
+            </el-tag>
+            <time>{{ formatTime(action.created_at) }}</time>
+          </div>
+          <p>{{ actionResultText(action) }}</p>
+          <small v-if="actionChangeText(action)">{{ actionChangeText(action) }}</small>
+        </article>
+        <el-empty v-if="!actionHistoryLoading && !actionHistory.length" description="暂无动作记录" :image-size="72" />
+      </div>
+      <el-pagination
+        v-if="actionHistoryPagination.total > actionHistoryPagination.page_size"
+        v-model:current-page="actionHistoryPagination.page"
+        :page-size="actionHistoryPagination.page_size"
+        :total="actionHistoryPagination.total"
+        layout="prev, pager, next, total"
+        class="policy-action-history-pagination"
+        @current-change="loadActionHistory"
+      />
+      <template #footer>
+        <el-button @click="actionHistoryDialog = false">关闭</el-button>
+      </template>
+    </el-dialog>
 
     <el-dialog
       v-model="costBindingDialog"
@@ -2409,8 +2478,86 @@ onBeforeUnmount(() => {
   padding: 11px 18px;
 }
 
+.policy-recent-actions-head,
+.policy-action-history-toolbar,
+.policy-action-history-head {
+  align-items: center;
+  display: flex;
+}
+
+.policy-recent-actions-head,
+.policy-action-history-toolbar {
+  justify-content: space-between;
+}
+
+.policy-recent-actions-head :deep(.el-button) {
+  height: 24px;
+  padding: 0;
+}
+
 .policy-recent-actions span.is-error {
   color: var(--danger);
+}
+
+.policy-action-history-toolbar {
+  color: var(--muted);
+  font-size: 13px;
+  min-height: 32px;
+}
+
+.policy-action-history-list {
+  border-bottom: 1px solid var(--line);
+  border-top: 1px solid var(--line);
+  max-height: min(58vh, 560px);
+  min-height: 120px;
+  overflow-y: auto;
+}
+
+.policy-action-history-row {
+  display: grid;
+  gap: 5px;
+  padding: 12px 4px;
+}
+
+.policy-action-history-row + .policy-action-history-row {
+  border-top: 1px solid var(--line);
+}
+
+.policy-action-history-head {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.policy-action-history-head strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.policy-action-history-head time {
+  color: var(--muted);
+  font-size: 12px;
+  margin-left: auto;
+}
+
+.policy-action-history-row p {
+  color: var(--text);
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.policy-action-history-row small {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.policy-action-history-row.is-error p,
+.policy-action-history-row.is-error small {
+  color: var(--danger);
+}
+
+.policy-action-history-pagination {
+  justify-content: flex-end;
+  margin-top: 14px;
 }
 
 .dispatch-alert {
@@ -2893,13 +3040,33 @@ onBeforeUnmount(() => {
   overflow: auto;
 }
 
+.short-evidence-formula {
+  align-items: baseline;
+  background: var(--panel-soft);
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  padding: 8px 10px;
+}
+
+.short-evidence-formula span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.short-evidence-formula strong {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
 .short-evidence-head,
 .short-evidence-row {
   align-items: center;
   display: grid;
   gap: 8px;
-  grid-template-columns: 68px 58px 90px minmax(180px, 1fr) 145px;
-  min-width: 620px;
+  grid-template-columns: 78px 58px 58px 58px 90px minmax(180px, 1fr) 145px;
+  min-width: 760px;
   padding: 6px 10px;
 }
 
@@ -3143,6 +3310,15 @@ onBeforeUnmount(() => {
 
   .policy-rules p {
     grid-template-columns: 1fr;
+  }
+
+  .policy-action-history-head time {
+    flex-basis: 100%;
+    margin-left: 0;
+  }
+
+  .policy-action-history-pagination {
+    justify-content: center;
   }
 
   .dispatch-toolbar .el-form-item,

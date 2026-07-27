@@ -1,6 +1,6 @@
 import asyncio
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -902,6 +902,7 @@ def test_platform_dispatch_evidence_refresh_reloads_history_probes_and_recalcula
     test_db.save_platform_dispatch_policy(
         {"group_probe_models": {"7": "group-model"}}, "https://sub.example"
     )
+    evidence_now = datetime.now(timezone.utc)
 
     class EvidenceClient:
         site_url = "https://sub.example"
@@ -915,7 +916,11 @@ def test_platform_dispatch_evidence_refresh_reloads_history_probes_and_recalcula
             if account_id == 2:
                 raise Sub2ApiAdminError("usage unavailable", status_code=502)
             records = [
-                {"id": index, "created_at": f"2026-07-25T0{index}:00:00Z", "model": "gpt-5"}
+                {
+                    "id": index,
+                    "created_at": (evidence_now - timedelta(seconds=80 - index * 10)).isoformat(),
+                    "model": "gpt-5",
+                }
                 for index in range(1, 7)
             ]
             return {"records": records, "pages": 1}
@@ -926,7 +931,13 @@ def test_platform_dispatch_evidence_refresh_reloads_history_probes_and_recalcula
             if account_id == 2:
                 raise Sub2ApiAdminError("errors unavailable", status_code=502)
             return {
-                "records": [{"id": 99, "created_at": "2026-07-25T09:00:00Z", "message": "latest error"}],
+                "records": [
+                    {
+                        "id": 99,
+                        "created_at": (evidence_now - timedelta(seconds=10)).isoformat(),
+                        "message": "latest error",
+                    }
+                ],
                 "pages": 1,
             }
 
@@ -962,8 +973,9 @@ def test_platform_dispatch_evidence_refresh_reloads_history_probes_and_recalcula
     assert states[1]["probe_records"][0]["is_probe_success"] is True
     short_evidence = states[1]["short_evidence_records"]
     assert states[1]["shortEvidenceRecords"] == short_evidence
-    assert [item["source_kind"] for item in short_evidence] == ["error"] + ["usage"] * 6
-    assert short_evidence[0]["sourceKind"] == "error"
+    assert [item["source_kind"] for item in short_evidence] == ["probe", "error"] + ["usage"] * 6
+    assert short_evidence[0]["sourceKind"] == "probe"
+    assert short_evidence[0]["isProbeSuccess"] is True
     assert {
         "source_kind",
         "category",
@@ -978,8 +990,9 @@ def test_platform_dispatch_evidence_refresh_reloads_history_probes_and_recalcula
     assert states[2]["health_score"] == 10
     assert states[2]["probe_records"][0]["is_probe_success"] is False
     assert states[2]["probe_records"][0]["status_code"] == 503
-    assert states[2]["short_evidence_records"] == []
-    assert states[2]["shortEvidenceRecords"] == []
+    assert [item["source_kind"] for item in states[2]["short_evidence_records"]] == ["probe"]
+    assert states[2]["shortEvidenceRecords"] == states[2]["short_evidence_records"]
+    assert states[2]["short_evidence_records"][0]["is_probe_success"] is False
 
 
 def test_platform_dispatch_job_exclusion_interrupt_and_activity_without_cache(tmp_path, monkeypatch):

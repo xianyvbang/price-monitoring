@@ -983,6 +983,41 @@ class Database:
             )
         return True
 
+    def remove_platform_dispatch_cached_accounts(
+        self,
+        source_site_url: str,
+        account_ids: set[int] | list[int],
+    ) -> int:
+        site_url = str(source_site_url or "").strip().rstrip("/")
+        targets = {
+            account_id
+            for value in account_ids
+            if (account_id := _positive_int_or_none(value)) is not None
+        }
+        if not site_url or not targets:
+            return 0
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT accounts_json FROM platform_dispatch_cache WHERE id = 1 AND source_site_url = ?",
+                (site_url,),
+            ).fetchone()
+            if row is None:
+                return 0
+            accounts = _json_list(row["accounts_json"])
+            remaining = [
+                account
+                for account in accounts
+                if not isinstance(account, dict)
+                or _positive_int_or_none(account.get("id")) not in targets
+            ]
+            removed_count = len(accounts) - len(remaining)
+            if removed_count:
+                conn.execute(
+                    "UPDATE platform_dispatch_cache SET accounts_json = ? WHERE id = 1 AND source_site_url = ?",
+                    (json.dumps(remaining, ensure_ascii=False, separators=(",", ":")), site_url),
+                )
+        return removed_count
+
     def update_platform_dispatch_cached_groups(
         self, source_site_url: str, groups: list[dict[str, Any]]
     ) -> bool:
@@ -1558,11 +1593,11 @@ class Database:
                     WHERE source_site_url = ? AND account_id = ? AND id NOT IN (
                         SELECT id FROM platform_dispatch_evidence
                         WHERE source_site_url = ? AND account_id = ?
-                        ORDER BY occurred_at DESC, id DESC LIMIT 60
+                        ORDER BY julianday(occurred_at) DESC, id DESC LIMIT 60
                     ) AND id NOT IN (
                         SELECT id FROM platform_dispatch_evidence
                         WHERE source_site_url = ? AND account_id = ? AND source_kind = 'probe'
-                        ORDER BY occurred_at DESC, id DESC LIMIT 15
+                        ORDER BY julianday(occurred_at) DESC, id DESC LIMIT 15
                     )
                     """,
                     (site_url, account_id, site_url, account_id, site_url, account_id),
@@ -1577,7 +1612,7 @@ class Database:
                 """
                 SELECT * FROM platform_dispatch_evidence
                 WHERE source_site_url = ? AND account_id = ?
-                ORDER BY occurred_at DESC, id DESC LIMIT ?
+                ORDER BY julianday(occurred_at) DESC, id DESC LIMIT ?
                 """,
                 (str(source_site_url or "").strip().rstrip("/"), int(account_id), max(1, min(60, int(limit)))),
             ).fetchall()
@@ -1630,11 +1665,11 @@ class Database:
                 WHERE source_site_url = ? AND account_id = ? AND id NOT IN (
                     SELECT id FROM platform_dispatch_evidence
                     WHERE source_site_url = ? AND account_id = ?
-                    ORDER BY occurred_at DESC, id DESC LIMIT 60
+                    ORDER BY julianday(occurred_at) DESC, id DESC LIMIT 60
                 ) AND id NOT IN (
                     SELECT id FROM platform_dispatch_evidence
                     WHERE source_site_url = ? AND account_id = ? AND source_kind = 'probe'
-                    ORDER BY occurred_at DESC, id DESC LIMIT 15
+                    ORDER BY julianday(occurred_at) DESC, id DESC LIMIT 15
                 )
                 """,
                 (site_url, account_id, site_url, account_id, site_url, account_id),
@@ -1649,14 +1684,14 @@ class Database:
                 """
                 WITH ranked AS (
                     SELECT *, ROW_NUMBER() OVER (
-                        PARTITION BY account_id ORDER BY occurred_at DESC, id DESC
+                        PARTITION BY account_id ORDER BY julianday(occurred_at) DESC, id DESC
                     ) AS row_number
                     FROM platform_dispatch_evidence
                     WHERE source_site_url = ? AND source_kind = 'probe'
                 )
                 SELECT * FROM ranked
                 WHERE row_number <= ?
-                ORDER BY account_id, occurred_at DESC, id DESC
+                ORDER BY account_id, julianday(occurred_at) DESC, id DESC
                 """,
                 (str(source_site_url or "").strip().rstrip("/"), limit),
             ).fetchall()
@@ -1668,24 +1703,26 @@ class Database:
         return grouped
 
     def list_short_platform_dispatch_evidence(
-        self, source_site_url: str, per_account: int = 10
+        self, source_site_url: str, per_account: int = 10, since: str | None = None
     ) -> dict[int, list[dict[str, Any]]]:
         limit = max(1, min(10, int(per_account)))
+        cutoff = str(since or "").strip() or None
         with self.connect() as conn:
             rows = conn.execute(
                 """
                 WITH ranked AS (
                     SELECT *, ROW_NUMBER() OVER (
-                        PARTITION BY account_id ORDER BY occurred_at DESC, id DESC
+                        PARTITION BY account_id ORDER BY julianday(occurred_at) DESC, id DESC
                     ) AS row_number
                     FROM platform_dispatch_evidence
                     WHERE source_site_url = ?
+                      AND (? IS NULL OR julianday(occurred_at) >= julianday(?))
                 )
                 SELECT * FROM ranked
-                WHERE row_number <= ? AND source_kind IN ('usage', 'error')
-                ORDER BY account_id, occurred_at DESC, id DESC
+                WHERE row_number <= ?
+                ORDER BY account_id, julianday(occurred_at) DESC, id DESC
                 """,
-                (str(source_site_url or "").strip().rstrip("/"), limit),
+                (str(source_site_url or "").strip().rstrip("/"), cutoff, cutoff, limit),
             ).fetchall()
         grouped: dict[int, list[dict[str, Any]]] = {}
         for row in rows:
