@@ -86,7 +86,6 @@ from app.services.scheduler import (
 from app.services.sub2api_admin import (
     Sub2ApiAdminClient,
     Sub2ApiAdminError,
-    matches_dispatch_filter,
     public_dispatch_account,
     public_dispatch_group,
 )
@@ -4428,16 +4427,7 @@ async def _run_platform_dispatch_account_sync_locked(
                 status=refresh_filter["status"] or None,
             )
             page_accounts = page_data.get("accounts") or []
-            raw_accounts.extend(
-                account
-                for account in page_accounts
-                if matches_dispatch_filter(
-                    account,
-                    platform=refresh_filter["platform"],
-                    account_type=refresh_filter["type"],
-                    status=refresh_filter["status"],
-                )
-            )
+            raw_accounts.extend(page_accounts)
             processed += len(page_accounts)
             response_total = page_data.get("total")
             response_pages = page_data.get("pages")

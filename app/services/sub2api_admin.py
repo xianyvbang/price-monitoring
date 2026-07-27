@@ -223,11 +223,6 @@ class Sub2ApiAdminClient:
             self.list_accounts(platform=platform or None, account_type=account_type or None, status=status or None),
             self.list_groups(platform=platform or None),
         )
-        accounts = [
-            account
-            for account in accounts
-            if matches_dispatch_filter(account, platform=platform, account_type=account_type, status=status)
-        ]
         warnings: list[str] = []
 
         errors_available = True
@@ -505,16 +500,6 @@ def _is_openai_group(group: dict[str, Any]) -> bool:
 def _is_openai_account(account: dict[str, Any]) -> bool:
     platform = str(account.get("platform") or "").strip().lower()
     return not platform or platform == SUB2API_OPENAI_PLATFORM
-
-
-def matches_dispatch_filter(account: dict[str, Any], platform: str, account_type: str, status: str) -> bool:
-    if platform and str(account.get("platform") or "").strip().casefold() != platform.casefold():
-        return False
-    if account_type and str(account.get("type") or "").strip().casefold() != account_type.casefold():
-        return False
-    if status and _dispatch_filter_status(account) != status.casefold():
-        return False
-    return True
 
 
 def _dispatch_filter_status(account: dict[str, Any]) -> str:

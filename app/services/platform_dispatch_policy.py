@@ -945,7 +945,11 @@ class PlatformDispatchPolicyScheduler:
         remote_accounts, groups, remote_oauth_accounts = await asyncio.gather(
             client.list_accounts(platform=platform or None, account_type=account_type or None),
             client.list_groups(platform=platform or None),
-            client.list_accounts(platform=platform or None, account_type="oauth"),
+            client.list_accounts(
+                platform=platform or None,
+                account_type="oauth",
+                status="active",
+            ),
         )
         excluded_group_ids = {
             int(group["id"])

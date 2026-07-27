@@ -682,7 +682,7 @@ def test_platform_dispatch_cache_roundtrip_replace_clear_and_status_merge(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_platform_dispatch_filters_before_loading_activity():
+async def test_platform_dispatch_passes_filters_to_accounts_api():
     client = Sub2ApiAdminClient("https://sub.example", "admin-key")
     usage_ids = []
     error_ids = []
@@ -691,8 +691,6 @@ async def test_platform_dispatch_filters_before_loading_activity():
         assert kwargs == {"platform": "openai", "account_type": "apikey", "status": "active"}
         return [
             {"id": 1, "name": "matched", "platform": "OPENAI", "type": "apikey", "status": "active"},
-            {"id": 2, "name": "wrong-type", "platform": "openai", "type": "oauth", "status": "active"},
-            {"id": 3, "name": "wrong-status", "platform": "openai", "type": "apikey", "status": "inactive"},
         ]
 
     async def list_groups(platform=None):
@@ -746,7 +744,6 @@ def test_platform_dispatch_syncs_pages_without_loading_activity_and_preserves_ca
             accounts = {
                 1: [
                     {"id": 9, "name": "remote", "platform": "openai", "type": "apikey", "status": "active", "group_ids": [2]},
-                    {"id": 11, "name": "oauth-not-managed", "platform": "openai", "type": "oauth", "status": "active", "group_ids": [2]},
                 ],
                 2: [{"id": 10, "name": "new", "platform": "openai", "type": "apikey", "status": "active", "group_ids": [2]}],
             }
@@ -754,7 +751,7 @@ def test_platform_dispatch_syncs_pages_without_loading_activity_and_preserves_ca
                 "accounts": accounts[page],
                 "page": page,
                 "page_size": page_size,
-                "total": 3,
+                "total": 2,
                 "pages": 2,
             }
 
@@ -798,6 +795,10 @@ def test_platform_dispatch_syncs_pages_without_loading_activity_and_preserves_ca
     assert job["percent"] == 100
     assert [item[0] for item in fake.pages] == [1, 2]
     assert all(item[1] == 100 for item in fake.pages)
+    assert all(
+        item[2] == {"platform": "openai", "account_type": "apikey", "status": "active"}
+        for item in fake.pages
+    )
     assert response.status_code == 200
     assert response.json()["site_url"] == "https://sub.example"
     assert response.json()["refresh_filter"] == {

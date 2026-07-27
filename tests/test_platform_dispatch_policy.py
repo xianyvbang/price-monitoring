@@ -601,6 +601,7 @@ async def test_oauth_group_statistics_count_only_normal_schedulable_accounts(tmp
     assert statistics[20]["normal_oauth_accounts"] == 2
     assert statistics[30]["normal_oauth_accounts"] == 0
     assert [read.get("account_type") for read in client.account_read_filters] == [None, "oauth"]
+    assert client.account_read_filters[1].get("status") == "active"
     assert client.updates == []
 
 
