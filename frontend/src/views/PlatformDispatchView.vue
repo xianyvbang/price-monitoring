@@ -526,10 +526,12 @@ function costBindingName(account) {
 }
 
 function costOptionLabel(option) {
+  const platform = option.balance_platform || "-";
+  const accountName = option.balance_account_name || `账号 ${option.balance_account_id}`;
   const groupName = option.group_plan_name || option.group_name || `分组 ${option.monitor_group_id}`;
   const rate = metricText(option.effective_rate_multiplier);
   const cost = metricText(option.upstream_cost_multiplier ?? option.upstreamCostMultiplier);
-  return `${groupName} · 分组倍率 ${rate} · 成本 ${cost}`;
+  return `${platform} / ${accountName} / ${groupName} · 分组倍率 ${rate} · 成本 ${cost}`;
 }
 
 async function openCostBindingDialog(account) {
