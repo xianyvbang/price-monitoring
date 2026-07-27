@@ -976,6 +976,10 @@ def test_platform_dispatch_evidence_refresh_reloads_history_probes_and_recalcula
     assert [item["source_kind"] for item in short_evidence] == ["probe", "error"] + ["usage"] * 6
     assert short_evidence[0]["sourceKind"] == "probe"
     assert short_evidence[0]["isProbeSuccess"] is True
+    recent_requests = states[1]["recent_request_records"]
+    assert states[1]["recentRequestRecords"] == recent_requests
+    assert [item["source_kind"] for item in recent_requests] == ["error"] + ["usage"] * 6
+    assert all(item["source_kind"] != "probe" for item in recent_requests)
     assert {
         "source_kind",
         "category",
@@ -993,6 +997,7 @@ def test_platform_dispatch_evidence_refresh_reloads_history_probes_and_recalcula
     assert [item["source_kind"] for item in states[2]["short_evidence_records"]] == ["probe"]
     assert states[2]["shortEvidenceRecords"] == states[2]["short_evidence_records"]
     assert states[2]["short_evidence_records"][0]["is_probe_success"] is False
+    assert states[2]["recent_request_records"] == []
 
 
 def test_platform_dispatch_job_exclusion_interrupt_and_activity_without_cache(tmp_path, monkeypatch):

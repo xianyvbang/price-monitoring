@@ -4669,6 +4669,7 @@ def platform_dispatch_policy_response() -> dict[str, Any]:
     site_url = db.get_setting(SUB2API_SITE_URL_SETTING, "").strip().rstrip("/")
     states = db.list_platform_dispatch_account_states(site_url) if site_url else []
     probes_by_account = db.list_recent_platform_dispatch_probes(site_url, 15) if site_url else {}
+    requests_by_account = db.list_recent_platform_dispatch_requests(site_url, 10) if site_url else {}
     ttl_seconds = max(
         1,
         int(policy["config"]["probe_interval_seconds"])
@@ -4689,10 +4690,16 @@ def platform_dispatch_policy_response() -> dict[str, Any]:
             public_platform_dispatch_evidence(record)
             for record in short_evidence_by_account.get(int(state["account_id"]), [])
         ]
+        recent_request_records = [
+            public_platform_dispatch_evidence(record)
+            for record in requests_by_account.get(int(state["account_id"]), [])
+        ]
         state["probe_records"] = probe_records
         state["probeRecords"] = probe_records
         state["short_evidence_records"] = short_evidence_records
         state["shortEvidenceRecords"] = short_evidence_records
+        state["recent_request_records"] = recent_request_records
+        state["recentRequestRecords"] = recent_request_records
     actions = db.list_platform_dispatch_actions(1, 10)["items"]
     runtime = dict(policy["runtime"])
     is_running = platform_dispatch_policy_scheduler.lock.locked()

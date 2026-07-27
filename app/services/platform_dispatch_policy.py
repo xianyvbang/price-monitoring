@@ -501,7 +501,6 @@ def resolve_platform_dispatch_cost_profiles(
         )
         if expired or (cost_rate is None and not pending):
             profile["price_protection_status"] = "rate_expired"
-            profile["price_unsafe"] = True
         elif cost_rate is None:
             profile["price_protection_status"] = "upstream_unknown"
         else:
@@ -1460,18 +1459,11 @@ class PlatformDispatchPolicyScheduler:
                 f"{binding.get('balance_account_name') or binding.get('balance_account_id') or '余额账号'} / "
                 f"{binding.get('group_name') or binding.get('monitor_group_id') or '监控分组'}"
             )
-            if profile["price_protection_status"] == "rate_expired":
-                reason = (
-                    f"上游成本倍率 {_metric_text(profile.get('upstream_cost_multiplier'))} 超过宽限期，"
-                    f"价格保护关闭调度（本地最低倍率 {_metric_text(profile.get('local_min_rate_multiplier'))}，"
-                    f"最低安全倍率 {_metric_text(profile.get('minimum_safe_rate_multiplier'))}，成本来源：{source}）"
-                )
-            else:
-                reason = (
-                    f"本地最低倍率 {profile['local_min_rate_multiplier']:.6g} 低于最低安全倍率 "
-                    f"{profile['minimum_safe_rate_multiplier']:.6g}（上游成本 {profile['upstream_cost_multiplier']:.6g}，"
-                    f"成本来源：{source}）"
-                )
+            reason = (
+                f"本地最低倍率 {profile['local_min_rate_multiplier']:.6g} 低于最低安全倍率 "
+                f"{profile['minimum_safe_rate_multiplier']:.6g}（上游成本 {profile['upstream_cost_multiplier']:.6g}，"
+                f"成本来源：{source}）"
+            )
             try:
                 updated = await client.update_account_schedulable(account_id, False)
             except Exception as exc:

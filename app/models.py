@@ -1587,22 +1587,37 @@ class Database:
                 ),
             )
             if cursor.rowcount:
-                conn.execute(
-                    """
-                    DELETE FROM platform_dispatch_evidence
-                    WHERE source_site_url = ? AND account_id = ? AND id NOT IN (
-                        SELECT id FROM platform_dispatch_evidence
-                        WHERE source_site_url = ? AND account_id = ?
-                        ORDER BY julianday(occurred_at) DESC, id DESC LIMIT 60
-                    ) AND id NOT IN (
-                        SELECT id FROM platform_dispatch_evidence
-                        WHERE source_site_url = ? AND account_id = ? AND source_kind = 'probe'
-                        ORDER BY julianday(occurred_at) DESC, id DESC LIMIT 15
-                    )
-                    """,
-                    (site_url, account_id, site_url, account_id, site_url, account_id),
-                )
+                self._prune_platform_dispatch_evidence(conn, site_url, account_id)
         return cursor.rowcount == 1
+
+    @staticmethod
+    def _prune_platform_dispatch_evidence(
+        conn: sqlite3.Connection, source_site_url: str, account_id: int
+    ) -> None:
+        conn.execute(
+            """
+            DELETE FROM platform_dispatch_evidence
+            WHERE source_site_url = ? AND account_id = ? AND source_kind = 'probe'
+              AND id NOT IN (
+                  SELECT id FROM platform_dispatch_evidence
+                  WHERE source_site_url = ? AND account_id = ? AND source_kind = 'probe'
+                  ORDER BY julianday(occurred_at) DESC, id DESC LIMIT 15
+              )
+            """,
+            (source_site_url, account_id, source_site_url, account_id),
+        )
+        conn.execute(
+            """
+            DELETE FROM platform_dispatch_evidence
+            WHERE source_site_url = ? AND account_id = ? AND source_kind != 'probe'
+              AND id NOT IN (
+                  SELECT id FROM platform_dispatch_evidence
+                  WHERE source_site_url = ? AND account_id = ? AND source_kind != 'probe'
+                  ORDER BY julianday(occurred_at) DESC, id DESC LIMIT 60
+              )
+            """,
+            (source_site_url, account_id, source_site_url, account_id),
+        )
 
     def list_platform_dispatch_evidence(
         self, source_site_url: str, account_id: int, limit: int = 60
@@ -1659,21 +1674,7 @@ class Database:
                         now,
                     ),
                 )
-            conn.execute(
-                """
-                DELETE FROM platform_dispatch_evidence
-                WHERE source_site_url = ? AND account_id = ? AND id NOT IN (
-                    SELECT id FROM platform_dispatch_evidence
-                    WHERE source_site_url = ? AND account_id = ?
-                    ORDER BY julianday(occurred_at) DESC, id DESC LIMIT 60
-                ) AND id NOT IN (
-                    SELECT id FROM platform_dispatch_evidence
-                    WHERE source_site_url = ? AND account_id = ? AND source_kind = 'probe'
-                    ORDER BY julianday(occurred_at) DESC, id DESC LIMIT 15
-                )
-                """,
-                (site_url, account_id, site_url, account_id, site_url, account_id),
-            )
+            self._prune_platform_dispatch_evidence(conn, site_url, account_id)
 
     def list_recent_platform_dispatch_probes(
         self, source_site_url: str, per_account: int = 15
@@ -1688,6 +1689,33 @@ class Database:
                     ) AS row_number
                     FROM platform_dispatch_evidence
                     WHERE source_site_url = ? AND source_kind = 'probe'
+                )
+                SELECT * FROM ranked
+                WHERE row_number <= ?
+                ORDER BY account_id, julianday(occurred_at) DESC, id DESC
+                """,
+                (str(source_site_url or "").strip().rstrip("/"), limit),
+            ).fetchall()
+        grouped: dict[int, list[dict[str, Any]]] = {}
+        for row in rows:
+            item = row_to_dict(row)
+            item.pop("row_number", None)
+            grouped.setdefault(int(item["account_id"]), []).append(item)
+        return grouped
+
+    def list_recent_platform_dispatch_requests(
+        self, source_site_url: str, per_account: int = 10
+    ) -> dict[int, list[dict[str, Any]]]:
+        limit = max(1, min(60, int(per_account)))
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                WITH ranked AS (
+                    SELECT *, ROW_NUMBER() OVER (
+                        PARTITION BY account_id ORDER BY julianday(occurred_at) DESC, id DESC
+                    ) AS row_number
+                    FROM platform_dispatch_evidence
+                    WHERE source_site_url = ? AND source_kind IN ('usage', 'error')
                 )
                 SELECT * FROM ranked
                 WHERE row_number <= ?

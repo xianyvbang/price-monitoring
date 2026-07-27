@@ -249,6 +249,18 @@ const groupSections = computed(() => {
 const activeCount = computed(() => includedAccounts.value.filter((account) => account.status === "active").length);
 const errorCount = computed(() => includedAccounts.value.filter((account) => account.status === "error").length);
 const policySummary = computed(() => policyRuntime.value?.summary || {});
+const liveCostSummary = computed(() => {
+  const statuses = accounts.value.map((account) => costStatus(account));
+  const boundAccounts = accounts.value.filter((account) => Boolean(account.cost_binding || account.costBinding)).length;
+  return {
+    managed_accounts: accounts.value.length,
+    cost_bound_accounts: boundAccounts,
+    cost_unbound_accounts: accounts.value.length - boundAccounts,
+    cost_expired_accounts: statuses.filter((status) => status === "rate_expired").length,
+    price_unsafe_accounts: statuses.filter((status) => status === "unsafe").length,
+    downstream_unknown_accounts: statuses.filter((status) => status === "downstream_unknown").length
+  };
+});
 const groupAvailabilityByKey = computed(() => {
   const entries = Array.isArray(policySummary.value.group_availability)
     ? policySummary.value.group_availability
@@ -352,6 +364,7 @@ function applyPolicyRuntimePayload(payload) {
       health_evidence_fresh: Boolean(state.evidence_fresh),
       probe_records: state.probe_records || state.probeRecords || [],
       short_evidence_records: state.short_evidence_records || state.shortEvidenceRecords || [],
+      recent_request_records: state.recent_request_records || state.recentRequestRecords || [],
       decision_reason: state.decision_reason || "",
       target_concurrency: state.target_concurrency,
       target_load_factor: state.target_load_factor,
@@ -477,12 +490,14 @@ async function loadDispatch() {
 }
 
 function applyDispatchPayload(payload) {
+  const existingAccounts = new Map(accounts.value.map((account) => [Number(account.id), account]));
   accounts.value = (payload.accounts || []).map((account) => ({
     ...account,
     is_enabled: account.is_enabled ?? account.isEnabled ?? account.status === "active",
     schedulable: account.schedulable !== false,
-    probe_records: account.probe_records || account.probeRecords || [],
-    short_evidence_records: account.short_evidence_records || account.shortEvidenceRecords || []
+    probe_records: account.probe_records ?? account.probeRecords ?? existingAccounts.get(Number(account.id))?.probe_records ?? [],
+    short_evidence_records: account.short_evidence_records ?? account.shortEvidenceRecords ?? existingAccounts.get(Number(account.id))?.short_evidence_records ?? [],
+    recent_request_records: account.recent_request_records ?? account.recentRequestRecords ?? existingAccounts.get(Number(account.id))?.recent_request_records ?? []
   }));
   groups.value = payload.groups || [];
   excludedGroups.value = payload.excluded_groups || payload.excludedGroups || [];
@@ -520,7 +535,7 @@ function costStatusType(account) {
   return {
     safe: "success",
     unsafe: "danger",
-    rate_expired: "danger",
+    rate_expired: "warning",
     upstream_unknown: "warning",
     downstream_unknown: "warning",
     unbound: "info"
@@ -1250,8 +1265,8 @@ function probeTimelineRecords(account) {
   return probeRecords(account).reverse();
 }
 
-function shortEvidenceRecords(account) {
-  const records = account.short_evidence_records || account.shortEvidenceRecords || [];
+function recentRequestRecords(account) {
+  const records = account.recent_request_records || account.recentRequestRecords || [];
   if (!Array.isArray(records)) return [];
   return records
     .map((record, index) => ({
@@ -1270,47 +1285,15 @@ function shortEvidenceRecords(account) {
     .map(({ record }) => record);
 }
 
-function shortEvidenceRows(account) {
-  const records = shortEvidenceRecords(account);
-  const count = records.length;
-  return records.map((record, index) => {
-    const score = Number(record.score);
-    const weight = count === 1 ? 1 : index === 0 ? 0.5 : 0.5 / (count - 1);
-    return {
-      record,
-      weight,
-      contribution: Number.isFinite(score) ? score * weight : null
-    };
-  });
-}
-
-function shortEvidenceFormula(account) {
-  const rows = shortEvidenceRows(account);
-  if (!rows.length) return "";
-  const latestScore = Number(rows[0].record.score);
-  if (rows.length === 1) return `${latestScore.toFixed(1)} × 100% = ${latestScore.toFixed(1)}`;
-  const remainingScores = rows.slice(1).map((item) => Number(item.record.score));
-  const remainingAverage = remainingScores.reduce((total, score) => total + score, 0) / remainingScores.length;
-  const total = latestScore * 0.5 + remainingAverage * 0.5;
-  return `最新 ${latestScore.toFixed(1)} × 50% + 其余 ${remainingScores.length} 条均值 ${remainingAverage.toFixed(1)} × 50% = ${total.toFixed(1)}`;
-}
-
-function shortEvidenceResultText(record) {
+function requestResultText(record) {
   const sourceKind = record.source_kind || record.sourceKind;
-  if (sourceKind === "probe") return probeSucceeded(record) ? "探活成功" : "探活失败";
-  if (sourceKind === "error") return "错误";
+  if (sourceKind === "error") return "请求错误";
   if (sourceKind === "usage") return "使用成功";
   return sourceKind || "未知";
 }
 
-function shortEvidenceFailed(record) {
-  const sourceKind = record.source_kind || record.sourceKind;
-  return sourceKind === "error" || (sourceKind === "probe" && !probeSucceeded(record));
-}
-
-function shortEvidenceWeightText(weight) {
-  const percent = Number(weight) * 100;
-  return `${percent.toFixed(percent < 10 ? 1 : 0)}%`;
+function requestFailed(record) {
+  return (record.source_kind || record.sourceKind) === "error";
 }
 
 function probeSucceeded(record) {
@@ -1535,8 +1518,8 @@ onMounted(async () => {
           <small>每组最低保障 {{ policyConfig.minimum_available_accounts }} 个 · 每组健康回池目标 {{ policyConfig.healthy_target_accounts }} 个</small>
         </div>
         <div><span>实时并发</span><strong>{{ metricText(policySummary.current_concurrency) }} / {{ metricText(policySummary.capacity) }}</strong></div>
-        <div><span>成本绑定</span><strong>{{ policySummary.cost_bound_accounts ?? 0 }} / {{ policySummary.managed_accounts ?? accounts.length }}</strong><small>未绑定 {{ policySummary.cost_unbound_accounts ?? 0 }}</small></div>
-        <div><span>价格风险</span><strong>{{ policySummary.price_unsafe_accounts ?? 0 }}</strong><small>过期 {{ policySummary.cost_expired_accounts ?? 0 }} · 下游未知 {{ policySummary.downstream_unknown_accounts ?? 0 }}</small></div>
+        <div><span>成本绑定</span><strong>{{ liveCostSummary.cost_bound_accounts }} / {{ liveCostSummary.managed_accounts }}</strong><small>未绑定 {{ liveCostSummary.cost_unbound_accounts }}</small></div>
+        <div><span>价格风险</span><strong>{{ liveCostSummary.price_unsafe_accounts }}</strong><small>过期 {{ liveCostSummary.cost_expired_accounts }} · 下游未知 {{ liveCostSummary.downstream_unknown_accounts }}</small></div>
         <div><span>最近轮次</span><strong>{{ policyRuntime.last_finished_at ? formatTime(policyRuntime.last_finished_at) : "尚未执行" }}</strong></div>
       </div>
 
@@ -1962,49 +1945,43 @@ onMounted(async () => {
             <details class="short-evidence">
               <summary>
                 <span class="short-evidence-summary">
-                  <strong>短期健康证据</strong>
-                  <template v-if="shortEvidenceRecords(account).length">
+                  <strong>近期请求记录</strong>
+                  <template v-if="recentRequestRecords(account).length">
                     <el-tag
-                      :type="shortEvidenceFailed(shortEvidenceRecords(account)[0]) ? 'danger' : 'success'"
+                      :type="requestFailed(recentRequestRecords(account)[0]) ? 'danger' : 'success'"
                       size="small"
                     >
-                      {{ shortEvidenceResultText(shortEvidenceRecords(account)[0]) }}
+                      {{ requestResultText(recentRequestRecords(account)[0]) }}
                     </el-tag>
-                    <span>{{ evidenceCategoryText(shortEvidenceRecords(account)[0].category) }}</span>
+                    <span>{{ evidenceCategoryText(recentRequestRecords(account)[0].category) }}</span>
                     <small>
-                      {{ Number(shortEvidenceRecords(account)[0].score).toFixed(1) }} · {{ evidenceTime(shortEvidenceRecords(account)[0]) }}
+                      {{ evidenceTime(recentRequestRecords(account)[0]) }}
                     </small>
                   </template>
                   <span v-else>暂无记录</span>
                 </span>
-                <span class="short-evidence-count">{{ shortEvidenceRecords(account).length }} 条</span>
+                <span class="short-evidence-count">{{ recentRequestRecords(account).length }} 条</span>
               </summary>
-              <div v-if="shortEvidenceRecords(account).length" class="short-evidence-table">
-                <div class="short-evidence-formula">
-                  <span>短期分算式</span>
-                  <strong>{{ shortEvidenceFormula(account) }}</strong>
-                </div>
+              <div v-if="recentRequestRecords(account).length" class="short-evidence-table">
                 <div class="short-evidence-head" aria-hidden="true">
-                  <span>结果</span><span>原始分</span><span>权重</span><span>贡献</span><span>类型</span><span>状态与信息</span><span>时间</span>
+                  <span>结果</span><span>评分</span><span>类型</span><span>状态与信息</span><span>时间</span>
                 </div>
                 <div
-                  v-for="item in shortEvidenceRows(account)"
-                  :key="item.record.id"
+                  v-for="record in recentRequestRecords(account)"
+                  :key="record.id"
                   class="short-evidence-row"
-                  :class="{ 'is-error': shortEvidenceFailed(item.record) }"
+                  :class="{ 'is-error': requestFailed(record) }"
                 >
-                  <el-tag :type="shortEvidenceFailed(item.record) ? 'danger' : 'success'" size="small">
-                    {{ shortEvidenceResultText(item.record) }}
+                  <el-tag :type="requestFailed(record) ? 'danger' : 'success'" size="small">
+                    {{ requestResultText(record) }}
                   </el-tag>
-                  <strong>{{ Number(item.record.score).toFixed(1) }}</strong>
-                  <span>{{ shortEvidenceWeightText(item.weight) }}</span>
-                  <strong>{{ item.contribution == null ? "-" : item.contribution.toFixed(1) }}</strong>
-                  <span>{{ evidenceCategoryText(item.record.category) }}</span>
-                  <span class="short-evidence-message" :title="evidenceDetail(item.record)">{{ evidenceDetail(item.record) }}</span>
-                  <span>{{ evidenceTime(item.record) }}</span>
+                  <strong>{{ Number(record.score).toFixed(1) }}</strong>
+                  <span>{{ evidenceCategoryText(record.category) }}</span>
+                  <span class="short-evidence-message" :title="evidenceDetail(record)">{{ evidenceDetail(record) }}</span>
+                  <span>{{ evidenceTime(record) }}</span>
                 </div>
               </div>
-              <div v-else class="short-evidence-empty">当前时间窗口内暂无短期证据</div>
+              <div v-else class="short-evidence-empty">暂无使用成功或错误请求</div>
             </details>
           </article>
         </div>
@@ -3040,33 +3017,13 @@ onMounted(async () => {
   overflow: auto;
 }
 
-.short-evidence-formula {
-  align-items: baseline;
-  background: var(--panel-soft);
-  border-bottom: 1px solid var(--line);
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 10px;
-  padding: 8px 10px;
-}
-
-.short-evidence-formula span {
-  color: var(--muted);
-  font-size: 11px;
-}
-
-.short-evidence-formula strong {
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
-
 .short-evidence-head,
 .short-evidence-row {
   align-items: center;
   display: grid;
   gap: 8px;
-  grid-template-columns: 78px 58px 58px 58px 90px minmax(180px, 1fr) 145px;
-  min-width: 760px;
+  grid-template-columns: 86px 58px 90px minmax(180px, 1fr) 145px;
+  min-width: 600px;
   padding: 6px 10px;
 }
 

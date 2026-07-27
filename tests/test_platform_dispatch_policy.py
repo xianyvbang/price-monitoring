@@ -197,6 +197,47 @@ def test_recent_probe_records_are_grouped_and_limited_per_account(tmp_path):
     assert len(db.list_platform_dispatch_evidence(site, 1)) == 60
 
 
+def test_probe_retention_does_not_evict_recent_request_records(tmp_path):
+    db = make_db(tmp_path)
+    site = "https://sub.example"
+    started_at = datetime(2026, 7, 26, 8, tzinfo=timezone.utc)
+    for index, source_kind in enumerate(("usage", "error", "usage")):
+        db.add_platform_dispatch_evidence(
+            site,
+            {
+                "account_id": 1,
+                "source_kind": source_kind,
+                "source_id": f"request-{index}",
+                "category": "healthy" if source_kind == "usage" else "upstream_error",
+                "score": 100 if source_kind == "usage" else 40,
+                "occurred_at": (started_at + timedelta(minutes=index)).isoformat(),
+            },
+        )
+    for index in range(80):
+        db.add_platform_dispatch_evidence(
+            site,
+            {
+                "account_id": 1,
+                "source_kind": "probe",
+                "source_id": f"probe-{index}",
+                "category": "healthy",
+                "score": 100,
+                "is_probe_success": True,
+                "occurred_at": (started_at + timedelta(hours=1, minutes=index)).isoformat(),
+            },
+        )
+
+    requests = db.list_recent_platform_dispatch_requests(site, 10)
+    probes = db.list_recent_platform_dispatch_probes(site, 15)
+
+    assert [item["source_id"] for item in requests[1]] == [
+        "request-2",
+        "request-1",
+        "request-0",
+    ]
+    assert len(probes[1]) == 15
+
+
 def test_short_evidence_returns_all_sources_after_ranking_latest_ten(tmp_path):
     db = make_db(tmp_path)
     site = "https://sub.example"
@@ -340,6 +381,8 @@ class PolicyClient:
         self.updates = []
         self.field_payloads = []
         self.realtime_reads = 0
+        self.usage_reads = []
+        self.error_reads = []
 
     async def list_accounts(self, **kwargs):
         self.account_read_filters.append(dict(kwargs))
@@ -356,9 +399,11 @@ class PolicyClient:
         return [dict(group) for group in self.groups]
 
     async def list_recent_usage(self, account_id, limit):
+        self.usage_reads.append((account_id, limit))
         return []
 
     async def list_recent_errors(self, account_id, limit):
+        self.error_reads.append((account_id, limit))
         return []
 
     async def probe_account(self, account_id, model=None):
@@ -451,6 +496,8 @@ async def test_recent_usage_does_not_suppress_due_probe(tmp_path):
     await scheduler.run_once(automatic=True)
 
     assert client.probes == [1]
+    assert client.usage_reads == [(1, 60), (1, 60)]
+    assert client.error_reads == [(1, 60), (1, 60)]
 
 
 @pytest.mark.asyncio
@@ -1563,7 +1610,7 @@ def test_cost_profiles_use_monitor_group_rate_recharge_ratio_and_expire(tmp_path
 
     assert stale["price_protection_status"] == "rate_expired"
     assert stale["cost_available"] is False
-    assert stale["price_unsafe"] is True
+    assert stale["price_unsafe"] is False
 
 
 def test_cost_bindings_are_site_isolated_and_cascade_with_monitor_group(tmp_path):
@@ -1626,6 +1673,33 @@ async def test_price_protection_closes_all_unsafe_accounts_in_one_round(tmp_path
     assert client.updates == [(1, "schedulable", False), (2, "schedulable", False)]
     assert len(actions) == 2
     assert "成本来源：source / pro" in actions[0]
+
+
+@pytest.mark.asyncio
+async def test_price_protection_does_not_close_rate_expired_account(tmp_path):
+    db = make_db(tmp_path)
+    accounts = {
+        1: {"id": 1, "name": "expired", "status": "active", "schedulable": True},
+    }
+    client = PolicyClient(list(accounts.values()))
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+
+    actions, unsafe_ids = await scheduler._apply_price_protection(
+        client,
+        client.site_url,
+        accounts,
+        {
+            1: {
+                "price_unsafe": False,
+                "price_protection_status": "rate_expired",
+                "upstream_cost_multiplier": 1,
+            }
+        },
+    )
+
+    assert actions == []
+    assert unsafe_ids == set()
+    assert client.updates == []
 
 
 @pytest.mark.asyncio
