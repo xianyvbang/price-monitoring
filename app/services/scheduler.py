@@ -204,6 +204,10 @@ async def query_group_rate_for_account(db: Database, account_id: int, notify: bo
         result = await query_sub2api_group(account, db.secret_key, settings["request_timeout"], db.add_log)
     else:
         result = await query_newapi_group(account, db.secret_key, settings["request_timeout"], db.add_log)
+    group_query_status = "valid" if result.get("is_valid") else "invalid"
+    db.update_account_group_query_status(account_id, bool(result.get("is_valid")))
+    result["group_query_status"] = group_query_status
+    result["groupQueryStatus"] = group_query_status
     if result.get("is_valid"):
         refreshed_access_token = result.get("refreshed_access_token")
         refreshed_refresh_token = result.get("refreshed_refresh_token")

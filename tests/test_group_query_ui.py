@@ -74,6 +74,7 @@ def test_spa_pages_and_dashboard_api_expose_monitor_data(tmp_path, monkeypatch):
     assert row["base_url"] == "https://sub.example"
     assert row["recharge_url"] == "https://sub.example/topup"
     assert row["last_group_rate_changed"] is False
+    assert row["last_group_query_status"] == "never"
     assert accounts.json()["sub2Api"][0]["id"] == account_id
     assert accounts.json()["sub2Api"][0]["recharge_url"] == "https://sub.example/topup"
     assert "group_rate_query_interval" in settings.json()["settings"]
@@ -465,6 +466,7 @@ def test_dashboard_api_repeats_multi_group_account_as_group_rows(tmp_path, monke
         ],
     )
     test_db.update_account_group_rate_change_status(account_id, True, group_id="pro")
+    test_db.update_account_group_query_status(account_id, False)
     test_db.update_account_result(account_id, {"is_valid": True, "remaining": 42, "unit": "USD"})
     monkeypatch.setattr("app.main.db", test_db)
     monkeypatch.setattr("app.main.scheduler.db", test_db)
@@ -496,6 +498,7 @@ def test_dashboard_api_repeats_multi_group_account_as_group_rows(tmp_path, monke
     assert rows[0]["last_group_rate_changed"] is False
     assert rows[1]["last_group_rate_changed"] is True
     assert rows[1]["monitor_group"]["last_group_rate_changed"] is True
+    assert [row["last_group_query_status"] for row in rows] == ["invalid", "invalid"]
 
 
 def test_dashboard_api_shows_today_consumption_summary(tmp_path, monkeypatch):

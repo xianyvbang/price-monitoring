@@ -125,6 +125,7 @@ class Database:
                     last_used REAL,
                     last_extra TEXT,
                     last_group_rate_changed INTEGER NOT NULL DEFAULT 0,
+                    last_group_query_status TEXT NOT NULL DEFAULT 'never',
                     last_checked_at TEXT,
                     low_balance_active INTEGER NOT NULL DEFAULT 0,
                     last_alert_sent_at TEXT,
@@ -410,6 +411,7 @@ class Database:
             self._migrate_accounts_recharge_url(conn)
             self._migrate_accounts_recharge_ratio(conn)
             self._migrate_accounts_group_rate_changed(conn)
+            self._migrate_accounts_group_query_status(conn)
             self._migrate_accounts_visible(conn)
             self._migrate_accounts_eliminated(conn)
             self._migrate_opencode_go_recovery_email(conn)
@@ -591,6 +593,13 @@ class Database:
         column_names = {row["name"] for row in columns}
         if "last_group_rate_changed" not in column_names:
             conn.execute("ALTER TABLE accounts ADD COLUMN last_group_rate_changed INTEGER NOT NULL DEFAULT 0")
+
+    @staticmethod
+    def _migrate_accounts_group_query_status(conn: sqlite3.Connection) -> None:
+        columns = conn.execute("PRAGMA table_info(accounts)").fetchall()
+        column_names = {row["name"] for row in columns}
+        if "last_group_query_status" not in column_names:
+            conn.execute("ALTER TABLE accounts ADD COLUMN last_group_query_status TEXT NOT NULL DEFAULT 'never'")
 
     @staticmethod
     def _migrate_accounts_visible(conn: sqlite3.Connection) -> None:
@@ -1926,7 +1935,7 @@ class Database:
                 recharge_paid_amount, recharge_received_amount, key_id_enc,
                 threshold, is_enabled, is_visible, is_eliminated,
                 last_status, last_remaining, last_unit, last_total, last_used,
-                last_extra, last_group_rate_changed, last_checked_at
+                last_extra, last_group_rate_changed, last_group_query_status, last_checked_at
             FROM accounts
         """
         conditions = []
@@ -2802,6 +2811,17 @@ class Database:
                     utc_now(),
                     account_id,
                 ),
+            )
+
+    def update_account_group_query_status(self, account_id: int, is_valid: bool) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE accounts
+                SET last_group_query_status = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                ("valid" if is_valid else "invalid", utc_now(), account_id),
             )
 
     def update_account_selected_group(self, account_id: int, group_id: str) -> None:

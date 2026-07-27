@@ -138,6 +138,32 @@ async def test_query_group_rate_records_baseline_and_emails_only_on_change(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_group_query_updates_latest_status_for_success_and_failure(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+    account_id = db.upsert_account(_sub2api_account("sub-status"))
+    results = [
+        _group_result("Basic", 0.8),
+        {"is_valid": False, "invalid_message": "upstream unavailable"},
+    ]
+
+    async def fake_query(account, secret_key, timeout, log):
+        return results.pop(0)
+
+    monkeypatch.setattr("app.services.scheduler.query_sub2api_group", fake_query)
+
+    assert db.get_account(account_id)["last_group_query_status"] == "never"
+
+    succeeded = await query_group_rate_for_account(db, account_id, notify=False)
+    assert succeeded["group_query_status"] == "valid"
+    assert db.get_account(account_id)["last_group_query_status"] == "valid"
+
+    failed = await query_group_rate_for_account(db, account_id, notify=False)
+    assert failed["group_query_status"] == "invalid"
+    assert db.get_account(account_id)["last_group_query_status"] == "invalid"
+
+
+@pytest.mark.asyncio
 async def test_eliminated_account_skips_group_rate_change_email(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "app.db"), "test-key")
     db.init()

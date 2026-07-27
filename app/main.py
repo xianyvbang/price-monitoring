@@ -790,6 +790,8 @@ def public_dashboard_account(
         "lastUsed": account.get("last_used"),
         "last_checked_at": account.get("last_checked_at"),
         "lastCheckedAt": account.get("last_checked_at"),
+        "last_group_query_status": account.get("last_group_query_status") or "never",
+        "lastGroupQueryStatus": account.get("last_group_query_status") or "never",
         "today_consumption": consumption_stats.get("today"),
         "todayConsumption": consumption_stats.get("today"),
         "actual_today_consumption": actual_stats.get("today"),

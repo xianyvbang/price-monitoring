@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { ArrowDown, ArrowRight, Check, CircleClose, Delete, Hide, Link, Refresh, RefreshLeft, Search, Setting, Timer, VideoPause, VideoPlay } from "@element-plus/icons-vue";
 import { api } from "../api";
-import { formatTime } from "../utils";
+import { boolValue, formatTime } from "../utils";
 
 const PLATFORM_FILTER_OPTIONS = [
   { value: "anthropic", label: "Anthropic" },
@@ -62,6 +62,7 @@ const excludingUngrouped = ref(false);
 const costBindingDialog = ref(false);
 const costBindingAccount = ref(null);
 const costSourceOptions = ref([]);
+const costSourceVisibilityFilter = ref("visible");
 const costSourceLoading = ref(false);
 const costBindingSaving = ref(false);
 const selectedMonitorGroupId = ref(null);
@@ -127,6 +128,9 @@ const jobFailed = computed(() => job.value?.status === "failed");
 const groupedCostSourceOptions = computed(() => {
   const groupsByAccount = new Map();
   for (const option of costSourceOptions.value) {
+    const visible = boolValue(option.is_visible ?? option.isVisible);
+    if (costSourceVisibilityFilter.value === "visible" && !visible) continue;
+    if (costSourceVisibilityFilter.value === "hidden" && visible) continue;
     const accountId = Number(option.balance_account_id);
     if (!groupsByAccount.has(accountId)) {
       groupsByAccount.set(accountId, {
@@ -537,6 +541,7 @@ function costOptionLabel(option) {
 async function openCostBindingDialog(account) {
   costBindingAccount.value = account;
   selectedMonitorGroupId.value = account.cost_binding?.monitor_group_id ?? account.costBinding?.monitor_group_id ?? null;
+  costSourceVisibilityFilter.value = "visible";
   costBindingDialog.value = true;
   costSourceLoading.value = true;
   try {
@@ -2001,12 +2006,25 @@ onBeforeUnmount(() => {
       destroy-on-close
     >
       <el-form label-position="top">
+        <el-form-item label="仪表盘显示">
+          <el-select
+            v-model="costSourceVisibilityFilter"
+            clearable
+            :disabled="costSourceLoading || costBindingSaving"
+            placeholder="全部"
+            style="width: 100%"
+          >
+            <el-option label="显示在仪表盘" value="visible" />
+            <el-option label="未显示在仪表盘" value="hidden" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="余额监控分组">
           <el-select
             v-model="selectedMonitorGroupId"
             filterable
             :loading="costSourceLoading"
             :disabled="costBindingSaving"
+            no-data-text="没有符合筛选条件的分组"
             placeholder="选择账号及监控分组"
             style="width: 100%"
           >

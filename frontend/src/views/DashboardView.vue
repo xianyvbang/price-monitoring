@@ -54,6 +54,7 @@ const columnDefs = [
   { key: "status", label: "状态", defaultVisible: true, defaultVisibleByPlatform: { newApi: false, sub2Api: false } },
   { key: "group_rates", label: "分组倍率", defaultVisible: true },
   { key: "group_rate_changed", label: "倍率变化", defaultVisible: true },
+  { key: "group_query_status", label: "最近查组", defaultVisible: true },
   { key: "remaining", label: "剩余", defaultVisible: true },
   { key: "today_consumption", label: "今日消耗", defaultVisible: false },
   { key: "actual_today_consumption", label: "今日实际消耗", defaultVisible: true },
@@ -298,6 +299,18 @@ function lowBalanceBadgeType(row) {
   return lowBalanceText(row) === "是" ? "danger" : "info";
 }
 
+function groupQueryStatus(row) {
+  return row.last_group_query_status || row.lastGroupQueryStatus || "never";
+}
+
+function groupQueryStatusText(row) {
+  return { valid: "成功", invalid: "失败", never: "未查询" }[groupQueryStatus(row)] || "未查询";
+}
+
+function groupQueryStatusType(row) {
+  return { valid: "success", invalid: "danger" }[groupQueryStatus(row)] || "info";
+}
+
 function syncFilterFromRoute() {
   filter.name = String(route.query.name || "");
   filter.platform = String(route.query.platform || "");
@@ -308,6 +321,7 @@ const accountMergedColumns = new Set([
   "name",
   "note",
   "status",
+  "group_query_status",
   "remaining",
   "today_consumption",
   "actual_today_consumption",
@@ -422,6 +436,11 @@ async function queryGroup(row) {
   row._groupQuerying = true;
   try {
     const result = await api.queryGroup(row.id);
+    const status = result.group_query_status || result.groupQueryStatus || (result.is_valid ? "valid" : "invalid");
+    allRowsForAccount(row.id).forEach((target) => {
+      target.last_group_query_status = status;
+      target.lastGroupQueryStatus = status;
+    });
     if (result.extra) {
       await loadDashboard();
     }
@@ -913,6 +932,11 @@ onBeforeUnmount(() => {
               </div>
             </template>
           </el-table-column>
+          <el-table-column v-if="showColumn(platform, 'group_query_status') && (platform === 'newApi' || platform === 'sub2Api')" prop="group_query_status" label="最近查组" width="110">
+            <template #default="{ row }">
+              <el-tag :type="groupQueryStatusType(row)">{{ groupQueryStatusText(row) }}</el-tag>
+            </template>
+          </el-table-column>
           <el-table-column v-if="showColumn(platform, 'remaining')" prop="remaining" label="剩余" width="125">
             <template #default="{ row }">
               <span class="metric-value">{{ displayValue(row.last_remaining) }}</span>
@@ -1027,6 +1051,10 @@ onBeforeUnmount(() => {
               <strong class="group-rate-list">
                 <span v-for="text in groupRateText(row)" :key="text">{{ text }}</span>
               </strong>
+            </div>
+            <div class="mobile-field">
+              <span>最近查组</span>
+              <el-tag :type="groupQueryStatusType(row)">{{ groupQueryStatusText(row) }}</el-tag>
             </div>
             <div class="mobile-field">
               <span>阈值</span>
