@@ -30,6 +30,7 @@ POLICY_DEFAULTS: dict[str, Any] = {
     "evidence_ttl_multiplier": 3,
     "minimum_available_accounts": 1,
     "healthy_target_accounts": 3,
+    "oauth_account_threshold": 3,
     "total_concurrency": 900,
     "account_min_concurrency": 20,
     "account_max_concurrency": 250,
@@ -51,7 +52,7 @@ POLICY_DEFAULTS: dict[str, Any] = {
     "default_probe_model": "",
     "group_probe_models": {},
     "account_probe_models": {},
-    "excluded_account_ids": [1430, 1431],
+    "excluded_account_ids": [],
 }
 
 BOOL_FIELDS = {
@@ -67,6 +68,7 @@ INT_FIELDS = {
     "evidence_ttl_multiplier",
     "minimum_available_accounts",
     "healthy_target_accounts",
+    "oauth_account_threshold",
     "total_concurrency",
     "account_min_concurrency",
     "account_max_concurrency",
@@ -108,6 +110,10 @@ FATAL_USAGE_MARKERS = (
 )
 TIMEOUT_MARKERS = ("timeout", "timed out", "deadline exceeded", "context deadline", "超时")
 UNGROUPED_POOL_KEY = "ungrouped"
+DEFAULT_PROBE_MODELS_BY_GROUP_PLATFORM = {
+    "openai": "gpt-5.5",
+    "anthropic": "claude-sonnet-4-6",
+}
 
 
 def validate_policy_config(payload: Any, current: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -123,6 +129,7 @@ def validate_policy_config(payload: Any, current: dict[str, Any] | None = None) 
         "loadFactorEnabled": "load_factor_enabled",
         "priceProtectionEnabled": "price_protection_enabled",
         "minimumProfitMarginPercent": "minimum_profit_margin_percent",
+        "oauthAccountThreshold": "oauth_account_threshold",
         "defaultProbeModel": "default_probe_model",
         "groupProbeModels": "group_probe_models",
         "accountProbeModels": "account_probe_models",
@@ -531,7 +538,12 @@ def public_platform_dispatch_cost_profile(profile: dict[str, Any]) -> dict[str, 
     return result
 
 
-def _resolve_probe_model(account_id: int, account: dict[str, Any], config: dict[str, Any]) -> str | None:
+def _resolve_probe_model(
+    account_id: int,
+    account: dict[str, Any],
+    config: dict[str, Any],
+    groups_by_id: dict[int, dict[str, Any]] | None = None,
+) -> str | None:
     account_models = config.get("account_probe_models") or {}
     account_model = str(
         account_models.get(str(account_id), account_models.get(account_id, "")) or ""
@@ -549,7 +561,16 @@ def _resolve_probe_model(account_id: int, account: dict[str, Any], config: dict[
             return group_model
 
     default_model = str(config.get("default_probe_model") or "").strip()
-    return default_model or None
+    if default_model:
+        return default_model
+
+    for group_id in sorted(set(group_ids)):
+        group = (groups_by_id or {}).get(group_id) or {}
+        platform = str(group.get("platform") or "").strip().casefold()
+        platform_model = DEFAULT_PROBE_MODELS_BY_GROUP_PLATFORM.get(platform)
+        if platform_model:
+            return platform_model
+    return None
 
 
 class PlatformDispatchPolicyScheduler:
@@ -695,11 +716,17 @@ class PlatformDispatchPolicyScheduler:
             raise Sub2ApiAdminError("请先同步账号信息", status_code=409)
 
         config = validate_policy_config({}, self.db.get_platform_dispatch_policy(POLICY_DEFAULTS)["config"])
+        groups_by_id = {
+            int(group["id"]): group
+            for group in cache.get("groups") or []
+            if isinstance(group, dict) and _optional_int(group.get("id"))
+        }
         warnings, health, probe_results, _ = await self._collect_health_evidence(
             client,
             site_url,
             accounts,
             config,
+            groups_by_id=groups_by_id,
             force_full=True,
             force_probe=True,
             progress=progress,
@@ -761,11 +788,17 @@ class PlatformDispatchPolicyScheduler:
             raise Sub2ApiAdminError("账号不存在", status_code=404)
 
         config = validate_policy_config({}, self.db.get_platform_dispatch_policy(POLICY_DEFAULTS)["config"])
+        groups_by_id = {
+            int(group["id"]): group
+            for group in cache.get("groups") or []
+            if isinstance(group, dict) and _optional_int(group.get("id"))
+        }
         _, health, probe_results, _ = await self._collect_health_evidence(
             client,
             site_url,
             {account_id: account},
             config,
+            groups_by_id=groups_by_id,
             refresh_sources=False,
             force_probe=True,
         )
@@ -798,7 +831,9 @@ class PlatformDispatchPolicyScheduler:
         result.update(
             {
                 "account_id": account_id,
-                "model": _resolve_probe_model(account_id, account, config) or "",
+                "model": _resolve_probe_model(
+                    account_id, account, config, groups_by_id
+                ) or "",
                 "health_score": _round_score(item["health_score"]),
             }
         )
@@ -907,9 +942,10 @@ class PlatformDispatchPolicyScheduler:
         account_type = str(refresh_filter.get("type") or "")
         if progress:
             progress("loading", 0, len(managed_ids))
-        remote_accounts, groups = await asyncio.gather(
+        remote_accounts, groups, remote_oauth_accounts = await asyncio.gather(
             client.list_accounts(platform=platform or None, account_type=account_type or None),
             client.list_groups(platform=platform or None),
+            client.list_accounts(platform=platform or None, account_type="oauth"),
         )
         excluded_group_ids = {
             int(group["id"])
@@ -929,9 +965,34 @@ class PlatformDispatchPolicyScheduler:
         }
         managed_ids.intersection_update(accounts)
         group_map = {int(group["id"]): group for group in groups if isinstance(group, dict) and _optional_int(group.get("id"))}
+        oauth_members_by_group = _normal_oauth_members_by_group(
+            remote_oauth_accounts, group_map
+        )
+        oauth_group_counts = {
+            group_id: len(account_ids)
+            for group_id, account_ids in oauth_members_by_group.items()
+        }
+        oauth_affected_ids = _oauth_affected_apikey_ids(
+            accounts,
+            group_map,
+            oauth_group_counts,
+            int(config["oauth_account_threshold"]),
+        )
+        oauth_group_statistics = _oauth_group_statistics(
+            accounts,
+            group_map,
+            oauth_group_counts,
+            oauth_affected_ids,
+            int(config["oauth_account_threshold"]),
+        )
 
         warnings, health, _, ttl_seconds = await self._collect_health_evidence(
-            client, site_url, accounts, config, progress=progress
+            client,
+            site_url,
+            accounts,
+            config,
+            groups_by_id=group_map,
+            progress=progress,
         )
 
         concurrency_data: dict[str, Any] | None = None
@@ -1047,14 +1108,31 @@ class PlatformDispatchPolicyScheduler:
                 group_map,
                 cost_profiles,
                 price_unsafe_ids,
+                oauth_affected_ids,
+                oauth_group_counts,
             )
             scheduling_action = "；".join([*price_actions, *([scheduling_action] if scheduling_action else [])])
             if config["smart_expand_enabled"] and concurrency_data is not None:
                 await self._apply_concurrency_policy(
-                    client, site_url, accounts, health, concurrency_by_id, cost_profiles, config
+                    client,
+                    site_url,
+                    accounts,
+                    health,
+                    concurrency_by_id,
+                    cost_profiles,
+                    config,
+                    excluded_account_ids=oauth_affected_ids,
                 )
             if config["load_factor_enabled"]:
-                await self._apply_load_policy(client, site_url, accounts, health, cost_profiles, config)
+                await self._apply_load_policy(
+                    client,
+                    site_url,
+                    accounts,
+                    health,
+                    cost_profiles,
+                    config,
+                    excluded_account_ids=oauth_affected_ids,
+                )
 
         total_current = sum(_optional_int(item.get("current_in_use")) or 0 for item in concurrency_by_id.values())
         total_capacity = sum(max(0, _optional_int(account.get("concurrency")) or 0) for account in accounts.values())
@@ -1078,6 +1156,7 @@ class PlatformDispatchPolicyScheduler:
             "group_availability": _group_availability_summary(
                 accounts, available_ids, group_map, config
             ),
+            "oauth_group_statistics": oauth_group_statistics,
         }
         return summary
 
@@ -1088,6 +1167,7 @@ class PlatformDispatchPolicyScheduler:
         accounts: dict[int, dict[str, Any]],
         config: dict[str, Any],
         *,
+        groups_by_id: dict[int, dict[str, Any]] | None = None,
         refresh_sources: bool = True,
         force_full: bool = False,
         force_probe: bool = False,
@@ -1116,6 +1196,7 @@ class PlatformDispatchPolicyScheduler:
             accounts,
             health,
             config,
+            groups_by_id=groups_by_id,
             force=force_probe,
             progress=progress,
         )
@@ -1283,6 +1364,7 @@ class PlatformDispatchPolicyScheduler:
         health: dict[int, dict[str, Any]],
         config: dict[str, Any],
         *,
+        groups_by_id: dict[int, dict[str, Any]] | None = None,
         force: bool = False,
         progress: Callable[[str, int, int], None] | None = None,
     ) -> dict[int, dict[str, Any]]:
@@ -1293,7 +1375,9 @@ class PlatformDispatchPolicyScheduler:
 
         async def probe(account_id: int) -> None:
             nonlocal completed
-            probe_model = _resolve_probe_model(account_id, accounts[account_id], config)
+            probe_model = _resolve_probe_model(
+                account_id, accounts[account_id], config, groups_by_id
+            )
             try:
                 async with semaphore:
                     result = await client.probe_account(account_id, model=probe_model or None)
@@ -1408,9 +1492,13 @@ class PlatformDispatchPolicyScheduler:
         group_map: dict[int, dict[str, Any]] | None = None,
         cost_profiles: dict[int, dict[str, Any]] | None = None,
         price_unsafe_ids: set[int] | None = None,
+        oauth_affected_ids: set[int] | None = None,
+        oauth_group_counts: dict[int, int] | None = None,
     ) -> str:
         cost_profiles = cost_profiles or {}
         price_unsafe_ids = price_unsafe_ids or set()
+        oauth_affected_ids = oauth_affected_ids or set()
+        oauth_group_counts = oauth_group_counts or {}
         fatal: list[tuple[int, str]] = []
         threshold: list[tuple[int, str]] = []
         for account_id, account in accounts.items():
@@ -1446,6 +1534,29 @@ class PlatformDispatchPolicyScheduler:
         elif threshold:
             account_id, reason = min(threshold, key=lambda pair: ((health[pair[0]]["health_score"] or 0), pair[0]))
             candidate = (account_id, False, reason)
+        elif oauth_candidates := [
+            account_id
+            for account_id in oauth_affected_ids
+            if account_id in accounts
+            and str(accounts[account_id].get("status") or "inactive") == "active"
+            and accounts[account_id].get("schedulable") is not False
+        ]:
+            account_id = min(
+                oauth_candidates,
+                key=lambda value: (health[value]["health_score"] or 0, value),
+            )
+            details = []
+            for group_id in sorted(_account_group_ids(accounts[account_id])):
+                group = (group_map or {}).get(group_id) or {}
+                group_name = str(group.get("name") or f"分组 {group_id}")
+                details.append(
+                    f"{group_name} 正常 OAuth {oauth_group_counts.get(group_id, 0)} 个"
+                )
+            reason = (
+                f"{'、'.join(details)}，均严格超过阈值 {config['oauth_account_threshold']}，"
+                "停止 APIKey 调度"
+            )
+            candidate = (account_id, False, reason)
         else:
             price_recovery = [
                 account_id
@@ -1453,6 +1564,7 @@ class PlatformDispatchPolicyScheduler:
                 if str(account.get("status") or "inactive") == "active"
                 and account.get("schedulable") is False
                 and account_id not in price_unsafe_ids
+                and account_id not in oauth_affected_ids
                 and (cost_profiles.get(account_id) or {}).get("price_protection_status") == "safe"
                 and health[account_id]["evidence_fresh"]
                 and (health[account_id]["health_score"] or 0) >= float(config["health_threshold"])
@@ -1507,6 +1619,7 @@ class PlatformDispatchPolicyScheduler:
                         str(account.get("status") or "inactive") == "active"
                         and account.get("schedulable") is False
                         and account_id not in price_unsafe_ids
+                        and account_id not in oauth_affected_ids
                         and covered
                         and item["evidence_fresh"]
                         and (item["health_score"] or 0) >= float(config["health_threshold"])
@@ -1579,11 +1692,14 @@ class PlatformDispatchPolicyScheduler:
         realtime: dict[int, dict[str, Any]],
         cost_profiles: dict[int, dict[str, Any]],
         config: dict[str, Any],
+        excluded_account_ids: set[int] | None = None,
     ) -> None:
+        excluded_account_ids = excluded_account_ids or set()
         eligible = [
             account_id
             for account_id, account in accounts.items()
             if str(account.get("status") or "") == "active"
+            and account_id not in excluded_account_ids
             and account.get("schedulable") is not False
             and health[account_id]["evidence_fresh"]
             and (health[account_id]["health_score"] or 0) >= float(config["health_threshold"])
@@ -1630,11 +1746,14 @@ class PlatformDispatchPolicyScheduler:
         health: dict[int, dict[str, Any]],
         cost_profiles: dict[int, dict[str, Any]],
         config: dict[str, Any],
+        excluded_account_ids: set[int] | None = None,
     ) -> None:
+        excluded_account_ids = excluded_account_ids or set()
         eligible = [
             account_id
             for account_id, account in accounts.items()
             if str(account.get("status") or "") == "active"
+            and account_id not in excluded_account_ids
             and account.get("schedulable") is not False
             and health[account_id]["evidence_fresh"]
             and (health[account_id]["health_score"] or 0) >= float(config["health_threshold"])
@@ -1822,7 +1941,7 @@ def _effective_load_factor(account: dict[str, Any]) -> int:
 
 
 def _account_group_ids(account: dict[str, Any]) -> list[int]:
-    values = account.get("group_ids", [])
+    values = public_dispatch_account(account, []).get("group_ids", [])
     if not isinstance(values, list):
         values = [values]
     result: list[int] = []
@@ -1830,6 +1949,75 @@ def _account_group_ids(account: dict[str, Any]) -> list[int]:
         parsed = _optional_int(value)
         if parsed and parsed not in result:
             result.append(parsed)
+    return result
+
+
+def _normal_oauth_members_by_group(
+    accounts: list[dict[str, Any]],
+    group_map: dict[int, dict[str, Any]],
+) -> dict[int, set[int]]:
+    members: dict[int, set[int]] = {}
+    for account in accounts:
+        if not isinstance(account, dict):
+            continue
+        account_id = _optional_int(account.get("id"))
+        account_type = str(account.get("type") or "").strip().casefold()
+        if account_id is None or account_type != "oauth" or not _runtime_available(account, None):
+            continue
+        for group_id in _account_group_ids(account):
+            if group_id in group_map:
+                members.setdefault(group_id, set()).add(account_id)
+    return members
+
+
+def _oauth_affected_apikey_ids(
+    accounts: dict[int, dict[str, Any]],
+    group_map: dict[int, dict[str, Any]],
+    oauth_group_counts: dict[int, int],
+    threshold: int,
+) -> set[int]:
+    affected: set[int] = set()
+    for account_id, account in accounts.items():
+        if str(account.get("type") or "").strip().casefold() != "apikey":
+            continue
+        group_ids = _account_group_ids(account)
+        if not group_ids or any(group_id not in group_map for group_id in group_ids):
+            continue
+        if all(int(oauth_group_counts.get(group_id, 0)) > threshold for group_id in group_ids):
+            affected.add(account_id)
+    return affected
+
+
+def _oauth_group_statistics(
+    accounts: dict[int, dict[str, Any]],
+    group_map: dict[int, dict[str, Any]],
+    oauth_group_counts: dict[int, int],
+    affected_account_ids: set[int],
+    threshold: int,
+) -> list[dict[str, Any]]:
+    affected_by_group: dict[int, set[int]] = {}
+    for account_id in affected_account_ids:
+        account = accounts.get(account_id)
+        if account is None:
+            continue
+        for group_id in _account_group_ids(account):
+            if group_id in group_map:
+                affected_by_group.setdefault(group_id, set()).add(account_id)
+
+    result: list[dict[str, Any]] = []
+    for group_id in sorted(group_map):
+        group = group_map[group_id]
+        normal_count = int(oauth_group_counts.get(group_id, 0))
+        result.append(
+            {
+                "group_id": group_id,
+                "group_name": str(group.get("name") or f"分组 {group_id}"),
+                "normal_oauth_accounts": normal_count,
+                "oauth_account_threshold": threshold,
+                "threshold_exceeded": normal_count > threshold,
+                "affected_apikey_accounts": len(affected_by_group.get(group_id, set())),
+            }
+        )
     return result
 
 

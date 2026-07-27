@@ -28,6 +28,14 @@ const STATUS_FILTER_OPTIONS = [
   { value: "temp_unschedulable", label: "临时不可调度" },
   { value: "unschedulable", label: "不可调度" }
 ];
+const DEFAULT_PROBE_MODELS_BY_GROUP_PLATFORM = Object.freeze({
+  openai: "gpt-5.5",
+  anthropic: "claude-sonnet-4-6"
+});
+const GROUP_PLATFORM_LABELS = Object.freeze({
+  openai: "OpenAI",
+  anthropic: "Anthropic"
+});
 
 const loading = ref(false);
 const loaded = ref(false);
@@ -73,7 +81,7 @@ const policyRunning = ref(false);
 const policyStopping = ref(false);
 const policyRuntime = ref({});
 const policyActions = ref([]);
-const excludedAccountText = ref("1430, 1431");
+const excludedAccountText = ref("");
 const policyConfig = reactive({
   enabled: false,
   auto_scoring_enabled: true,
@@ -86,6 +94,7 @@ const policyConfig = reactive({
   evidence_ttl_multiplier: 3,
   minimum_available_accounts: 1,
   healthy_target_accounts: 3,
+  oauth_account_threshold: 3,
   total_concurrency: 900,
   account_min_concurrency: 20,
   account_max_concurrency: 250,
@@ -107,7 +116,7 @@ const policyConfig = reactive({
   default_probe_model: "",
   group_probe_models: {},
   account_probe_models: {},
-  excluded_account_ids: [1430, 1431]
+  excluded_account_ids: []
 });
 let jobPollTimer = null;
 let policyPollTimer = null;
@@ -237,6 +246,12 @@ const groupAvailabilityByKey = computed(() => {
     ? policySummary.value.group_availability
     : [];
   return new Map(entries.map((item) => [item.pool_key, item]));
+});
+const oauthGroupStatisticsById = computed(() => {
+  const entries = Array.isArray(policySummary.value.oauth_group_statistics)
+    ? policySummary.value.oauth_group_statistics
+    : [];
+  return new Map(entries.map((item) => [Number(item.group_id), item]));
 });
 function groupAvailabilityTarget(item) {
   const available = Number(item?.available_accounts) || 0;
@@ -769,10 +784,32 @@ function accountGroupProbeModel(account) {
   return null;
 }
 
+function groupPlatformDefaultProbeModel(group) {
+  const platform = String(group?.platform || "").trim().toLowerCase();
+  const model = DEFAULT_PROBE_MODELS_BY_GROUP_PLATFORM[platform] || "";
+  return model ? { model, platform, platformLabel: GROUP_PLATFORM_LABELS[platform] || platform } : null;
+}
+
+function accountGroupPlatformDefaultProbeModel(account) {
+  const groupIds = [...new Set(accountGroupIds(account))].sort((left, right) => left - right);
+  for (const groupId of groupIds) {
+    const group = groups.value.find((item) => Number(item.id) === groupId);
+    const platformDefault = groupPlatformDefaultProbeModel(group);
+    if (!platformDefault) continue;
+    return {
+      ...platformDefault,
+      groupId,
+      groupName: group?.name || `分组 ${groupId}`
+    };
+  }
+  return null;
+}
+
 function effectiveProbeModel(account) {
   return accountProbeModel(account)
     || accountGroupProbeModel(account)?.model
-    || String(policyConfig.default_probe_model || "").trim();
+    || String(policyConfig.default_probe_model || "").trim()
+    || accountGroupPlatformDefaultProbeModel(account)?.model;
 }
 
 function probeModelText(account) {
@@ -781,14 +818,22 @@ function probeModelText(account) {
   const groupModel = accountGroupProbeModel(account);
   if (groupModel) return `${groupModel.model}（${groupModel.groupName}）`;
   const defaultModel = String(policyConfig.default_probe_model || "").trim();
-  return defaultModel ? `${defaultModel}（默认）` : "Sub2API 默认";
+  if (defaultModel) return `${defaultModel}（默认）`;
+  const platformDefault = accountGroupPlatformDefaultProbeModel(account);
+  return platformDefault
+    ? `${platformDefault.model}（${platformDefault.platformLabel} 类型默认）`
+    : "Sub2API 默认";
 }
 
 function groupProbeModelText(group) {
   const model = groupProbeModel(group);
   if (model) return `${model}（分组）`;
   const defaultModel = String(policyConfig.default_probe_model || "").trim();
-  return defaultModel ? `${defaultModel}（默认）` : "Sub2API 默认";
+  if (defaultModel) return `${defaultModel}（默认）`;
+  const platformDefault = groupPlatformDefaultProbeModel(group);
+  return platformDefault
+    ? `${platformDefault.model}（${platformDefault.platformLabel} 类型默认）`
+    : "Sub2API 默认";
 }
 
 async function configureProbeModel(account) {
@@ -796,12 +841,15 @@ async function configureProbeModel(account) {
   if (!Number.isInteger(accountId) || accountId <= 0) return;
   const defaultModel = String(policyConfig.default_probe_model || "").trim();
   const inheritedGroup = accountGroupProbeModel(account);
-  const inheritedModel = inheritedGroup?.model || defaultModel;
+  const inheritedPlatform = accountGroupPlatformDefaultProbeModel(account);
+  const inheritedModel = inheritedGroup?.model || defaultModel || inheritedPlatform?.model;
   const inheritedText = inheritedGroup
     ? `留空将使用分组“${inheritedGroup.groupName}”的模型：${inheritedGroup.model}`
     : defaultModel
       ? `留空将使用默认模型：${defaultModel}`
-      : "留空将使用 Sub2API 默认模型";
+      : inheritedPlatform
+        ? `留空将使用 ${inheritedPlatform.platformLabel} 类型默认模型：${inheritedPlatform.model}`
+        : "留空将使用 Sub2API 默认模型";
   let value;
   try {
     const result = await ElMessageBox.prompt(
@@ -886,16 +934,23 @@ async function configureGroupProbeModel(group) {
   const groupId = Number(group?.id);
   if (!Number.isInteger(groupId) || groupId <= 0) return;
   const defaultModel = String(policyConfig.default_probe_model || "").trim();
+  const platformDefault = groupPlatformDefaultProbeModel(group);
+  const inheritedModel = defaultModel || platformDefault?.model || "";
+  const inheritedText = defaultModel
+    ? `留空将使用默认模型：${defaultModel}`
+    : platformDefault
+      ? `留空将使用 ${platformDefault.platformLabel} 类型默认模型：${platformDefault.model}`
+      : "留空将使用 Sub2API 默认模型";
   let value;
   try {
     const result = await ElMessageBox.prompt(
-      defaultModel ? `留空将使用默认模型：${defaultModel}` : "留空将使用 Sub2API 默认模型",
+      inheritedText,
       `设置分组探活模型 - ${group.name || groupId}`,
       {
         confirmButtonText: "保存",
         cancelButtonText: "取消",
         inputValue: groupProbeModel(group),
-        inputPlaceholder: defaultModel || "例如 gpt-5-mini",
+        inputPlaceholder: inheritedModel || "例如 gpt-5-mini",
         inputValidator: (input) => String(input || "").trim().length <= 200 || "模型名不能超过 200 个字符"
       }
     );
@@ -1108,8 +1163,24 @@ function statusType(status) {
   return "info";
 }
 
-function groupOAuthCount(accounts) {
-  return accounts.filter((account) => String(account.type || "").trim().toLowerCase() === "oauth").length;
+function groupOAuthStatistic(group) {
+  const groupId = Number(group?.id);
+  return Number.isInteger(groupId) && groupId > 0
+    ? oauthGroupStatisticsById.value.get(groupId) || null
+    : null;
+}
+
+function groupOAuthStatusText(group) {
+  const statistic = groupOAuthStatistic(group);
+  if (!statistic) return "正常 OAuth 尚无实时数据";
+  const count = Number(statistic.normal_oauth_accounts) || 0;
+  const threshold = Number(statistic.oauth_account_threshold ?? policyConfig.oauth_account_threshold) || 0;
+  return `正常 OAuth ${count} 个 / 阈值 ${threshold}`;
+}
+
+function groupOAuthThresholdText(group) {
+  const affected = Number(groupOAuthStatistic(group)?.affected_apikey_accounts) || 0;
+  return affected > 0 ? `APIKey 停调 ${affected} 个` : "OAuth 已超阈值";
 }
 
 function statusText(status) {
@@ -1406,11 +1477,11 @@ onBeforeUnmount(() => {
       <div class="policy-behavior" :class="{ 'is-active': policyConfig.enabled || policyConfig.auto_scoring_enabled }">
         <strong>当前行为</strong>
         <span v-if="!policyConfig.auto_scoring_enabled">自动评分和自动调度均关闭；后台不再读取证据或重算健康分。</span>
-        <span v-else-if="!policyConfig.enabled">自动评分开启：后台增量读取请求证据、按到期规则探活并计算健康分，不修改 Sub2API 账号状态或调度参数。</span>
+        <span v-else-if="!policyConfig.enabled">自动评分开启：后台增量读取请求证据、探活并统计各分组正常 OAuth 数量，不修改 Sub2API 账号状态或调度参数。</span>
         <span v-else-if="!policyConfig.return_pool_enabled && !policyConfig.smart_expand_enabled && !policyConfig.load_factor_enabled && !policyConfig.price_protection_enabled">
-          四项可选策略均关闭；仍会在 Sub2API 关闭异常账号的调度。任一分组低于每组最低保障 {{ policyConfig.minimum_available_accounts }} 个时，会将该分组中符合条件的调度关闭账号逐个重新开启。
+          四项可选策略均关闭；仍会关闭异常账号，并在账号所属全部分组的正常 OAuth 都超过 {{ policyConfig.oauth_account_threshold }} 个时逐个停止 APIKey 调度。任一分组低于每组最低保障 {{ policyConfig.minimum_available_accounts }} 个时，会将符合条件且未受 OAuth 规则限制的账号逐个重新开启。
         </span>
-        <span v-else>每 {{ policyConfig.probe_interval_seconds }} 秒评估托管账号；每个分组独立执行最低保障与健康回池，每轮最多在 Sub2API 关闭或开启 1 个账号的调度。</span>
+        <span v-else>每 {{ policyConfig.probe_interval_seconds }} 秒评估托管账号并实时统计正常 OAuth；每个分组独立执行阈值限制、最低保障与健康回池，每轮最多在 Sub2API 关闭或开启 1 个账号的调度。</span>
       </div>
 
       <div class="policy-strategies">
@@ -1464,8 +1535,9 @@ onBeforeUnmount(() => {
               <label><span>健康门槛</span><el-input-number v-model="policyConfig.health_threshold" :min="0" :max="100" /></label>
               <label><span>每组最低保障数</span><el-input-number v-model="policyConfig.minimum_available_accounts" :min="1" /></label>
               <label><span>每组健康回池目标数</span><el-input-number v-model="policyConfig.healthy_target_accounts" :min="1" /></label>
+              <label><span>正常 OAuth 停调阈值</span><el-input-number v-model="policyConfig.oauth_account_threshold" :min="1" /></label>
               <label><span>证据有效倍数</span><el-input-number v-model="policyConfig.evidence_ttl_multiplier" :min="1" /></label>
-              <label><span>默认探活模型</span><el-input v-model="policyConfig.default_probe_model" clearable placeholder="留空使用 Sub2API 默认模型" /></label>
+              <label><span>默认探活模型</span><el-input v-model="policyConfig.default_probe_model" clearable placeholder="可选的全局默认模型" /></label>
             </div>
           </section>
           <section>
@@ -1498,11 +1570,12 @@ onBeforeUnmount(() => {
             </div>
           </section>
         </div>
-        <label class="policy-excluded"><span>排除账号 ID</span><el-input v-model="excludedAccountText" placeholder="1430, 1431" /></label>
+        <label class="policy-excluded"><span>排除账号 ID</span><el-input v-model="excludedAccountText" placeholder="多个 ID 用英文逗号分隔" /></label>
       </details>
 
       <div class="policy-rules">
         <p><strong>Sub2API 调度开关</strong><span>认证、余额和用量上限异常时立即关闭账号调度；价格安全且健康达标时，可重新开启系统或人员手动关闭的 active 账号。</span></p>
+        <p><strong>OAuth 容量</strong><span>每轮实时统计可调度 OAuth；APIKey 所属全部分组均严格超过阈值时逐个停调，阈值解除后按健康与最低保障规则恢复。</span></p>
         <p><strong>系统计算</strong><span>短期为最新证据与前 9 次均值各 50%，最终评分为短期 70% + 最近 60 次均值 30%。</span></p>
       </div>
 
@@ -1638,7 +1711,15 @@ onBeforeUnmount(() => {
               {{ section.group.status === "active" ? "启用" : "停用" }}
             </el-tag>
             <span>{{ section.accounts.length }} 个账号</span>
-            <span>OAuth {{ groupOAuthCount(section.accounts) }} 个</span>
+            <span v-if="section.group.id">{{ groupOAuthStatusText(section.group) }}</span>
+            <el-tag
+              v-if="groupOAuthStatistic(section.group)?.threshold_exceeded"
+              size="small"
+              type="warning"
+              effect="plain"
+            >
+              {{ groupOAuthThresholdText(section.group) }}
+            </el-tag>
             <span v-if="groupAvailabilityByKey.get(section.key)" class="group-availability">
               健康可用 {{ groupAvailabilityByKey.get(section.key).available_accounts }} / 每组目标 {{ groupAvailabilityTarget(groupAvailabilityByKey.get(section.key)) }}
             </span>

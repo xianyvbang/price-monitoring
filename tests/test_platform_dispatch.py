@@ -86,7 +86,8 @@ def test_platform_dispatch_policy_api_defaults_validation_and_save(tmp_path, mon
         assert initial.json()["config"]["default_probe_model"] == ""
         assert initial.json()["config"]["group_probe_models"] == {}
         assert initial.json()["config"]["account_probe_models"] == {}
-        assert initial.json()["config"]["excluded_account_ids"] == [1430, 1431]
+        assert initial.json()["config"]["excluded_account_ids"] == []
+        assert initial.json()["config"]["oauth_account_threshold"] == 3
         assert initial.json()["is_running"] is False
         assert initial.json()["runtime"]["is_running"] is False
         assert initial.json()["automatic_running"] is False
@@ -103,6 +104,12 @@ def test_platform_dispatch_policy_api_defaults_validation_and_save(tmp_path, mon
         )
         assert invalid.status_code == 400
 
+        invalid_oauth_threshold = client.put(
+            "/api/platform-dispatch/policy",
+            json={"oauth_account_threshold": 0},
+        )
+        assert invalid_oauth_threshold.status_code == 400
+
         saved = client.put(
             "/api/platform-dispatch/policy",
             json={
@@ -112,6 +119,7 @@ def test_platform_dispatch_policy_api_defaults_validation_and_save(tmp_path, mon
                 "load_factor_enabled": False,
                 "price_protection_enabled": False,
                 "probe_interval_seconds": 125,
+                "oauthAccountThreshold": 4,
                 "excluded_account_ids": [7, 8],
             },
         )
@@ -119,6 +127,7 @@ def test_platform_dispatch_policy_api_defaults_validation_and_save(tmp_path, mon
         assert saved.json()["config"]["enabled"] is True
         assert saved.json()["config"]["auto_scoring_enabled"] is True
         assert saved.json()["config"]["probe_interval_seconds"] == 125
+        assert saved.json()["config"]["oauth_account_threshold"] == 4
         assert saved.json()["config"]["excluded_account_ids"] == [7, 8]
 
         incompatible = client.put(
@@ -174,20 +183,20 @@ def test_platform_dispatch_account_exclusion_api_updates_only_policy_and_handles
         missing_restore = client.delete("/api/platform-dispatch/excluded-accounts/1")
         test_db.create_platform_dispatch_job("active-job", "accounts_sync", {}, "https://sub.example")
         conflict_exclude = client.post("/api/platform-dispatch/accounts/2/exclude")
-        conflict_restore = client.delete("/api/platform-dispatch/excluded-accounts/1430")
+        conflict_restore = client.delete("/api/platform-dispatch/excluded-accounts/1")
 
     assert saved.status_code == 200
     assert excluded.status_code == 200
     assert excluded.json()["config"]["probe_interval_seconds"] == 125
-    assert excluded.json()["config"]["excluded_account_ids"] == [1430, 1431, 1]
+    assert excluded.json()["config"]["excluded_account_ids"] == [1]
     assert excluded_again.status_code == 200
-    assert excluded_again.json()["config"]["excluded_account_ids"] == [1430, 1431, 1]
+    assert excluded_again.json()["config"]["excluded_account_ids"] == [1]
     assert missing.status_code == 404
     assert invalid.status_code == 400
     assert [item["id"] for item in cached.json()["accounts"]] == [1, 2]
     assert all(item["price_protection_status"] == "unbound" for item in cached.json()["accounts"])
     assert restored.status_code == 200
-    assert restored.json()["config"]["excluded_account_ids"] == [1430, 1431]
+    assert restored.json()["config"]["excluded_account_ids"] == []
     assert restored.json()["config"]["probe_interval_seconds"] == 125
     assert missing_restore.status_code == 404
     assert conflict_exclude.status_code == 409
@@ -370,6 +379,42 @@ def test_platform_dispatch_account_probe_api_uses_configured_model_and_updates_h
     assert state["probe_records"][0]["is_probe_success"] is True
     assert missing.status_code == 404
     assert conflict.status_code == 409
+
+
+def test_platform_dispatch_account_probe_api_uses_group_platform_default(tmp_path, monkeypatch):
+    test_db = setup_test_db(tmp_path, monkeypatch)
+    test_db.set_setting("sub2api_site_url", "https://sub.example")
+    test_db.replace_platform_dispatch_cache(
+        "https://sub.example",
+        [{"id": 1, "name": "anthropic-account", "status": "active", "group_ids": [2]}],
+        [{"id": 2, "name": "Anthropic 分组", "platform": "anthropic"}],
+        [],
+        {"platform": "", "type": "", "status": "", "include_ungrouped": True},
+    )
+    test_db.save_platform_dispatch_policy(
+        {"auto_scoring_enabled": False}, "https://sub.example"
+    )
+
+    class ProbeClient:
+        site_url = "https://sub.example"
+
+        def __init__(self):
+            self.probes = []
+
+        async def probe_account(self, account_id, model=None):
+            self.probes.append((account_id, model))
+            return {"success": True, "message": "ok"}
+
+    probe_client = ProbeClient()
+    monkeypatch.setattr("app.main.sub2api_admin_client", lambda: probe_client)
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.post("/api/platform-dispatch/accounts/1/probe")
+
+    assert response.status_code == 200
+    assert response.json()["probe"]["model"] == "claude-sonnet-4-6"
+    assert probe_client.probes == [(1, "claude-sonnet-4-6")]
 
 
 def test_platform_dispatch_group_probe_model_api_sets_override_and_restores_default(tmp_path, monkeypatch):
@@ -699,14 +744,17 @@ def test_platform_dispatch_syncs_pages_without_loading_activity_and_preserves_ca
         async def list_accounts_page(self, page, page_size, **filters):
             self.pages.append((page, page_size, filters))
             accounts = {
-                1: [{"id": 9, "name": "remote", "platform": "openai", "type": "apikey", "status": "active", "group_ids": [2]}],
+                1: [
+                    {"id": 9, "name": "remote", "platform": "openai", "type": "apikey", "status": "active", "group_ids": [2]},
+                    {"id": 11, "name": "oauth-not-managed", "platform": "openai", "type": "oauth", "status": "active", "group_ids": [2]},
+                ],
                 2: [{"id": 10, "name": "new", "platform": "openai", "type": "apikey", "status": "active", "group_ids": [2]}],
             }
             return {
                 "accounts": accounts[page],
                 "page": page,
                 "page_size": page_size,
-                "total": 2,
+                "total": 3,
                 "pages": 2,
             }
 
@@ -760,6 +808,7 @@ def test_platform_dispatch_syncs_pages_without_loading_activity_and_preserves_ca
     }
     assert response.json()["accounts"][0]["recent_activity"] == [{"id": "old-activity"}]
     assert response.json()["accounts"][1]["recent_activity"] == []
+    assert [account["id"] for account in response.json()["accounts"]] == [9, 10]
     assert response.json()["activities_refreshed_at"] == "2026-07-25T01:00:00+00:00"
     assert invalid.status_code == 400
     assert updated.status_code == 200
