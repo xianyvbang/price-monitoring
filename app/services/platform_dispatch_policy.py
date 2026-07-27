@@ -1761,8 +1761,8 @@ class PlatformDispatchPolicyScheduler:
             if load_factor_writes[account_id]:
                 fields["load_factor"] = final_targets[account_id]
             current_priority = _optional_int(account.get("priority"))
-            if current_priority != 1:
-                fields["priority"] = 1
+            if current_priority != 2:
+                fields["priority"] = 2
             if not fields:
                 continue
             if await self._write_account_fields(client, site_url, account, fields, "负载因子调权"):

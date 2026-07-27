@@ -1225,7 +1225,7 @@ async def test_load_factor_deadband_and_cooldown_use_upstream_cost(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_load_factor_adjustment_flattens_all_priorities_to_one(tmp_path):
+async def test_load_factor_adjustment_flattens_all_priorities_to_two(tmp_path):
     db = make_db(tmp_path)
     accounts = {
         1: {
@@ -1273,14 +1273,14 @@ async def test_load_factor_adjustment_flattens_all_priorities_to_one(tmp_path):
     assert set(payloads) == {1, 2}
     assert payloads[1]["load_factor"] > payloads[2]["load_factor"]
     assert payloads[1]["load_factor"] + payloads[2]["load_factor"] == 120
-    assert payloads[1]["priority"] == 1
-    assert payloads[2]["priority"] == 1
-    assert accounts[1]["priority"] == 1
-    assert accounts[2]["priority"] == 1
+    assert payloads[1]["priority"] == 2
+    assert payloads[2]["priority"] == 2
+    assert accounts[1]["priority"] == 2
+    assert accounts[2]["priority"] == 2
 
 
 @pytest.mark.asyncio
-async def test_load_factor_policy_repairs_priority_to_one_when_load_factor_is_unchanged(tmp_path):
+async def test_load_factor_policy_repairs_priority_to_two_when_load_factor_is_unchanged(tmp_path):
     db = make_db(tmp_path)
     accounts = {
         1: {
@@ -1323,8 +1323,8 @@ async def test_load_factor_policy_repairs_priority_to_one_when_load_factor_is_un
         costs,
         config,
     )
-    assert accounts[1]["priority"] == 1
-    assert accounts[2]["priority"] == 1
+    assert accounts[1]["priority"] == 2
+    assert accounts[2]["priority"] == 2
     state_before = db.get_platform_dispatch_account_state(client.site_url, 1)
 
     accounts[1]["priority"] = 999
@@ -1339,7 +1339,7 @@ async def test_load_factor_policy_repairs_priority_to_one_when_load_factor_is_un
         config,
     )
 
-    assert client.field_payloads == [(1, {"priority": 1})]
+    assert client.field_payloads == [(1, {"priority": 2})]
     state_after = db.get_platform_dispatch_account_state(client.site_url, 1)
     assert state_after["last_load_factor_write_at"] == state_before["last_load_factor_write_at"]
 
