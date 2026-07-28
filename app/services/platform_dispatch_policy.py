@@ -521,7 +521,7 @@ def resolve_platform_dispatch_cost_profiles(
 
 
 def public_platform_dispatch_cost_profile(profile: dict[str, Any]) -> dict[str, Any]:
-    result = {
+    return {
         key: profile.get(key)
         for key in (
             "cost_binding",
@@ -533,18 +533,6 @@ def public_platform_dispatch_cost_profile(profile: dict[str, Any]) -> dict[str, 
             "price_protection_status",
         )
     }
-    aliases = {
-        "cost_binding": "costBinding",
-        "upstream_group_rate_multiplier": "upstreamGroupRateMultiplier",
-        "upstream_cost_multiplier": "upstreamCostMultiplier",
-        "upstream_cost_checked_at": "upstreamCostCheckedAt",
-        "local_min_rate_multiplier": "localMinRateMultiplier",
-        "minimum_safe_rate_multiplier": "minimumSafeRateMultiplier",
-        "price_protection_status": "priceProtectionStatus",
-    }
-    for source, alias in aliases.items():
-        result[alias] = result[source]
-    return result
 
 
 def _resolve_probe_model(

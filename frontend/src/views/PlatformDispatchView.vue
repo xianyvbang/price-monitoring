@@ -495,8 +495,12 @@ async function stopAutomaticPolicyRound() {
 async function loadDispatch() {
   loading.value = true;
   try {
-    const payload = await api.platformDispatch();
-    applyDispatchPayload(payload);
+    const [dispatchPayload, accountsPayload] = await Promise.all([
+      api.platformDispatch(),
+      api.platformDispatchAccounts()
+    ]);
+    applyDispatchPayload(dispatchPayload);
+    applyDispatchAccountsPayload(accountsPayload);
   } catch (error) {
     ElMessage.error(error.message || "加载平台调度缓存失败");
   } finally {
@@ -505,11 +509,7 @@ async function loadDispatch() {
 }
 
 function applyDispatchPayload(payload) {
-  const existingAccounts = new Map(accounts.value.map((account) => [Number(account.id), account]));
-  accounts.value = (payload.accounts || []).map((account) => normalizeDispatchAccount(
-    account,
-    existingAccounts.get(Number(account.id))
-  ));
+  if (Array.isArray(payload.accounts)) applyDispatchAccountsPayload(payload);
   groups.value = payload.groups || [];
   excludedGroups.value = payload.excluded_groups || payload.excludedGroups || [];
   warnings.value = payload.warnings || [];
@@ -525,6 +525,18 @@ function applyDispatchPayload(payload) {
     include_ungrouped: refreshFilter.include_ungrouped ?? refreshFilter.includeUngrouped ?? true
   });
   loaded.value = true;
+}
+
+function applyDispatchAccountsPayload(payload) {
+  const existingAccounts = new Map(accounts.value.map((account) => [Number(account.id), account]));
+  accounts.value = (payload.accounts || []).map((account) => normalizeDispatchAccount(
+    account,
+    existingAccounts.get(Number(account.id))
+  ));
+}
+
+async function refreshDispatchAccounts() {
+  applyDispatchAccountsPayload(await api.platformDispatchAccounts());
 }
 
 function normalizeDispatchAccount(account, existingAccount = null) {
@@ -614,8 +626,8 @@ async function saveCostBinding() {
   }
   costBindingSaving.value = true;
   try {
-    const payload = await api.setPlatformDispatchCostBinding(costBindingAccount.value.id, selectedMonitorGroupId.value);
-    applyDispatchPayload(payload);
+    await api.setPlatformDispatchCostBinding(costBindingAccount.value.id, selectedMonitorGroupId.value);
+    await refreshDispatchAccounts();
     costBindingDialog.value = false;
     ElMessage.success("上游成本绑定已保存");
   } catch (error) {
@@ -634,8 +646,8 @@ async function deleteCostBinding() {
   }
   costBindingSaving.value = true;
   try {
-    const payload = await api.deletePlatformDispatchCostBinding(costBindingAccount.value.id);
-    applyDispatchPayload(payload);
+    await api.deletePlatformDispatchCostBinding(costBindingAccount.value.id);
+    await refreshDispatchAccounts();
     costBindingDialog.value = false;
     ElMessage.success("上游成本绑定已解除");
   } catch (error) {
@@ -711,6 +723,7 @@ async function excludeGroup(group) {
   try {
     const payload = await api.excludePlatformDispatchGroup(groupId);
     applyDispatchPayload(payload);
+    await refreshDispatchAccounts();
     ElMessage.success(`已排除分组“${group.name || groupId}”`);
   } catch (error) {
     if (error.status === 409) {
@@ -737,6 +750,7 @@ async function excludeUngroupedAccounts() {
   try {
     const payload = await api.excludePlatformDispatchUngrouped();
     applyDispatchPayload(payload);
+    await refreshDispatchAccounts();
     ElMessage.success("已屏蔽未分组账号");
   } catch (error) {
     if (error.status === 409) {
@@ -755,6 +769,7 @@ async function restoreExcludedGroup(group) {
   try {
     const payload = await api.restorePlatformDispatchGroup(groupId);
     applyDispatchPayload(payload);
+    await refreshDispatchAccounts();
     ElMessage.success("已取消排除，请重新同步账号以加载该分组数据");
   } catch (error) {
     if (error.status === 409) {

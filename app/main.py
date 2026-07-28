@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -462,12 +463,55 @@ def _safe_response_payload(response: Any, body: bytes) -> str:
     return _log_text(payload)
 
 
+_CAMEL_CASE_BOUNDARY_1 = re.compile(r"(.)([A-Z][a-z]+)")
+_CAMEL_CASE_BOUNDARY_2 = re.compile(r"([a-z0-9])([A-Z])")
+
+
+def _snake_case_key(key: str) -> str:
+    return _CAMEL_CASE_BOUNDARY_2.sub(
+        r"\1_\2", _CAMEL_CASE_BOUNDARY_1.sub(r"\1_\2", key)
+    ).lower()
+
+
+def _without_redundant_case_aliases(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_without_redundant_case_aliases(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+
+    result: dict[Any, Any] = {}
+    for key, item in value.items():
+        if isinstance(key, str):
+            snake_key = _snake_case_key(key)
+            if snake_key != key and snake_key in value:
+                continue
+        result[key] = _without_redundant_case_aliases(item)
+    return result
+
+
+def _deduplicate_api_json_body(response: Any, body: bytes) -> bytes:
+    if not body or "json" not in response.headers.get("content-type", "").lower():
+        return body
+    try:
+        payload = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return body
+    normalized = _without_redundant_case_aliases(payload)
+    if normalized == payload:
+        return body
+    return json.dumps(
+        normalized, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+    ).encode("utf-8")
+
+
 async def _log_response(request: Request, response: Any):
     body = b""
     async for chunk in response.body_iterator:
         if isinstance(chunk, str):
             chunk = chunk.encode("utf-8")
         body += chunk
+    if request.url.path.startswith("/api/"):
+        body = _deduplicate_api_json_body(response, body)
     if should_log_http_request(request):
         db.add_log(
             "info",
@@ -1674,6 +1718,12 @@ async def api_platform_dispatch(request: Request):
     return platform_dispatch_cache_response()
 
 
+@app.get("/api/platform-dispatch/accounts")
+async def api_platform_dispatch_accounts(request: Request):
+    require_user(request)
+    return platform_dispatch_accounts_response()
+
+
 @app.get("/api/platform-dispatch/policy")
 async def api_platform_dispatch_policy(request: Request):
     require_user(request)
@@ -1693,7 +1743,6 @@ async def api_platform_dispatch_cost_source_options(request: Request):
             {
                 **option,
                 "upstream_cost_multiplier": cost,
-                "upstreamCostMultiplier": cost,
             }
         )
     return {"ok": True, "items": items}
@@ -1736,7 +1785,7 @@ async def api_platform_dispatch_cost_binding_update(request: Request, account_id
         f"{account.get('name') or account_id} 绑定上游成本分组 {binding.get('group_plan_name') or binding.get('group_name') or monitor_group_id}",
     )
     platform_dispatch_policy_scheduler.notify_changed(run_immediately=False)
-    return platform_dispatch_cache_response()
+    return {"ok": True}
 
 
 @app.delete("/api/platform-dispatch/accounts/{account_id}/cost-binding")
@@ -1751,7 +1800,7 @@ async def api_platform_dispatch_cost_binding_delete(request: Request, account_id
         return JSONResponse({"ok": False, "message": "成本绑定不存在"}, status_code=404)
     db.add_log("info", "platform-dispatch-policy", f"取消 Sub2API 调度账号 #{account_id} 的上游成本绑定")
     platform_dispatch_policy_scheduler.notify_changed(run_immediately=False)
-    return platform_dispatch_cache_response()
+    return {"ok": True}
 
 
 @app.put("/api/platform-dispatch/policy")
@@ -1911,7 +1960,7 @@ async def api_platform_dispatch_account_probe(request: Request, account_id: int)
         f"Sub2API 调度账号 #{account_id} 单独探活{'成功' if result.get('success') else '失败'}"
         + (f"，模型 {result['model']}" if result.get("model") else ""),
     )
-    account_payload = platform_dispatch_cache_response(account_id=account_id)
+    account_payload = platform_dispatch_accounts_response(account_id=account_id)
     updated_account = next(
         (
             item
@@ -2055,7 +2104,7 @@ async def api_platform_dispatch_policy_stop(request: Request):
 async def api_platform_dispatch_actions(request: Request, page: int = 1, page_size: int = 50):
     require_user(request)
     result = db.list_platform_dispatch_actions(page, page_size)
-    return {"ok": True, **result, "pageSize": result["page_size"]}
+    return {"ok": True, **result}
 
 
 @app.get("/api/platform-dispatch/job")
@@ -4439,11 +4488,8 @@ def public_sub2api_settings() -> dict[str, Any]:
     masked = mask_api_key(admin_key) if admin_key else ""
     return {
         "site_url": site_url,
-        "siteUrl": site_url,
         "has_admin_key": bool(admin_key),
-        "hasAdminKey": bool(admin_key),
         "admin_key_masked": masked,
-        "adminKeyMasked": masked,
     }
 
 
@@ -4480,54 +4526,107 @@ async def _run_platform_dispatch_account_sync_locked(
         db.refresh_platform_dispatch_excluded_group_metadata(admin_client.site_url, groups)
         excluded_groups = db.list_platform_dispatch_excluded_groups(admin_client.site_url)
         excluded_group_ids = {int(group["id"]) for group in excluded_groups}
-        db.update_platform_dispatch_job(job_id, phase="accounts", message="正在分页获取账号")
+        retained_groups: list[dict[str, Any]] = []
+        retained_group_ids: set[int] = set()
+        for group in groups:
+            group_id = _platform_dispatch_account_id(group)
+            if not group_id or group_id in excluded_group_ids or group_id in retained_group_ids:
+                continue
+            retained_group_ids.add(group_id)
+            retained_groups.append(group)
+        public_groups = [public_dispatch_group(group) for group in retained_groups]
 
-        page = 1
-        processed = 0
-        total = 0
-        total_pages = 0
+        query_targets: list[tuple[int | str, str]] = [
+            (group_id, str(group.get("name") or f"分组 {group_id}"))
+            for group in retained_groups
+            if (group_id := _platform_dispatch_account_id(group))
+        ]
+        if refresh_filter["include_ungrouped"]:
+            query_targets.append(("ungrouped", "未分组账号"))
+
+        db.update_platform_dispatch_job(job_id, phase="accounts", message="正在按分组获取账号")
+        accounts_by_id: dict[int, dict[str, Any]] = {}
+        group_ids_by_account: dict[int, set[int]] = {}
+        pages_queried = 0
+        target_count = len(query_targets)
+        for target_index, (group_query, group_label) in enumerate(query_targets):
+            page = 1
+            target_processed = 0
+            while True:
+                page_data = await admin_client.list_accounts_page(
+                    page=page,
+                    page_size=100,
+                    platform=refresh_filter["platform"] or None,
+                    account_type=refresh_filter["type"] or None,
+                    status=refresh_filter["status"] or None,
+                    group_id=group_query,
+                )
+                pages_queried += 1
+                page_accounts = page_data.get("accounts") or []
+                target_processed += len(page_accounts)
+                for account in page_accounts:
+                    account_id = _platform_dispatch_account_id(account)
+                    if not account_id:
+                        continue
+                    if account_id not in accounts_by_id:
+                        accounts_by_id[account_id] = {
+                            key: value
+                            for key, value in account.items()
+                            if key
+                            not in {"group_id", "groupId", "group_ids", "groupIds", "groups", "plans"}
+                        }
+                        group_ids_by_account[account_id] = set()
+                    if isinstance(group_query, int):
+                        group_ids_by_account[account_id].add(group_query)
+
+                response_total = page_data.get("total")
+                response_pages = page_data.get("pages")
+                target_total = max(0, int(response_total)) if response_total is not None else 0
+                target_pages = max(0, int(response_pages)) if response_pages is not None else 0
+                if target_pages:
+                    target_progress = min(1, page / target_pages)
+                elif target_total:
+                    target_progress = min(1, target_processed / target_total)
+                else:
+                    target_progress = 1 if not page_accounts or len(page_accounts) < 100 else 0
+                percent = (
+                    min(99, round((target_index + target_progress) * 100 / target_count))
+                    if target_count
+                    else 99
+                )
+                processed = len(accounts_by_id)
+                db.update_platform_dispatch_job(
+                    job_id,
+                    current_page=pages_queried,
+                    total_pages=pages_queried if percent >= 99 else 0,
+                    processed=processed,
+                    total=processed,
+                    percent=percent,
+                    message=f"正在获取 {group_label}，第 {page} 页",
+                )
+                if not page_accounts:
+                    break
+                if target_pages and page >= target_pages:
+                    break
+                if target_total and target_processed >= target_total:
+                    break
+                if response_pages is None and response_total is None and len(page_accounts) < 100:
+                    break
+                page += 1
+
         raw_accounts: list[dict[str, Any]] = []
-        while True:
-            page_data = await admin_client.list_accounts_page(
-                page=page,
-                page_size=100,
-                platform=refresh_filter["platform"] or None,
-                account_type=refresh_filter["type"] or None,
-                status=refresh_filter["status"] or None,
+        for account_id, account in accounts_by_id.items():
+            account["group_ids"] = sorted(group_ids_by_account[account_id])
+            raw_accounts.append(account)
+        raw_accounts.sort(
+            key=lambda account: (
+                str(account.get("name") or "").strip().lower(),
+                _platform_dispatch_account_id(account),
             )
-            page_accounts = page_data.get("accounts") or []
-            raw_accounts.extend(page_accounts)
-            processed += len(page_accounts)
-            response_total = page_data.get("total")
-            response_pages = page_data.get("pages")
-            if response_total is not None:
-                total = max(0, int(response_total))
-            if response_pages is not None:
-                total_pages = max(0, int(response_pages))
-            if total_pages:
-                percent = min(99, round(page * 100 / total_pages))
-            elif total:
-                percent = min(99, round(processed * 100 / total))
-            else:
-                percent = 0
-            db.update_platform_dispatch_job(
-                job_id,
-                current_page=page,
-                total_pages=total_pages,
-                processed=processed,
-                total=total,
-                percent=percent,
-                message=f"正在获取账号，第 {page} 页",
-            )
-            if not page_accounts:
-                break
-            if total_pages and page >= total_pages:
-                break
-            if total and processed >= total:
-                break
-            if response_pages is None and response_total is None and len(page_accounts) < 100:
-                break
-            page += 1
+        )
+        processed = len(raw_accounts)
+        total = processed
+        total_pages = pages_queried
 
         db.update_platform_dispatch_job(job_id, phase="finalizing", percent=99, message="正在写入账号缓存")
         _ensure_platform_dispatch_site_unchanged(admin_client.site_url)
@@ -4539,29 +4638,10 @@ async def _run_platform_dispatch_account_sync_locked(
                 account_id = _platform_dispatch_account_id(account)
                 if account_id:
                     old_activity[account_id] = account.get("recent_activity", account.get("recentActivity", [])) or []
-        public_groups = [
-            public_dispatch_group(group)
-            for group in groups
-            if _platform_dispatch_account_id(group) not in excluded_group_ids
-        ]
-        available_group_ids = {
-            _platform_dispatch_account_id(group)
-            for group in public_groups
-            if _platform_dispatch_account_id(group)
-        }
-        filtered_accounts = (
-            filter_platform_dispatch_accounts_by_available_groups(
-                raw_accounts, available_group_ids
-            )
-            if excluded_group_ids
-            else raw_accounts
-        )
         public_accounts = [
             public_dispatch_account(account, old_activity.get(_platform_dispatch_account_id(account), []))
-            for account in filtered_accounts
+            for account in raw_accounts
         ]
-        if not refresh_filter["include_ungrouped"]:
-            public_accounts = [account for account in public_accounts if _cached_platform_dispatch_group_ids(account)]
         db.replace_platform_dispatch_cache(
             admin_client.site_url,
             public_accounts,
@@ -4729,21 +4809,7 @@ def _fail_platform_dispatch_job(job_id: str, error: str) -> None:
 def public_platform_dispatch_job(job: dict[str, Any] | None) -> dict[str, Any] | None:
     if job is None:
         return None
-    result = dict(job)
-    aliases = {
-        "job_id": "jobId",
-        "current_page": "currentPage",
-        "total_pages": "totalPages",
-        "source_site_url": "sourceSiteUrl",
-        "refresh_filter": "refreshFilter",
-        "created_at": "createdAt",
-        "started_at": "startedAt",
-        "finished_at": "finishedAt",
-        "updated_at": "updatedAt",
-    }
-    for source, alias in aliases.items():
-        result[alias] = result.get(source)
-    return result
+    return dict(job)
 
 
 def platform_dispatch_job_response() -> dict[str, Any]:
@@ -4758,27 +4824,21 @@ def platform_dispatch_policy_response() -> dict[str, Any]:
     automatic_running = platform_dispatch_policy_scheduler.automatic_round_running
     next_run_at = platform_dispatch_policy_scheduler.next_automatic_run_at
     runtime["is_running"] = is_running
-    runtime["isRunning"] = is_running
     runtime["automatic_running"] = automatic_running
-    runtime["automaticRunning"] = automatic_running
     runtime["next_run_at"] = next_run_at
-    runtime["nextRunAt"] = next_run_at
     return {
         "ok": True,
         "config": policy["config"],
         "runtime": runtime,
         "is_running": is_running,
-        "isRunning": is_running,
         "automatic_running": automatic_running,
-        "automaticRunning": automatic_running,
         "next_run_at": next_run_at,
-        "nextRunAt": next_run_at,
         "actions": actions,
     }
 
 
 def public_platform_dispatch_evidence(record: dict[str, Any]) -> dict[str, Any]:
-    result = {
+    return {
         "id": record.get("id"),
         "source_kind": str(record.get("source_kind") or "unknown"),
         "category": str(record.get("category") or "unknown"),
@@ -4790,27 +4850,33 @@ def public_platform_dispatch_evidence(record: dict[str, Any]) -> dict[str, Any]:
         "message": str(record.get("message") or ""),
         "occurred_at": record.get("occurred_at"),
     }
-    result.update(
-        {
-            "sourceKind": result["source_kind"],
-            "statusCode": result["status_code"],
-            "firstTokenMs": result["first_token_ms"],
-            "isTimeout": result["is_timeout"],
-            "isProbeSuccess": result["is_probe_success"],
-            "occurredAt": result["occurred_at"],
-        }
-    )
-    return result
 
 
 def public_platform_dispatch_excluded_group(group: dict[str, Any]) -> dict[str, Any]:
-    result = dict(group)
-    result["createdAt"] = result.get("created_at")
-    result["updatedAt"] = result.get("updated_at")
+    return dict(group)
+
+
+def _snake_case_platform_dispatch_payload(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_snake_case_platform_dispatch_payload(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+
+    result: dict[Any, Any] = {}
+    for key, item in value.items():
+        if isinstance(key, str):
+            snake_key = _snake_case_key(key)
+            if snake_key != key and snake_key in value:
+                continue
+        else:
+            snake_key = key
+        result[snake_key] = _snake_case_platform_dispatch_payload(item)
     return result
 
 
-def platform_dispatch_cache_response(account_id: int | None = None) -> dict[str, Any]:
+def platform_dispatch_cache_response(
+    *, include_accounts: bool = False, account_id: int | None = None
+) -> dict[str, Any]:
     cache = db.get_platform_dispatch_cache()
     site_url = db.get_setting(SUB2API_SITE_URL_SETTING, "")
     excluded_group_rows = db.list_platform_dispatch_excluded_groups(site_url)
@@ -4830,8 +4896,10 @@ def platform_dispatch_cache_response(account_id: int | None = None) -> dict[str,
         refreshed_at = None
         source_site_url = ""
     else:
-        accounts = filter_platform_dispatch_accounts_by_groups(
-            cache["accounts"], excluded_group_ids
+        accounts = (
+            filter_platform_dispatch_accounts_by_groups(cache["accounts"], excluded_group_ids)
+            if include_accounts
+            else []
         )
         groups = [
             group
@@ -4856,11 +4924,11 @@ def platform_dispatch_cache_response(account_id: int | None = None) -> dict[str,
         for group in groups
         if isinstance(group, dict) and _platform_dispatch_account_id(group)
     }
-    if excluded_group_ids:
+    if include_accounts and excluded_group_ids:
         accounts = filter_platform_dispatch_accounts_by_available_groups(
             accounts, available_group_ids
         )
-    if account_id is not None:
+    if include_accounts and account_id is not None:
         accounts = [
             account
             for account in accounts
@@ -4878,12 +4946,12 @@ def platform_dispatch_cache_response(account_id: int | None = None) -> dict[str,
         group_id = _platform_dispatch_account_id(group)
         enabled = group_auto_dispatch_settings.get(group_id, True)
         group["auto_dispatch_enabled"] = enabled
-        group["autoDispatchEnabled"] = enabled
-    for account in accounts:
-        if isinstance(account, dict):
-            account.pop("rate_multiplier", None)
-            account.pop("rateMultiplier", None)
-    if source_site_url and accounts:
+    if include_accounts:
+        for account in accounts:
+            if isinstance(account, dict):
+                account.pop("rate_multiplier", None)
+                account.pop("rateMultiplier", None)
+    if include_accounts and source_site_url and accounts:
         account_map = {
             _platform_dispatch_account_id(account): account
             for account in accounts
@@ -4939,17 +5007,12 @@ def platform_dispatch_cache_response(account_id: int | None = None) -> dict[str,
             account["target_concurrency"] = state.get("target_concurrency")
             account["target_load_factor"] = state.get("target_load_factor")
             account["price_protection_blocked"] = bool(state.get("price_protection_blocked"))
-            account["priceProtectionBlocked"] = account["price_protection_blocked"]
             account["price_protection_blocked_at"] = state.get("price_protection_blocked_at")
-            account["priceProtectionBlockedAt"] = account["price_protection_blocked_at"]
             account["price_protection_reason"] = str(state.get("price_protection_reason") or "")
-            account["priceProtectionReason"] = account["price_protection_reason"]
             if state.get("decision_reason"):
                 account["decision_reason"] = state["decision_reason"]
-                account["decisionReason"] = state["decision_reason"]
             if state.get("last_action_at"):
                 account["last_policy_action_at"] = state["last_action_at"]
-                account["lastPolicyActionAt"] = state["last_action_at"]
             probe_records = [
                 public_platform_dispatch_evidence(record)
                 for record in probes_by_account.get(account_id, [])
@@ -4963,33 +5026,32 @@ def platform_dispatch_cache_response(account_id: int | None = None) -> dict[str,
                 for record in requests_by_account.get(account_id, [])
             ]
             account["probe_records"] = probe_records
-            account["probeRecords"] = probe_records
             account["short_evidence_records"] = short_evidence_records
-            account["shortEvidenceRecords"] = short_evidence_records
             account["recent_request_records"] = recent_request_records
-            account["recentRequestRecords"] = recent_request_records
-    return {
+    payload = {
         "ok": True,
         "has_cache": cache is not None,
-        "hasCache": cache is not None,
         "site_url": site_url,
-        "siteUrl": site_url,
         "source_site_url": source_site_url,
-        "sourceSiteUrl": source_site_url,
-        "accounts": accounts,
         "groups": groups,
         "warnings": warnings,
         "excluded_groups": excluded_groups,
-        "excludedGroups": excluded_groups,
         "recent_limit": recent_limit,
-        "recentLimit": recent_limit,
         "activities_refreshed_at": activities_refreshed_at,
-        "activitiesRefreshedAt": activities_refreshed_at,
         "refreshed_at": refreshed_at,
-        "refreshedAt": refreshed_at,
         "refresh_filter": refresh_filter,
-        "refreshFilter": refresh_filter,
     }
+    if include_accounts:
+        payload["accounts"] = accounts
+    return _snake_case_platform_dispatch_payload(payload)
+
+
+def platform_dispatch_accounts_response(account_id: int | None = None) -> dict[str, Any]:
+    payload = platform_dispatch_cache_response(
+        include_accounts=True,
+        account_id=account_id,
+    )
+    return {"ok": True, "accounts": payload["accounts"]}
 
 
 def platform_dispatch_refresh_filter(payload: Any) -> dict[str, Any]:

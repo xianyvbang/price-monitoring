@@ -63,6 +63,21 @@ def login(client):
     client.post("/login", data={"username": "admin", "password": "password123"})
 
 
+def assert_snake_case_keys(value, path="$"):
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            assert_snake_case_keys(item, f"{path}[{index}]")
+        return
+    if not isinstance(value, dict):
+        return
+    for key, item in value.items():
+        if isinstance(key, str):
+            assert not any(character.isupper() for character in key), (
+                f"{path}.{key} is not snake_case"
+            )
+        assert_snake_case_keys(item, f"{path}.{key}")
+
+
 def wait_for_dispatch_job(client, timeout=3):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -89,6 +104,7 @@ def test_platform_dispatch_policy_api_defaults_validation_and_save(tmp_path, mon
         assert initial.json()["config"]["account_probe_models"] == {}
         assert initial.json()["config"]["excluded_account_ids"] == []
         assert "oauth_account_threshold" not in initial.json()["config"]
+        assert_snake_case_keys(initial.json())
         assert initial.json()["is_running"] is False
         assert initial.json()["runtime"]["is_running"] is False
         assert initial.json()["automatic_running"] is False
@@ -174,7 +190,7 @@ def test_platform_dispatch_account_exclusion_api_updates_only_policy_and_handles
         excluded_again = client.post("/api/platform-dispatch/accounts/1/exclude")
         missing = client.post("/api/platform-dispatch/accounts/99/exclude")
         invalid = client.post("/api/platform-dispatch/accounts/-1/exclude")
-        cached = client.get("/api/platform-dispatch")
+        cached = client.get("/api/platform-dispatch/accounts")
         restored = client.delete("/api/platform-dispatch/excluded-accounts/1")
         missing_restore = client.delete("/api/platform-dispatch/excluded-accounts/1")
         test_db.create_platform_dispatch_job("active-job", "accounts_sync", {}, "https://sub.example")
@@ -238,7 +254,7 @@ def test_platform_dispatch_group_auto_dispatch_api_defaults_persists_and_is_site
 
     assert initial.status_code == 200
     assert initial.json()["groups"][0]["auto_dispatch_enabled"] is True
-    assert initial.json()["groups"][0]["autoDispatchEnabled"] is True
+    assert "autoDispatchEnabled" not in initial.json()["groups"][0]
     assert invalid_id.status_code == 400
     assert invalid_value.status_code == 400
     assert missing.status_code == 404
@@ -294,6 +310,7 @@ def test_platform_dispatch_cost_binding_api_and_job_conflict(tmp_path, monkeypat
             "/api/platform-dispatch/accounts/1/cost-binding",
             json={"monitor_group_id": monitor_group_id},
         )
+        bound_accounts = client.get("/api/platform-dispatch/accounts")
         missing_account = client.put(
             "/api/platform-dispatch/accounts/99/cost-binding",
             json={"monitor_group_id": monitor_group_id},
@@ -303,6 +320,7 @@ def test_platform_dispatch_cost_binding_api_and_job_conflict(tmp_path, monkeypat
             json={"monitor_group_id": 99999},
         )
         deleted = client.delete("/api/platform-dispatch/accounts/1/cost-binding")
+        deleted_accounts = client.get("/api/platform-dispatch/accounts")
         deleted_again = client.delete("/api/platform-dispatch/accounts/1/cost-binding")
         client.put(
             "/api/platform-dispatch/accounts/1/cost-binding",
@@ -317,7 +335,8 @@ def test_platform_dispatch_cost_binding_api_and_job_conflict(tmp_path, monkeypat
     assert option["upstream_cost_multiplier"] == 1
     assert option["last_checked_at"] == checked_at
     assert bound.status_code == 200
-    account = bound.json()["accounts"][0]
+    assert bound.json() == {"ok": True}
+    account = bound_accounts.json()["accounts"][0]
     assert account["cost_binding"]["monitor_group_id"] == monitor_group_id
     assert account["upstream_group_rate_multiplier"] == 2
     assert account["upstream_cost_multiplier"] == 1
@@ -328,7 +347,8 @@ def test_platform_dispatch_cost_binding_api_and_job_conflict(tmp_path, monkeypat
     assert missing_account.status_code == 404
     assert invalid_group.status_code == 404
     assert deleted.status_code == 200
-    assert deleted.json()["accounts"][0]["price_protection_status"] == "unbound"
+    assert deleted.json() == {"ok": True}
+    assert deleted_accounts.json()["accounts"][0]["price_protection_status"] == "unbound"
     assert deleted_again.status_code == 404
     assert conflict.status_code == 409
 
@@ -413,7 +433,7 @@ def test_platform_dispatch_account_probe_api_uses_configured_model_and_updates_h
     with TestClient(app) as client:
         login(client)
         response = client.post("/api/platform-dispatch/accounts/1/probe")
-        cache = client.get("/api/platform-dispatch")
+        cache = client.get("/api/platform-dispatch/accounts")
         missing = client.post("/api/platform-dispatch/accounts/99/probe")
         test_db.create_platform_dispatch_job("active-job", "accounts_sync", {}, "https://sub.example")
         conflict = client.post("/api/platform-dispatch/accounts/1/probe")
@@ -561,6 +581,7 @@ def test_merge_recent_activity_keeps_success_and_error_records():
         6,
     )
 
+    assert_snake_case_keys(activities)
     assert [item["kind"] for item in activities] == ["error", "success"]
     assert activities[0]["user_email"] == "failed@example.com"
     assert activities[0]["status_code"] == 429
@@ -624,7 +645,7 @@ def test_public_dispatch_account_derives_sub2api_filter_status(account, expected
     public = public_dispatch_account({"id": 1, "name": "runtime", **account}, [])
 
     assert public["filter_status"] == expected
-    assert public["filterStatus"] == expected
+    assert "filterStatus" not in public
 
 
 @pytest.mark.asyncio
@@ -648,6 +669,23 @@ async def test_sub2api_admin_list_accounts_reads_all_pages(monkeypatch):
     assert all(request["params"]["platform"] == "openai" for request in DummyAsyncClient.requests)
     assert all(request["params"]["type"] == "apikey" for request in DummyAsyncClient.requests)
     assert all(request["params"]["status"] == "active" for request in DummyAsyncClient.requests)
+
+
+@pytest.mark.asyncio
+async def test_sub2api_admin_filters_accounts_with_upstream_group_parameter(monkeypatch):
+    DummyAsyncClient.requests = []
+    DummyAsyncClient.responses = [
+        DummyResponse({"code": 0, "data": {"items": [], "total": 0, "pages": 0}}),
+        DummyResponse({"code": 0, "data": {"items": [], "total": 0, "pages": 0}}),
+    ]
+    monkeypatch.setattr("app.services.sub2api_admin.httpx.AsyncClient", DummyAsyncClient)
+    admin_client = Sub2ApiAdminClient("https://sub.example", "admin-key")
+
+    await admin_client.list_accounts_page(page=1, group_id=2)
+    await admin_client.list_accounts_page(page=1, group_id="ungrouped")
+
+    assert [request["params"]["group"] for request in DummyAsyncClient.requests] == [2, "ungrouped"]
+    assert all("group_id" not in request["params"] for request in DummyAsyncClient.requests)
 
 
 @pytest.mark.asyncio
@@ -780,7 +818,17 @@ def test_platform_dispatch_syncs_pages_without_loading_activity_and_preserves_ca
     test_db.set_setting("sub2api_site_url", "https://sub.example")
     test_db.replace_platform_dispatch_cache(
         "https://sub.example",
-        [{"id": 9, "name": "cached", "status": "active", "recent_activity": [{"id": "old-activity"}]}],
+        [
+            {
+                "id": 9,
+                "name": "cached",
+                "status": "active",
+                "is_enabled": True,
+                "isEnabled": True,
+                "recent_activity": [{"id": "old-activity"}],
+                "recentActivity": [{"id": "old-activity"}],
+            }
+        ],
         [],
         [],
         {"platform": "", "type": "", "status": ""},
@@ -799,6 +847,15 @@ def test_platform_dispatch_syncs_pages_without_loading_activity_and_preserves_ca
 
         async def list_accounts_page(self, page, page_size, **filters):
             self.pages.append((page, page_size, filters))
+            if filters["group_id"] == "ungrouped":
+                return {
+                    "accounts": [],
+                    "page": page,
+                    "page_size": page_size,
+                    "total": 0,
+                    "pages": 0,
+                }
+            assert filters["group_id"] == 2
             accounts = {
                 1: [
                     {"id": 9, "name": "remote", "platform": "openai", "type": "apikey", "status": "active", "group_ids": [2]},
@@ -829,7 +886,7 @@ def test_platform_dispatch_syncs_pages_without_loading_activity_and_preserves_ca
     with TestClient(app) as client:
         login(client)
         page = client.get("/platform-dispatch")
-        before = client.get("/api/platform-dispatch")
+        before = client.get("/api/platform-dispatch/accounts")
         invalid_filter = client.post("/api/platform-dispatch/refresh", json={"status": "unknown"})
         started = client.post(
             "/api/platform-dispatch/sync",
@@ -837,27 +894,33 @@ def test_platform_dispatch_syncs_pages_without_loading_activity_and_preserves_ca
         )
         job = wait_for_dispatch_job(client)
         response = client.get("/api/platform-dispatch")
+        response_accounts = client.get("/api/platform-dispatch/accounts")
         invalid = client.post("/api/platform-dispatch/accounts/9/schedulable", json={"schedulable": "yes"})
         updated = client.post("/api/platform-dispatch/accounts/9/schedulable", json={"schedulable": False})
-        after_update = client.get("/api/platform-dispatch")
+        after_update = client.get("/api/platform-dispatch/accounts")
 
     assert page.status_code == 200
     assert '<div id="app"></div>' in page.text
     assert before.json()["accounts"][0]["name"] == "cached"
+    assert_snake_case_keys(before.json())
     assert invalid_filter.status_code == 400
     assert started.status_code == 202
     assert started.json()["job"]["kind"] == "accounts_sync"
     assert job["status"] == "succeeded"
-    assert job["current_page"] == 2
-    assert job["total_pages"] == 2
+    assert job["current_page"] == 3
+    assert job["total_pages"] == 3
     assert job["percent"] == 100
-    assert [item[0] for item in fake.pages] == [1, 2]
+    assert [item[0] for item in fake.pages] == [1, 2, 1]
     assert all(item[1] == 100 for item in fake.pages)
+    assert [item[2]["group_id"] for item in fake.pages] == [2, 2, "ungrouped"]
     assert all(
-        item[2] == {"platform": "openai", "account_type": "apikey", "status": "active"}
+        {key: value for key, value in item[2].items() if key != "group_id"}
+        == {"platform": "openai", "account_type": "apikey", "status": "active"}
         for item in fake.pages
     )
     assert response.status_code == 200
+    assert_snake_case_keys(response.json())
+    assert "accounts" not in response.json()
     assert response.json()["site_url"] == "https://sub.example"
     assert response.json()["refresh_filter"] == {
         "platform": "openai",
@@ -865,17 +928,21 @@ def test_platform_dispatch_syncs_pages_without_loading_activity_and_preserves_ca
         "status": "active",
         "include_ungrouped": True,
     }
-    assert response.json()["accounts"][0]["recent_activity"] == [{"id": "old-activity"}]
-    assert response.json()["accounts"][1]["recent_activity"] == []
-    assert [account["id"] for account in response.json()["accounts"]] == [9, 10]
+    assert response_accounts.json().keys() == {"ok", "accounts"}
+    accounts_by_id = {account["id"]: account for account in response_accounts.json()["accounts"]}
+    assert accounts_by_id[9]["recent_activity"] == [{"id": "old-activity"}]
+    assert accounts_by_id[10]["recent_activity"] == []
+    assert set(accounts_by_id) == {9, 10}
     assert response.json()["activities_refreshed_at"] == "2026-07-25T01:00:00+00:00"
     assert invalid.status_code == 400
     assert updated.status_code == 200
     assert updated.json()["account"]["status"] == "active"
     assert updated.json()["account"]["schedulable"] is False
-    assert after_update.json()["accounts"][0]["status"] == "active"
-    assert after_update.json()["accounts"][0]["schedulable"] is False
-    assert after_update.json()["accounts"][0]["recent_activity"] == [{"id": "old-activity"}]
+    updated_account = next(account for account in after_update.json()["accounts"] if account["id"] == 9)
+    assert updated_account["status"] == "active"
+    assert updated_account["schedulable"] is False
+    assert updated_account["recent_activity"] == [{"id": "old-activity"}]
+    assert_snake_case_keys(after_update.json())
     assert fake.updated == [(9, False)]
 
 
@@ -915,7 +982,7 @@ def test_platform_dispatch_sync_failure_keeps_cache_and_site_change_clears_it(tm
         login(client)
         started = client.post("/api/platform-dispatch/refresh", json={})
         failed = wait_for_dispatch_job(client)
-        still_cached = client.get("/api/platform-dispatch")
+        still_cached = client.get("/api/platform-dispatch/accounts")
         same_site = client.post("/api/settings/sub2api", json={"site_url": "https://sub.example"})
         after_same_site = client.get("/api/platform-dispatch")
         changed_site = client.post("/api/settings/sub2api", json={"site_url": "https://other.example"})
@@ -1013,6 +1080,7 @@ def test_platform_dispatch_evidence_refresh_reloads_history_probes_and_recalcula
         started = client.post("/api/platform-dispatch/evidence/refresh")
         job = wait_for_dispatch_job(client)
         response = client.get("/api/platform-dispatch")
+        accounts_response = client.get("/api/platform-dispatch/accounts")
         policy = client.get("/api/platform-dispatch/policy")
 
     assert started.status_code == 202
@@ -1021,7 +1089,10 @@ def test_platform_dispatch_evidence_refresh_reloads_history_probes_and_recalcula
     assert job["total"] == 2
     assert job["kind"] == "evidence_refresh"
     assert evidence_client.probe_models == [(1, "group-model"), (2, "group-model")]
-    cached_accounts = response.json()["accounts"]
+    cached_accounts = accounts_response.json()["accounts"]
+    assert_snake_case_keys(response.json())
+    assert_snake_case_keys(accounts_response.json())
+    assert "accounts" not in response.json()
     assert cached_accounts[0]["recent_activity"] == [{"id": "old-1"}]
     assert cached_accounts[1]["recent_activity"] == [{"id": "old-2"}]
     assert response.json()["activities_refreshed_at"]
@@ -1031,12 +1102,12 @@ def test_platform_dispatch_evidence_refresh_reloads_history_probes_and_recalcula
     assert states[1]["health_evidence_count"] == 8
     assert states[1]["probe_records"][0]["is_probe_success"] is True
     short_evidence = states[1]["short_evidence_records"]
-    assert states[1]["shortEvidenceRecords"] == short_evidence
+    assert "shortEvidenceRecords" not in states[1]
     assert [item["source_kind"] for item in short_evidence] == ["probe", "error"] + ["usage"] * 6
-    assert short_evidence[0]["sourceKind"] == "probe"
-    assert short_evidence[0]["isProbeSuccess"] is True
+    assert "sourceKind" not in short_evidence[0]
+    assert "isProbeSuccess" not in short_evidence[0]
     recent_requests = states[1]["recent_request_records"]
-    assert states[1]["recentRequestRecords"] == recent_requests
+    assert "recentRequestRecords" not in states[1]
     assert [item["source_kind"] for item in recent_requests] == ["error"] + ["usage"] * 6
     assert all(item["source_kind"] != "probe" for item in recent_requests)
     assert {
@@ -1054,7 +1125,7 @@ def test_platform_dispatch_evidence_refresh_reloads_history_probes_and_recalcula
     assert states[2]["probe_records"][0]["is_probe_success"] is False
     assert states[2]["probe_records"][0]["status_code"] == 503
     assert [item["source_kind"] for item in states[2]["short_evidence_records"]] == ["probe"]
-    assert states[2]["shortEvidenceRecords"] == states[2]["short_evidence_records"]
+    assert "shortEvidenceRecords" not in states[2]
     assert states[2]["short_evidence_records"][0]["is_probe_success"] is False
     assert states[2]["recent_request_records"] == []
 
@@ -1132,14 +1203,15 @@ def test_platform_dispatch_evidence_refresh_keeps_activity_when_history_fails(tm
         started = client.post("/api/platform-dispatch/evidence/refresh")
         job = wait_for_dispatch_job(client)
         cache = client.get("/api/platform-dispatch").json()
+        accounts = client.get("/api/platform-dispatch/accounts").json()["accounts"]
         policy = client.get("/api/platform-dispatch/policy").json()
 
     assert started.status_code == 202
     assert job["status"] == "succeeded"
-    assert cache["accounts"][0]["recent_activity"] == [{"id": "old"}]
+    assert accounts[0]["recent_activity"] == [{"id": "old"}]
     assert cache["activities_refreshed_at"]
     assert "accounts" not in policy
-    state = cache["accounts"][0]
+    state = accounts[0]
     assert state["health_score"] == 10
     assert state["probe_records"][0]["category"] == "probe_failure"
 
@@ -1211,11 +1283,15 @@ def test_platform_dispatch_response_builds_accounts_only_from_non_excluded_group
 
     with TestClient(app) as client:
         login(client)
-        response = client.get("/api/platform-dispatch")
+        metadata_response = client.get("/api/platform-dispatch")
+        response = client.get("/api/platform-dispatch/accounts")
 
+    assert metadata_response.status_code == 200
     assert response.status_code == 200
     payload = response.json()
-    assert [group["id"] for group in payload["groups"]] == [3]
+    assert "accounts" not in metadata_response.json()
+    assert [group["id"] for group in metadata_response.json()["groups"]] == [3]
+    assert payload.keys() == {"ok", "accounts"}
     assert [account["id"] for account in payload["accounts"]] == [1, 3]
     assert payload["accounts"][0]["group_ids"] == [3]
 
@@ -1271,7 +1347,9 @@ def test_platform_dispatch_excluded_group_api_updates_cache_and_conflicts_with_j
     with TestClient(app) as client:
         login(client)
         excluded = client.post("/api/platform-dispatch/groups/2/exclude")
+        excluded_accounts = client.get("/api/platform-dispatch/accounts").json()["accounts"]
         restored = client.delete("/api/platform-dispatch/excluded-groups/2")
+        restored_accounts = client.get("/api/platform-dispatch/accounts").json()["accounts"]
         test_db.exclude_platform_dispatch_group("https://sub.example", 3, "保留组", "")
         test_db.create_platform_dispatch_job("active-job", "accounts_sync", {}, "https://sub.example")
         conflict_exclude = client.post("/api/platform-dispatch/groups/99/exclude")
@@ -1280,11 +1358,13 @@ def test_platform_dispatch_excluded_group_api_updates_cache_and_conflicts_with_j
     assert excluded.status_code == 200
     assert [group["id"] for group in excluded.json()["groups"]] == [3]
     assert [group["id"] for group in excluded.json()["excluded_groups"]] == [2]
-    assert [account["id"] for account in excluded.json()["accounts"]] == [2]
-    assert excluded.json()["accounts"][0]["group_ids"] == [3]
+    assert "accounts" not in excluded.json()
+    assert [account["id"] for account in excluded_accounts] == [2]
+    assert excluded_accounts[0]["group_ids"] == [3]
     assert restored.status_code == 200
     assert restored.json()["excluded_groups"] == []
-    assert [account["id"] for account in restored.json()["accounts"]] == [2]
+    assert "accounts" not in restored.json()
+    assert [account["id"] for account in restored_accounts] == [2]
     assert conflict_exclude.status_code == 409
     assert conflict_restore.status_code == 409
 
@@ -1306,11 +1386,13 @@ def test_platform_dispatch_ungrouped_exclude_api_updates_cache_and_conflicts_wit
     with TestClient(app) as client:
         login(client)
         excluded = client.post("/api/platform-dispatch/ungrouped/exclude")
+        accounts = client.get("/api/platform-dispatch/accounts").json()["accounts"]
         test_db.create_platform_dispatch_job("active-job", "accounts_sync", {}, "https://sub.example")
         conflict = client.post("/api/platform-dispatch/ungrouped/exclude")
 
     assert excluded.status_code == 200
-    assert [account["id"] for account in excluded.json()["accounts"]] == [1]
+    assert "accounts" not in excluded.json()
+    assert [account["id"] for account in accounts] == [1]
     assert excluded.json()["refresh_filter"]["include_ungrouped"] is False
     assert conflict.status_code == 409
 
@@ -1329,9 +1411,11 @@ def test_platform_dispatch_can_exclude_group_referenced_only_by_cached_account(t
     with TestClient(app) as client:
         login(client)
         response = client.post("/api/platform-dispatch/groups/99/exclude")
+        accounts = client.get("/api/platform-dispatch/accounts")
 
     assert response.status_code == 200
-    assert response.json()["accounts"] == []
+    assert "accounts" not in response.json()
+    assert accounts.json()["accounts"] == []
     assert response.json()["excluded_groups"][0]["id"] == 99
     assert response.json()["excluded_groups"][0]["name"] == "分组 99"
 
@@ -1344,40 +1428,62 @@ def test_platform_dispatch_sync_filters_excluded_groups_and_refreshes_their_meta
     class ExcludedGroupClient:
         site_url = "https://sub.example"
 
+        def __init__(self):
+            self.queried_groups = []
+
         async def list_groups(self, platform=None):
             return [
                 {"id": 2, "name": "新名称", "platform": "openai"},
                 {"id": 3, "name": "保留组", "platform": "openai"},
+                {"id": 4, "name": "第二保留组", "platform": "openai"},
             ]
 
         async def list_accounts_page(self, page, page_size, **filters):
             assert page == 1
-            return {
-                "accounts": [
-                    {"id": 1, "name": "only-excluded", "status": "active", "group_ids": [2]},
+            group_id = filters["group_id"]
+            self.queried_groups.append(group_id)
+            if group_id == 3:
+                accounts = [
                     {"id": 2, "name": "multi", "status": "active", "group_ids": [2, 3]},
                     {"id": 3, "name": "included", "status": "active", "group_ids": [3]},
-                    {"id": 4, "name": "ungrouped", "status": "active", "group_ids": []},
-                ],
+                ]
+            elif group_id == 4:
+                accounts = [
+                    {"id": 2, "name": "multi", "status": "active", "groupIds": [2, 4]},
+                ]
+            elif group_id == "ungrouped":
+                accounts = [
+                    {"id": 4, "name": "ungrouped", "status": "active", "group_ids": [2]},
+                ]
+            else:
+                raise AssertionError(f"unexpected group query: {group_id}")
+            return {
+                "accounts": accounts,
                 "page": 1,
                 "page_size": page_size,
-                "total": 4,
+                "total": len(accounts),
                 "pages": 1,
             }
 
-    monkeypatch.setattr("app.main.sub2api_admin_client", lambda: ExcludedGroupClient())
+    admin_client = ExcludedGroupClient()
+    monkeypatch.setattr("app.main.sub2api_admin_client", lambda: admin_client)
 
     with TestClient(app) as client:
         login(client)
         started = client.post("/api/platform-dispatch/sync", json={})
         job = wait_for_dispatch_job(client)
         response = client.get("/api/platform-dispatch").json()
+        accounts = client.get("/api/platform-dispatch/accounts").json()["accounts"]
 
     assert started.status_code == 202
     assert job["status"] == "succeeded"
-    assert [group["id"] for group in response["groups"]] == [3]
-    assert [account["id"] for account in response["accounts"]] == [2, 3, 4]
-    assert response["accounts"][0]["group_ids"] == [3]
+    assert [group["id"] for group in response["groups"]] == [3, 4]
+    assert "accounts" not in response
+    assert admin_client.queried_groups == [3, 4, "ungrouped"]
+    accounts_by_id = {account["id"]: account for account in accounts}
+    assert set(accounts_by_id) == {2, 3, 4}
+    assert accounts_by_id[2]["group_ids"] == [3, 4]
+    assert accounts_by_id[4]["group_ids"] == []
     assert response["excluded_groups"][0]["name"] == "新名称"
     assert response["excluded_groups"][0]["platform"] == "openai"
 
@@ -1407,13 +1513,18 @@ def test_platform_dispatch_response_filters_stale_cache_against_excluded_groups(
     with TestClient(app) as client:
         login(client)
         response = client.get("/api/platform-dispatch")
+        accounts_response = client.get("/api/platform-dispatch/accounts")
 
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
+    assert accounts_response.status_code == 200
+    assert accounts_response.headers["cache-control"] == "no-store"
     payload = response.json()
+    accounts = accounts_response.json()["accounts"]
     assert [group["id"] for group in payload["groups"]] == [23]
-    assert [account["id"] for account in payload["accounts"]] == [3, 4]
-    assert payload["accounts"][0]["group_ids"] == [23]
+    assert "accounts" not in payload
+    assert [account["id"] for account in accounts] == [3, 4]
+    assert accounts[0]["group_ids"] == [23]
     assert [group["id"] for group in payload["excluded_groups"]] == [11, 19]
 
 
@@ -1449,20 +1560,24 @@ def test_platform_dispatch_sync_can_exclude_ungrouped_accounts(tmp_path, monkeyp
     class AccountClient:
         site_url = "https://sub.example"
 
+        def __init__(self):
+            self.queried_groups = []
+
         async def list_groups(self, platform=None):
             return [{"id": 2, "name": "主分组", "platform": "openai"}]
 
         async def list_accounts_page(self, page, page_size, **filters):
+            self.queried_groups.append(filters["group_id"])
             return {
                 "accounts": [
                     {"id": 1, "name": "grouped", "status": "active", "group_ids": [2]},
-                    {"id": 2, "name": "ungrouped", "status": "active", "group_ids": []},
                 ],
-                "total": 2,
+                "total": 1,
                 "pages": 1,
             }
 
-    monkeypatch.setattr("app.main.sub2api_admin_client", lambda: AccountClient())
+    admin_client = AccountClient()
+    monkeypatch.setattr("app.main.sub2api_admin_client", lambda: admin_client)
 
     with TestClient(app) as client:
         login(client)
@@ -1470,9 +1585,12 @@ def test_platform_dispatch_sync_can_exclude_ungrouped_accounts(tmp_path, monkeyp
         started = client.post("/api/platform-dispatch/sync", json={"includeUngrouped": False})
         job = wait_for_dispatch_job(client)
         response = client.get("/api/platform-dispatch").json()
+        accounts = client.get("/api/platform-dispatch/accounts").json()["accounts"]
 
     assert invalid.status_code == 400
     assert started.status_code == 202
     assert job["status"] == "succeeded"
-    assert [account["id"] for account in response["accounts"]] == [1]
+    assert admin_client.queried_groups == [2]
+    assert "accounts" not in response
+    assert [account["id"] for account in accounts] == [1]
     assert response["refresh_filter"]["include_ungrouped"] is False

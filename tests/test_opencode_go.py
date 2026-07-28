@@ -674,17 +674,17 @@ def test_opencode_go_settings_save_js_url(tmp_path, monkeypatch):
     assert saved.json()["settings"]["key_list_js_url"] == "https://opencode.ai/_build/assets/index-PbCOrg8_.js"
     assert saved.json()["settings"]["key_list_server_id"] == "e" * 64
     assert saved.json()["settings"]["query_interval"] == 900
-    assert saved.json()["settings"]["queryInterval"] == 900
+    assert "queryInterval" not in saved.json()["settings"]
     assert saved.json()["settings"]["monitor_paused"] is True
-    assert saved.json()["settings"]["monitorPaused"] is True
+    assert "monitorPaused" not in saved.json()["settings"]
     assert loaded.json()["settings"]["lite_subscription_js_url"] == "https://opencode.ai/_build/assets/index-DtPYjwk4.js"
     assert loaded.json()["settings"]["lite_subscription_server_id"] == "d" * 64
     assert loaded.json()["settings"]["key_list_js_url"] == "https://opencode.ai/_build/assets/index-PbCOrg8_.js"
     assert loaded.json()["settings"]["key_list_server_id"] == "e" * 64
     assert loaded.json()["settings"]["query_interval"] == 900
-    assert loaded.json()["settings"]["queryInterval"] == 900
+    assert "queryInterval" not in loaded.json()["settings"]
     assert loaded.json()["settings"]["monitor_paused"] is True
-    assert loaded.json()["settings"]["monitorPaused"] is True
+    assert "monitorPaused" not in loaded.json()["settings"]
     assert db.get_setting("opencode_go_lite_subscription_js_url") == "https://opencode.ai/_build/assets/index-DtPYjwk4.js"
     assert db.get_setting("opencode_go_lite_subscription_server_id") == "d" * 64
     assert db.get_setting("opencode_go_key_list_js_url") == "https://opencode.ai/_build/assets/index-PbCOrg8_.js"
@@ -715,10 +715,11 @@ def test_opencode_go_cpa_auto_delete_setting_defaults_off_and_persists(tmp_path,
 
     assert initial.status_code == 200
     assert initial.json()["settings"]["cpa_auto_delete_enabled"] is False
-    assert initial.json()["settings"]["cpaAutoDeleteEnabled"] is False
+    assert "cpaAutoDeleteEnabled" not in initial.json()["settings"]
     assert invalid.status_code == 400
     assert enabled.json()["settings"]["cpa_auto_delete_enabled"] is True
-    assert loaded.json()["settings"]["cpaAutoDeleteEnabled"] is True
+    assert loaded.json()["settings"]["cpa_auto_delete_enabled"] is True
+    assert "cpaAutoDeleteEnabled" not in loaded.json()["settings"]
     assert disabled.json()["settings"]["cpa_auto_delete_enabled"] is False
     assert db.get_setting("opencode_go_cpa_auto_delete_enabled") == "0"
 
@@ -879,13 +880,13 @@ def test_opencode_go_accounts_summary_averages_only_normal_eligible_accounts(tmp
     assert "summary00@example.com" not in first_page_emails
     assert "summary01@example.com" not in first_page_emails
     assert summary["eligible_account_count"] == 2
-    assert summary["eligibleAccountCount"] == 2
+    assert "eligibleAccountCount" not in summary
     assert summary["overall_rolling_usage_percent"] == pytest.approx(5.0)
-    assert summary["overallRollingUsagePercent"] == pytest.approx(5.0)
+    assert "overallRollingUsagePercent" not in summary
     assert summary["overall_weekly_usage_percent"] == pytest.approx(59.45)
-    assert summary["overallWeeklyUsagePercent"] == pytest.approx(59.45)
+    assert "overallWeeklyUsagePercent" not in summary
     assert summary["overall_monthly_usage_percent"] == pytest.approx(40.0)
-    assert summary["overallMonthlyUsagePercent"] == pytest.approx(40.0)
+    assert "overallMonthlyUsagePercent" not in summary
 
 
 def test_opencode_go_accounts_summary_returns_null_when_no_eligible_accounts(tmp_path, monkeypatch):

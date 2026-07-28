@@ -1,4 +1,4 @@
-from app.main import _safe_request_payload
+from app.main import _safe_request_payload, _without_redundant_case_aliases
 
 
 class DummyRequest:
@@ -25,3 +25,22 @@ def test_request_logging_masks_sensitive_form_fields():
     assert "user@example.com" not in logged
     assert "Bearer secret" not in logged
     assert "visible" in logged
+
+
+def test_api_response_alias_cleanup_is_recursive_and_preserves_unique_keys():
+    payload = {
+        "site_url": "https://example.com",
+        "siteUrl": "https://example.com",
+        "newApi": [
+            {
+                "has_api_key": True,
+                "hasApiKey": True,
+                "camelOnly": "kept",
+            }
+        ],
+    }
+
+    assert _without_redundant_case_aliases(payload) == {
+        "site_url": "https://example.com",
+        "newApi": [{"has_api_key": True, "camelOnly": "kept"}],
+    }

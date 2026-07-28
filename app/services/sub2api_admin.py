@@ -49,7 +49,7 @@ class Sub2ApiAdminClient:
         account_type: str | None = None,
         status: str | None = None,
         search: str | None = None,
-        group_id: int | None = None,
+        group_id: int | str | None = None,
     ) -> list[dict[str, Any]]:
         page = 1
         result: list[dict[str, Any]] = []
@@ -88,7 +88,7 @@ class Sub2ApiAdminClient:
         account_type: str | None = None,
         status: str | None = None,
         search: str | None = None,
-        group_id: int | None = None,
+        group_id: int | str | None = None,
     ) -> dict[str, Any]:
         page = max(1, int(page))
         page_size = max(1, min(100, int(page_size)))
@@ -102,8 +102,7 @@ class Sub2ApiAdminClient:
         if search:
             params["search"] = search
         if group_id is not None:
-            params["group"] = int(group_id)
-            params["group_id"] = int(group_id)
+            params["group"] = _account_group_query_value(group_id)
         params.update({"page": page, "page_size": page_size})
         payload = await self._request("GET", "/api/v1/admin/accounts", params=params)
         records = _extract_sub2api_list(payload, ("accounts", "items", "records", "rows", "list", "data"))
@@ -270,7 +269,6 @@ class Sub2ApiAdminClient:
             "groups": [public_dispatch_group(group) for group in groups],
             "warnings": _unique_strings(warnings),
             "recent_limit": recent_limit,
-            "recentLimit": recent_limit,
         }
 
     async def update_account_schedulable(self, account_id: int, schedulable: bool) -> dict[str, Any]:
@@ -588,6 +586,18 @@ def _normalize_account_name(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
+def _account_group_query_value(value: int | str) -> int | str:
+    if isinstance(value, str) and value.strip().lower() == "ungrouped":
+        return "ungrouped"
+    try:
+        group_id = int(value)
+    except (TypeError, ValueError) as exc:
+        raise Sub2ApiAdminError("Sub2API 账号分组筛选值无效") from exc
+    if group_id <= 0:
+        raise Sub2ApiAdminError("Sub2API 账号分组 ID 必须是正整数")
+    return group_id
+
+
 def _normalize_model_ids(models: list[Any]) -> list[str]:
     seen = set()
     result = []
@@ -617,28 +627,17 @@ def public_dispatch_account(account: dict[str, Any], recent_activity: list[dict[
         "type": str(account.get("type") or ""),
         "status": status,
         "filter_status": filter_status,
-        "filterStatus": filter_status,
         "is_enabled": status == "active",
-        "isEnabled": status == "active",
         "error_message": str(account.get("error_message") or ""),
-        "errorMessage": str(account.get("error_message") or ""),
         "group_ids": group_ids,
-        "groupIds": group_ids,
         "groups": public_groups,
         "last_used_at": account.get("last_used_at"),
-        "lastUsedAt": account.get("last_used_at"),
         "created_at": account.get("created_at"),
-        "createdAt": account.get("created_at"),
         "updated_at": account.get("updated_at"),
-        "updatedAt": account.get("updated_at"),
         "rate_limit_reset_at": account.get("rate_limit_reset_at"),
-        "rateLimitResetAt": account.get("rate_limit_reset_at"),
         "overload_until": account.get("overload_until"),
-        "overloadUntil": account.get("overload_until"),
         "temp_unschedulable_until": account.get("temp_unschedulable_until"),
-        "tempUnschedulableUntil": account.get("temp_unschedulable_until"),
         "recent_activity": recent_activity,
-        "recentActivity": recent_activity,
     }
     if "priority" in account:
         result["priority"] = _non_negative_int(account.get("priority"))
@@ -646,7 +645,6 @@ def public_dispatch_account(account: dict[str, Any], recent_activity: list[dict[
         result["concurrency"] = _non_negative_int(account.get("concurrency"))
     if "load_factor" in account:
         result["load_factor"] = _positive_int(account.get("load_factor"))
-        result["loadFactor"] = result["load_factor"]
     if "schedulable" in account:
         result["schedulable"] = account.get("schedulable") is not False
     return result
@@ -661,7 +659,6 @@ def public_dispatch_group(group: dict[str, Any]) -> dict[str, Any]:
         "platform": str(group.get("platform") or ""),
         "status": str(group.get("status") or ""),
         "rate_multiplier": _optional_number(group.get("rate_multiplier")),
-        "rateMultiplier": _optional_number(group.get("rate_multiplier")),
     }
 
 
@@ -677,39 +674,24 @@ def normalize_sub2api_usage_record(record: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": f"usage-{record.get('id')}",
         "source_id": record.get("id"),
-        "sourceId": record.get("id"),
         "kind": "success",
         "is_error": False,
-        "isError": False,
         "user_id": _positive_int(record.get("user_id")) or _positive_int(user.get("id")),
-        "userId": _positive_int(record.get("user_id")) or _positive_int(user.get("id")),
         "user_email": str(user.get("email") or record.get("user_email") or ""),
-        "userEmail": str(user.get("email") or record.get("user_email") or ""),
         "model": str(record.get("upstream_model") or record.get("model") or ""),
         "requested_model": str(record.get("model") or ""),
-        "requestedModel": str(record.get("model") or ""),
         "input_tokens": input_tokens,
-        "inputTokens": input_tokens,
         "output_tokens": output_tokens,
-        "outputTokens": output_tokens,
         "cache_tokens": cache_creation_tokens + cache_read_tokens,
-        "cacheTokens": cache_creation_tokens + cache_read_tokens,
         "total_tokens": total_tokens,
-        "totalTokens": total_tokens,
         "cost": actual_cost if actual_cost is not None else total_cost,
         "actual_cost": actual_cost,
-        "actualCost": actual_cost,
         "total_cost": total_cost,
-        "totalCost": total_cost,
         "first_token_ms": _optional_number(record.get("first_token_ms")),
-        "firstTokenMs": _optional_number(record.get("first_token_ms")),
         "duration_ms": _optional_number(record.get("duration_ms")),
-        "durationMs": _optional_number(record.get("duration_ms")),
         "status_code": 200,
-        "statusCode": 200,
         "message": "",
         "created_at": record.get("created_at"),
-        "createdAt": record.get("created_at"),
     }
 
 
@@ -722,40 +704,25 @@ def normalize_sub2api_error_record(record: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": f"error-{record.get('id')}",
         "source_id": record.get("id"),
-        "sourceId": record.get("id"),
         "kind": "error",
         "is_error": True,
-        "isError": True,
         "user_id": _positive_int(record.get("user_id")),
-        "userId": _positive_int(record.get("user_id")),
         "user_email": str(record.get("user_email") or ""),
-        "userEmail": str(record.get("user_email") or ""),
         "model": model,
         "requested_model": str(record.get("requested_model") or record.get("model") or ""),
-        "requestedModel": str(record.get("requested_model") or record.get("model") or ""),
         "input_tokens": None,
-        "inputTokens": None,
         "output_tokens": None,
-        "outputTokens": None,
         "cache_tokens": None,
-        "cacheTokens": None,
         "total_tokens": None,
-        "totalTokens": None,
         "cost": None,
         "actual_cost": None,
-        "actualCost": None,
         "total_cost": None,
-        "totalCost": None,
         "first_token_ms": first_token_ms,
-        "firstTokenMs": first_token_ms,
         "duration_ms": duration_ms,
-        "durationMs": duration_ms,
         "status_code": _non_negative_int(record.get("status_code")),
-        "statusCode": _non_negative_int(record.get("status_code")),
         "message": str(record.get("message") or record.get("type") or "请求失败"),
         "phase": str(record.get("phase") or ""),
         "created_at": record.get("created_at"),
-        "createdAt": record.get("created_at"),
     }
 
 

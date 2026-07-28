@@ -35,6 +35,7 @@ export const api = {
   dashboard: (params = {}) => request(`/api/dashboard${queryString(params)}`),
   dashboardConsumptionSummary: (params = {}) => request(`/api/dashboard/consumption-summary${queryString(params)}`),
   platformDispatch: () => request("/api/platform-dispatch"),
+  platformDispatchAccounts: () => request("/api/platform-dispatch/accounts"),
   platformDispatchPolicy: () => request("/api/platform-dispatch/policy"),
   savePlatformDispatchPolicy: (payload) => request("/api/platform-dispatch/policy", { method: "PUT", body: JSON.stringify(payload) }),
   runPlatformDispatchPolicy: () => request("/api/platform-dispatch/policy/run", { method: "POST" }),
