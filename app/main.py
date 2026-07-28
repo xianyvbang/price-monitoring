@@ -26,6 +26,7 @@ from app.models import (
     actual_consumption_amount,
     actual_consumption_stats,
     format_china_time,
+    filter_platform_dispatch_accounts_by_available_groups,
     filter_platform_dispatch_accounts_by_groups,
     monitor_group_to_dict,
     reminder_to_dict,
@@ -1962,6 +1963,55 @@ async def api_platform_dispatch_group_probe_model_update(request: Request, group
         f"探活模型已{'设置为 ' + configured_model if configured_model else '恢复默认'}",
     )
     return platform_dispatch_policy_response()
+
+
+@app.put("/api/platform-dispatch/groups/{group_id}/auto-dispatch")
+async def api_platform_dispatch_group_auto_dispatch_update(request: Request, group_id: int):
+    require_user(request)
+    if group_id <= 0:
+        return JSONResponse({"ok": False, "message": "分组 ID 必须是正整数"}, status_code=400)
+    if db.has_active_platform_dispatch_job():
+        return JSONResponse(
+            {"ok": False, "message": "平台调度任务执行期间不能修改分组参与状态"},
+            status_code=409,
+        )
+    if platform_dispatch_policy_scheduler.lock.locked():
+        return JSONResponse(
+            {"ok": False, "message": "自动调度策略执行期间不能修改分组参与状态"},
+            status_code=409,
+        )
+    try:
+        payload = await request.json()
+    except (TypeError, ValueError, json.JSONDecodeError):
+        payload = None
+    if not isinstance(payload, dict) or not isinstance(payload.get("enabled"), bool):
+        return JSONResponse({"ok": False, "message": "enabled 必须是布尔值"}, status_code=400)
+
+    site_url = db.get_setting(SUB2API_SITE_URL_SETTING, "").strip().rstrip("/")
+    cache = db.get_platform_dispatch_cache()
+    if not cache or cache.get("source_site_url") != site_url:
+        return JSONResponse({"ok": False, "message": "请先同步当前站点的分组信息"}, status_code=409)
+    group = next(
+        (
+            item
+            for item in cache.get("groups") or []
+            if isinstance(item, dict) and _platform_dispatch_account_id(item) == group_id
+        ),
+        None,
+    )
+    if group is None:
+        return JSONResponse({"ok": False, "message": "分组不存在或已经被排除"}, status_code=404)
+
+    enabled = payload["enabled"]
+    db.set_platform_dispatch_group_auto_dispatch_enabled(site_url, group_id, enabled)
+    platform_dispatch_policy_scheduler.notify_changed()
+    db.add_log(
+        "info",
+        "platform-dispatch-policy",
+        f"Sub2API 调度分组 {group.get('name') or group_id} (#{group_id}) "
+        f"已{'参与' if enabled else '退出'}自动调度",
+    )
+    return platform_dispatch_cache_response()
 
 
 @app.post("/api/platform-dispatch/policy/run")
@@ -4478,18 +4528,29 @@ async def _run_platform_dispatch_account_sync_locked(
                 account_id = _platform_dispatch_account_id(account)
                 if account_id:
                     old_activity[account_id] = account.get("recent_activity", account.get("recentActivity", [])) or []
-        filtered_accounts = filter_platform_dispatch_accounts_by_groups(raw_accounts, excluded_group_ids)
+        public_groups = [
+            public_dispatch_group(group)
+            for group in groups
+            if _platform_dispatch_account_id(group) not in excluded_group_ids
+        ]
+        available_group_ids = {
+            _platform_dispatch_account_id(group)
+            for group in public_groups
+            if _platform_dispatch_account_id(group)
+        }
+        filtered_accounts = (
+            filter_platform_dispatch_accounts_by_available_groups(
+                raw_accounts, available_group_ids
+            )
+            if excluded_group_ids
+            else raw_accounts
+        )
         public_accounts = [
             public_dispatch_account(account, old_activity.get(_platform_dispatch_account_id(account), []))
             for account in filtered_accounts
         ]
         if not refresh_filter["include_ungrouped"]:
             public_accounts = [account for account in public_accounts if _cached_platform_dispatch_group_ids(account)]
-        public_groups = [
-            public_dispatch_group(group)
-            for group in groups
-            if _platform_dispatch_account_id(group) not in excluded_group_ids
-        ]
         db.replace_platform_dispatch_cache(
             admin_client.site_url,
             public_accounts,
@@ -4534,7 +4595,19 @@ async def _run_platform_dispatch_evidence_refresh_locked(
     snapshot: dict[str, Any],
 ) -> None:
     accounts = [account for account in snapshot.get("accounts") or [] if isinstance(account, dict)]
-    total = len(accounts)
+    policy = db.get_platform_dispatch_policy(POLICY_DEFAULTS)["config"]
+    excluded_account_ids = {int(value) for value in policy.get("excluded_account_ids") or []}
+    candidates = [
+        account
+        for account in accounts
+        if _platform_dispatch_account_id(account) not in excluded_account_ids
+    ]
+    total = len(
+        filter_platform_dispatch_accounts_by_groups(
+            candidates,
+            db.disabled_platform_dispatch_group_ids(admin_client.site_url),
+        )
+    )
 
     def update_progress(phase: str, processed: int, phase_total: int) -> None:
         denominator = max(1, phase_total)
@@ -4735,6 +4808,7 @@ def platform_dispatch_cache_response() -> dict[str, Any]:
         public_platform_dispatch_excluded_group(group)
         for group in excluded_group_rows
     ]
+    excluded_group_ids = {int(group["id"]) for group in excluded_groups}
     if cache is None:
         accounts: list[dict[str, Any]] = []
         groups: list[dict[str, Any]] = []
@@ -4760,6 +4834,33 @@ def platform_dispatch_cache_response() -> dict[str, Any]:
         activities_refreshed_at = cache["activities_refreshed_at"] or None
         refreshed_at = cache["refreshed_at"]
         source_site_url = cache["source_site_url"]
+    groups = [
+        group
+        for group in groups
+        if not isinstance(group, dict)
+        or _platform_dispatch_account_id(group) not in excluded_group_ids
+    ]
+    available_group_ids = {
+        _platform_dispatch_account_id(group)
+        for group in groups
+        if isinstance(group, dict) and _platform_dispatch_account_id(group)
+    }
+    if excluded_group_ids:
+        accounts = filter_platform_dispatch_accounts_by_available_groups(
+            accounts, available_group_ids
+        )
+    group_auto_dispatch_settings = (
+        db.get_platform_dispatch_group_auto_dispatch_settings(source_site_url)
+        if source_site_url
+        else {}
+    )
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        group_id = _platform_dispatch_account_id(group)
+        enabled = group_auto_dispatch_settings.get(group_id, True)
+        group["auto_dispatch_enabled"] = enabled
+        group["autoDispatchEnabled"] = enabled
     for account in accounts:
         if isinstance(account, dict):
             account.pop("rate_multiplier", None)

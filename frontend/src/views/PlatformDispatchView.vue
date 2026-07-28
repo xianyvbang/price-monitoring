@@ -58,6 +58,7 @@ const updatingExcludedAccountIds = ref(new Set());
 const probingAccountIds = ref(new Set());
 const updatingProbeModelIds = ref(new Set());
 const updatingGroupProbeModelIds = ref(new Set());
+const updatingGroupAutoDispatchIds = ref(new Set());
 const excludingUngrouped = ref(false);
 const costBindingDialog = ref(false);
 const costBindingAccount = ref(null);
@@ -204,6 +205,16 @@ const includedAccounts = computed(() => {
   });
 });
 
+const bulkParticipatingAccountCount = computed(() => {
+  const enabledByGroupId = new Map(
+    groups.value.map((group) => [Number(group.id), groupAutoDispatchEnabled(group)])
+  );
+  return includedAccounts.value.filter((account) => {
+    const groupIds = accountGroupIds(account);
+    return !groupIds.length || groupIds.some((groupId) => enabledByGroupId.get(groupId) !== false);
+  }).length;
+});
+
 const excludedAccounts = computed(() => {
   const accountsById = new Map(accounts.value.map((account) => [Number(account.id), account]));
   return [...excludedAccountIdSet.value]
@@ -232,16 +243,15 @@ const filteredAccounts = computed(() => {
 
 const groupSections = computed(() => {
   const knownGroups = new Map(groups.value.map((group) => [Number(group.id), group]));
-  const allGroupIds = new Set();
-  filteredAccounts.value.forEach((account) => accountGroupIds(account).forEach((id) => allGroupIds.add(id)));
   const sections = [];
 
-  allGroupIds.forEach((id) => {
-    const group = knownGroups.get(id) || { id, name: `分组 ${id}`, platform: "", status: "" };
+  knownGroups.forEach((group, id) => {
+    const groupAccounts = filteredAccounts.value.filter((account) => accountGroupIds(account).includes(id));
+    if (!groupAccounts.length) return;
     sections.push({
       key: `group-${id}`,
       group,
-      accounts: filteredAccounts.value.filter((account) => accountGroupIds(account).includes(id))
+      accounts: groupAccounts
     });
   });
 
@@ -644,7 +654,7 @@ async function startAccountSync() {
 async function startEvidenceRefresh() {
   try {
     await ElMessageBox.confirm(
-      `将为全部 ${accounts.value.length} 个已同步账号重新拉取最近的使用和错误证据，逐个执行探活，并重新计算短期分、长期分和健康分。`,
+      `将为 ${bulkParticipatingAccountCount.value} 个参与自动调度的账号重新拉取最近的使用和错误证据，逐个执行探活，并重新计算短期分、长期分和健康分。`,
       "重新获取健康证据",
       { confirmButtonText: "开始获取", cancelButtonText: "取消", type: "info" }
     );
@@ -812,6 +822,38 @@ function accountGroupProbeModel(account) {
     return { model, groupId, groupName: group?.name || `分组 ${groupId}` };
   }
   return null;
+}
+
+function groupAutoDispatchEnabled(group) {
+  return (group?.auto_dispatch_enabled ?? group?.autoDispatchEnabled) !== false;
+}
+
+async function setGroupAutoDispatch(group, enabled) {
+  const groupId = excludedGroupId(group);
+  if (!groupId) return;
+  setGroupAutoDispatchUpdating(groupId, true);
+  try {
+    applyDispatchPayload(await api.setPlatformDispatchGroupAutoDispatch(groupId, Boolean(enabled)));
+    ElMessage.success(enabled ? "该分组已参与自动调度" : "该分组已退出自动调度");
+  } catch (error) {
+    if (error.status === 409) {
+      await refreshPolicyRuntime().catch(() => {});
+    }
+    ElMessage.error(error.message || "更新分组参与状态失败");
+  } finally {
+    setGroupAutoDispatchUpdating(groupId, false);
+  }
+}
+
+function setGroupAutoDispatchUpdating(groupId, updating) {
+  const next = new Set(updatingGroupAutoDispatchIds.value);
+  if (updating) next.add(groupId);
+  else next.delete(groupId);
+  updatingGroupAutoDispatchIds.value = next;
+}
+
+function isGroupAutoDispatchUpdating(group) {
+  return updatingGroupAutoDispatchIds.value.has(Number(group?.id));
 }
 
 function groupPlatformDefaultProbeModel(group) {
@@ -1684,13 +1726,13 @@ onBeforeUnmount(() => {
       </el-form-item>
     </el-form>
 
-    <section v-if="hasCache && excludedAccounts.length" class="dispatch-excluded-accounts">
+    <section v-if="hasCache && excludedAccounts.length" class="dispatch-excluded-panel">
       <header>
         <strong>已排除账号</strong>
         <el-tag size="small" type="info" effect="plain">{{ excludedAccounts.length }}</el-tag>
       </header>
-      <div class="dispatch-excluded-account-grid">
-        <div v-for="account in excludedAccounts" :key="account.id" class="dispatch-excluded-account-row">
+      <div class="dispatch-excluded-grid">
+        <div v-for="account in excludedAccounts" :key="account.id" class="dispatch-excluded-item">
           <div>
             <strong>{{ account.name || `账号 ${account.id}` }}</strong>
             <span>#{{ account.id }}</span>
@@ -1712,6 +1754,39 @@ onBeforeUnmount(() => {
       </div>
     </section>
 
+    <section v-if="hasCache && excludedGroups.length" class="dispatch-excluded-panel">
+      <header>
+        <strong>已排除分组</strong>
+        <el-tag size="small" type="info" effect="plain">{{ excludedGroups.length }}</el-tag>
+      </header>
+      <div class="dispatch-excluded-grid">
+        <div
+          v-for="excludedGroup in excludedGroups"
+          :key="excludedGroupId(excludedGroup)"
+          class="dispatch-excluded-item"
+        >
+          <div>
+            <strong>{{ excludedGroupName(excludedGroup) }}</strong>
+            <span>#{{ excludedGroupId(excludedGroup) }}</span>
+            <el-tag v-if="excludedGroupPlatform(excludedGroup)" size="small" effect="plain">
+              {{ excludedGroupPlatform(excludedGroup) }}
+            </el-tag>
+          </div>
+          <el-tooltip content="取消排除">
+            <el-button
+              circle
+              text
+              :icon="CircleClose"
+              :loading="isUpdatingGroup(excludedGroup)"
+              :disabled="dispatchMutationDisabled || policySaving"
+              :aria-label="`取消排除 ${excludedGroupName(excludedGroup)}`"
+              @click="restoreExcludedGroup(excludedGroup)"
+            />
+          </el-tooltip>
+        </div>
+      </div>
+    </section>
+
     <div v-if="groupSections.length" class="dispatch-groups">
       <section v-for="section in groupSections" :key="section.key" class="dispatch-group">
         <header class="dispatch-group-head">
@@ -1721,8 +1796,16 @@ onBeforeUnmount(() => {
             <el-tag v-if="section.group.status" size="small" :type="section.group.status === 'active' ? 'success' : 'info'">
               {{ section.group.status === "active" ? "启用" : "停用" }}
             </el-tag>
+            <el-tag
+              v-if="section.group.id && !groupAutoDispatchEnabled(section.group)"
+              size="small"
+              type="info"
+              effect="plain"
+            >
+              不参与自动调度
+            </el-tag>
             <span>{{ section.accounts.length }} 个账号</span>
-            <span v-if="groupAvailabilityByKey.get(section.key)" class="group-availability">
+            <span v-if="groupAutoDispatchEnabled(section.group) && groupAvailabilityByKey.get(section.key)" class="group-availability">
               健康可用 {{ groupAvailabilityByKey.get(section.key).available_accounts }} / 每组目标 {{ groupAvailabilityTarget(groupAvailabilityByKey.get(section.key)) }}
             </span>
             <span v-if="section.group.id" class="group-probe-model" :title="groupProbeModel(section.group) || policyConfig.default_probe_model || 'Sub2API 默认'">
@@ -1730,6 +1813,16 @@ onBeforeUnmount(() => {
             </span>
           </div>
           <div class="dispatch-group-actions">
+            <label v-if="section.group.id" class="group-auto-dispatch-control">
+              <span>参与自动调度</span>
+              <el-switch
+                :model-value="groupAutoDispatchEnabled(section.group)"
+                :loading="isGroupAutoDispatchUpdating(section.group)"
+                :disabled="dispatchMutationDisabled || isGroupAutoDispatchUpdating(section.group)"
+                :aria-label="`${section.group.name}参与自动调度`"
+                @change="setGroupAutoDispatch(section.group, $event)"
+              />
+            </label>
             <el-tooltip v-if="section.group.id" content="设置分组探活模型">
               <el-button
                 circle
@@ -2675,30 +2768,30 @@ onBeforeUnmount(() => {
   width: 100%;
 }
 
-.dispatch-excluded-accounts {
+.dispatch-excluded-panel {
   border: 1px solid var(--line);
   border-radius: 8px;
   margin-bottom: 16px;
   overflow: hidden;
 }
 
-.dispatch-excluded-accounts > header,
-.dispatch-excluded-account-row {
+.dispatch-excluded-panel > header,
+.dispatch-excluded-item {
   align-items: center;
   display: flex;
   justify-content: space-between;
 }
 
-.dispatch-excluded-accounts > header {
+.dispatch-excluded-panel > header {
   background: var(--panel-soft);
   padding: 8px 12px;
 }
 
-.dispatch-excluded-accounts > header strong {
+.dispatch-excluded-panel > header strong {
   font-size: 12px;
 }
 
-.dispatch-excluded-account-grid {
+.dispatch-excluded-grid {
   background: var(--panel-soft);
   display: grid;
   gap: 8px;
@@ -2706,7 +2799,7 @@ onBeforeUnmount(() => {
   padding: 8px;
 }
 
-.dispatch-excluded-account-row {
+.dispatch-excluded-item {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -2715,7 +2808,7 @@ onBeforeUnmount(() => {
   padding: 6px 8px 6px 12px;
 }
 
-.dispatch-excluded-account-row > div {
+.dispatch-excluded-item > div {
   align-items: center;
   display: flex;
   flex-wrap: wrap;
@@ -2723,12 +2816,12 @@ onBeforeUnmount(() => {
   min-width: 0;
 }
 
-.dispatch-excluded-account-row strong {
+.dispatch-excluded-item strong {
   font-size: 13px;
   overflow-wrap: anywhere;
 }
 
-.dispatch-excluded-account-row span {
+.dispatch-excluded-item span {
   color: var(--muted);
   font-size: 12px;
 }
@@ -2764,6 +2857,16 @@ onBeforeUnmount(() => {
   display: flex;
   flex: none;
   gap: 2px;
+}
+
+.group-auto-dispatch-control {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  font-size: 12px;
+  gap: 7px;
+  margin-right: 6px;
+  white-space: nowrap;
 }
 
 .dispatch-group-title h2 {
@@ -3217,21 +3320,21 @@ onBeforeUnmount(() => {
 }
 
 @media (min-width: 768px) {
-  .dispatch-excluded-account-grid,
+  .dispatch-excluded-grid,
   .dispatch-account-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
 @media (min-width: 1100px) {
-  .dispatch-excluded-account-grid,
+  .dispatch-excluded-grid,
   .dispatch-account-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
 @media (min-width: 1500px) {
-  .dispatch-excluded-account-grid,
+  .dispatch-excluded-grid,
   .dispatch-account-grid {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
@@ -3314,7 +3417,13 @@ onBeforeUnmount(() => {
 
   .dispatch-group-head {
     align-items: flex-start;
+    flex-wrap: wrap;
     gap: 8px;
+  }
+
+  .dispatch-group-actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
   }
 
   .short-evidence-summary > small {

@@ -375,13 +375,13 @@ class PolicyClient:
         self.groups = groups or []
         self.oauth_accounts = oauth_accounts
         self.account_read_filters = []
+        self.usage_reads = []
+        self.error_reads = []
         self.probes = []
         self.probe_models = []
         self.updates = []
         self.field_payloads = []
         self.realtime_reads = 0
-        self.usage_reads = []
-        self.error_reads = []
 
     async def list_accounts(self, **kwargs):
         self.account_read_filters.append(dict(kwargs))
@@ -436,6 +436,104 @@ def prepare_cache(db, accounts, groups=None):
     db.replace_platform_dispatch_cache(
         "https://sub.example", accounts, groups or [], [], {"platform": "", "type": "", "status": ""}
     )
+
+
+@pytest.mark.asyncio
+async def test_disabled_group_skips_bulk_policy_but_keeps_multi_group_and_cache_membership(tmp_path):
+    db = make_db(tmp_path)
+    accounts = [
+        {"id": 1, "name": "disabled-only", "status": "active", "schedulable": True, "group_ids": [10]},
+        {"id": 2, "name": "enabled-only", "status": "active", "schedulable": True, "group_ids": [20]},
+        {"id": 3, "name": "multi", "status": "active", "schedulable": True, "group_ids": [10, 20]},
+        {"id": 4, "name": "ungrouped", "status": "active", "schedulable": True, "group_ids": []},
+    ]
+    groups = [{"id": 10, "name": "disabled"}, {"id": 20, "name": "enabled"}]
+    prepare_cache(db, accounts, groups)
+    db.set_platform_dispatch_group_auto_dispatch_enabled("https://sub.example", 10, False)
+    db.upsert_platform_dispatch_account_state(
+        "https://sub.example", 1, name="disabled-only", health_score=42, evidence_count=7
+    )
+    db.save_platform_dispatch_policy({**POLICY_DEFAULTS, "enabled": True}, "https://sub.example")
+    client = PolicyClient(accounts, groups)
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+
+    summary = await scheduler.run_once()
+
+    assert client.usage_reads == [(2, 60), (3, 60), (4, 60)]
+    assert client.error_reads == [(2, 60), (3, 60), (4, 60)]
+    assert client.probes == [2, 3, 4]
+    assert client.updates == []
+    assert summary["managed_accounts"] == 3
+    assert summary["groups"] == 1
+    assert [item["pool_key"] for item in summary["group_availability"]] == [
+        "group-20",
+        "ungrouped",
+    ]
+    assert summary["group_availability"][0]["managed_accounts"] == 2
+    assert db.get_platform_dispatch_account_state("https://sub.example", 1)["health_score"] == 42
+
+    cache = db.get_platform_dispatch_cache()
+    assert [account["id"] for account in cache["accounts"]] == [1, 2, 3, 4]
+    multi = next(account for account in cache["accounts"] if account["id"] == 3)
+    assert multi["group_ids"] == [10, 20]
+    assert [group["id"] for group in cache["groups"]] == [10, 20]
+
+
+@pytest.mark.asyncio
+async def test_disabled_group_bulk_refresh_skips_account_but_manual_probe_still_updates_it(tmp_path):
+    db = make_db(tmp_path)
+    accounts = [
+        {"id": 1, "name": "disabled", "status": "active", "group_ids": [10]},
+        {"id": 2, "name": "enabled", "status": "active", "group_ids": [20]},
+    ]
+    groups = [{"id": 10, "name": "disabled"}, {"id": 20, "name": "enabled"}]
+    prepare_cache(db, accounts, groups)
+    db.set_platform_dispatch_group_auto_dispatch_enabled("https://sub.example", 10, False)
+    client = PolicyClient(accounts, groups)
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+
+    summary = await scheduler.refresh_health_evidence(client, db.get_platform_dispatch_cache())
+
+    assert summary["refreshed_accounts"] == 1
+    assert client.usage_reads == [(2, 60)]
+    assert client.error_reads == [(2, 60)]
+    assert client.probes == [2]
+    assert db.list_platform_dispatch_evidence("https://sub.example", 1) == []
+
+    result = await scheduler.probe_account_health(
+        client, db.get_platform_dispatch_cache(), 1
+    )
+
+    assert result["success"] is True
+    assert client.probes == [2, 1]
+    assert db.list_platform_dispatch_evidence("https://sub.example", 1)[0]["source_kind"] == "probe"
+
+
+@pytest.mark.asyncio
+async def test_all_groups_disabled_completes_with_zero_accounts_and_resumes_when_enabled(tmp_path):
+    db = make_db(tmp_path)
+    accounts = [{"id": 1, "name": "one", "status": "active", "schedulable": True, "group_ids": [10]}]
+    groups = [{"id": 10, "name": "ten"}]
+    prepare_cache(db, accounts, groups)
+    db.set_platform_dispatch_group_auto_dispatch_enabled("https://sub.example", 10, False)
+    client = PolicyClient(accounts, groups)
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+
+    skipped = await scheduler.run_once()
+
+    assert skipped["managed_accounts"] == 0
+    assert skipped["groups"] == 0
+    assert client.usage_reads == []
+    assert client.error_reads == []
+    assert client.probes == []
+    assert client.updates == []
+    assert db.get_platform_dispatch_cache()["accounts"][0]["group_ids"] == [10]
+
+    db.set_platform_dispatch_group_auto_dispatch_enabled("https://sub.example", 10, True)
+    resumed = await scheduler.run_once()
+
+    assert resumed["managed_accounts"] == 1
+    assert client.probes == [1]
 
 
 @pytest.mark.asyncio

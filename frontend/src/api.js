@@ -52,6 +52,7 @@ export const api = {
   probePlatformDispatchAccount: (id) => request(`/api/platform-dispatch/accounts/${id}/probe`, { method: "POST" }),
   setPlatformDispatchProbeModel: (id, model) => request(`/api/platform-dispatch/accounts/${id}/probe-model`, { method: "PUT", body: JSON.stringify({ model }) }),
   setPlatformDispatchGroupProbeModel: (id, model) => request(`/api/platform-dispatch/groups/${id}/probe-model`, { method: "PUT", body: JSON.stringify({ model }) }),
+  setPlatformDispatchGroupAutoDispatch: (id, enabled) => request(`/api/platform-dispatch/groups/${id}/auto-dispatch`, { method: "PUT", body: JSON.stringify({ enabled }) }),
   platformDispatchCostSourceOptions: () => request("/api/platform-dispatch/cost-source-options"),
   setPlatformDispatchCostBinding: (id, monitorGroupId) => request(`/api/platform-dispatch/accounts/${id}/cost-binding`, { method: "PUT", body: JSON.stringify({ monitor_group_id: monitorGroupId }) }),
   deletePlatformDispatchCostBinding: (id) => request(`/api/platform-dispatch/accounts/${id}/cost-binding`, { method: "DELETE" }),

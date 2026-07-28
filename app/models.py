@@ -290,6 +290,15 @@ class Database:
                     PRIMARY KEY (source_site_url, group_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS platform_dispatch_group_settings (
+                    source_site_url TEXT NOT NULL,
+                    group_id INTEGER NOT NULL,
+                    auto_dispatch_enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (source_site_url, group_id)
+                );
+
                 CREATE TABLE IF NOT EXISTS platform_dispatch_cost_bindings (
                     source_site_url TEXT NOT NULL,
                     dispatch_account_id INTEGER NOT NULL,
@@ -1222,6 +1231,57 @@ class Database:
             }
             for row in rows
         ]
+
+    def get_platform_dispatch_group_auto_dispatch_settings(
+        self, source_site_url: str
+    ) -> dict[int, bool]:
+        site_url = str(source_site_url or "").strip().rstrip("/")
+        if not site_url:
+            return {}
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT group_id, auto_dispatch_enabled
+                FROM platform_dispatch_group_settings
+                WHERE source_site_url = ?
+                """,
+                (site_url,),
+            ).fetchall()
+        return {
+            int(row["group_id"]): bool(row["auto_dispatch_enabled"])
+            for row in rows
+        }
+
+    def disabled_platform_dispatch_group_ids(self, source_site_url: str) -> set[int]:
+        return {
+            group_id
+            for group_id, enabled in self.get_platform_dispatch_group_auto_dispatch_settings(
+                source_site_url
+            ).items()
+            if not enabled
+        }
+
+    def set_platform_dispatch_group_auto_dispatch_enabled(
+        self, source_site_url: str, group_id: int, enabled: bool
+    ) -> None:
+        site_url = str(source_site_url or "").strip().rstrip("/")
+        group_id = int(group_id)
+        if not site_url or group_id <= 0 or not isinstance(enabled, bool):
+            raise ValueError("分组自动调度设置参数不正确")
+        now = utc_now()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO platform_dispatch_group_settings (
+                    source_site_url, group_id, auto_dispatch_enabled, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(source_site_url, group_id) DO UPDATE SET
+                    auto_dispatch_enabled = excluded.auto_dispatch_enabled,
+                    updated_at = excluded.updated_at
+                """,
+                (site_url, group_id, 1 if enabled else 0, now, now),
+            )
 
     def exclude_platform_dispatch_group(
         self,
@@ -3457,6 +3517,32 @@ def filter_platform_dispatch_accounts_by_groups(
             result.append(dict(account))
             continue
         remaining = sorted(group_ids - excluded)
+        if not remaining:
+            continue
+        sanitized = {
+            key: value
+            for key, value in account.items()
+            if key not in {"group_id", "groupId", "group_ids", "groupIds", "groups", "plans"}
+        }
+        sanitized["group_ids"] = remaining
+        sanitized["groupIds"] = remaining
+        result.append(sanitized)
+    return result
+
+
+def filter_platform_dispatch_accounts_by_available_groups(
+    accounts: list[Any], available_group_ids: set[int]
+) -> list[dict[str, Any]]:
+    available = {int(group_id) for group_id in available_group_ids if int(group_id) > 0}
+    result: list[dict[str, Any]] = []
+    for account in accounts:
+        if not isinstance(account, dict):
+            continue
+        group_ids = _platform_dispatch_account_group_ids(account)
+        if not group_ids:
+            result.append(dict(account))
+            continue
+        remaining = sorted(group_ids.intersection(available))
         if not remaining:
             continue
         sanitized = {

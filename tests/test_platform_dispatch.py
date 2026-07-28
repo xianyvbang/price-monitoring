@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi.testclient import TestClient
 
+import app.main as app_main
 from app.main import app
 from app.models import Database
 from app.services.sub2api_admin import (
@@ -196,6 +197,62 @@ def test_platform_dispatch_account_exclusion_api_updates_only_policy_and_handles
     assert missing_restore.status_code == 404
     assert conflict_exclude.status_code == 409
     assert conflict_restore.status_code == 409
+
+
+def test_platform_dispatch_group_auto_dispatch_api_defaults_persists_and_is_site_scoped(tmp_path, monkeypatch):
+    test_db = setup_test_db(tmp_path, monkeypatch)
+    test_db.set_setting("sub2api_site_url", "https://sub.example")
+    test_db.replace_platform_dispatch_cache(
+        "https://sub.example",
+        [{"id": 1, "name": "one", "status": "active", "group_ids": [2]}],
+        [{"id": 2, "name": "主分组"}],
+        [],
+        {"platform": "", "type": "", "status": "", "include_ungrouped": True},
+    )
+    monkeypatch.setattr(
+        "app.main.platform_dispatch_policy_scheduler.notify_changed", lambda **kwargs: None
+    )
+
+    with TestClient(app) as client:
+        login(client)
+        initial = client.get("/api/platform-dispatch")
+        invalid_id = client.put("/api/platform-dispatch/groups/-1/auto-dispatch", json={"enabled": False})
+        invalid_value = client.put("/api/platform-dispatch/groups/2/auto-dispatch", json={"enabled": "no"})
+        missing = client.put("/api/platform-dispatch/groups/99/auto-dispatch", json={"enabled": False})
+        disabled = client.put("/api/platform-dispatch/groups/2/auto-dispatch", json={"enabled": False})
+        disabled_again = client.put("/api/platform-dispatch/groups/2/auto-dispatch", json={"enabled": False})
+
+        class LockedPolicy:
+            @staticmethod
+            def locked():
+                return True
+
+        running_lock = app_main.platform_dispatch_policy_scheduler.lock
+        app_main.platform_dispatch_policy_scheduler.lock = LockedPolicy()
+        policy_conflict = client.put(
+            "/api/platform-dispatch/groups/2/auto-dispatch", json={"enabled": True}
+        )
+        app_main.platform_dispatch_policy_scheduler.lock = running_lock
+        test_db.create_platform_dispatch_job("active-job", "accounts_sync", {}, "https://sub.example")
+        conflict = client.put("/api/platform-dispatch/groups/2/auto-dispatch", json={"enabled": True})
+
+    assert initial.status_code == 200
+    assert initial.json()["groups"][0]["auto_dispatch_enabled"] is True
+    assert initial.json()["groups"][0]["autoDispatchEnabled"] is True
+    assert invalid_id.status_code == 400
+    assert invalid_value.status_code == 400
+    assert missing.status_code == 404
+    assert disabled.status_code == 200
+    assert disabled.json()["groups"][0]["auto_dispatch_enabled"] is False
+    assert disabled_again.status_code == 200
+    assert policy_conflict.status_code == 409
+    assert conflict.status_code == 409
+    assert test_db.get_platform_dispatch_group_auto_dispatch_settings("https://sub.example") == {2: False}
+    assert test_db.get_platform_dispatch_group_auto_dispatch_settings("https://other.example") == {}
+
+    test_db.set_platform_dispatch_group_auto_dispatch_enabled("https://other.example", 2, True)
+    assert test_db.disabled_platform_dispatch_group_ids("https://sub.example") == {2}
+    assert test_db.disabled_platform_dispatch_group_ids("https://other.example") == set()
 
 
 def test_platform_dispatch_cost_binding_api_and_job_conflict(tmp_path, monkeypatch):
@@ -1122,6 +1179,41 @@ def test_platform_dispatch_excluded_group_prunes_cache_and_is_scoped_by_site(tmp
     assert db.remove_platform_dispatch_excluded_group("https://sub.example", 2)
     assert db.list_platform_dispatch_excluded_groups("https://sub.example") == []
     assert [account["id"] for account in db.get_platform_dispatch_cache()["accounts"]] == [2, 3]
+
+
+def test_platform_dispatch_response_builds_accounts_only_from_non_excluded_groups(tmp_path, monkeypatch):
+    test_db = setup_test_db(tmp_path, monkeypatch)
+    test_db.set_setting("sub2api_site_url", "https://sub.example")
+    test_db.replace_platform_dispatch_cache(
+        "https://sub.example",
+        [
+            {"id": 1, "name": "mixed", "status": "active", "group_ids": [2, 3]},
+            {"id": 2, "name": "excluded-only", "status": "active", "group_ids": [2]},
+            {"id": 3, "name": "ungrouped", "status": "active", "group_ids": []},
+        ],
+        [{"id": 2, "name": "排除组"}, {"id": 3, "name": "保留组"}],
+        [],
+        {"platform": "", "type": "", "status": "", "include_ungrouped": True},
+    )
+    test_db.exclude_platform_dispatch_group("https://sub.example", 2, "排除组", "openai")
+
+    # Simulate a later remote account update that writes the full group membership back to cache.
+    test_db.update_platform_dispatch_cached_account(
+        {"id": 1, "group_ids": [2, 3], "groupIds": [2, 3]}
+    )
+    test_db.update_platform_dispatch_cached_account(
+        {"id": 2, "group_ids": [2], "groupIds": [2]}
+    )
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.get("/api/platform-dispatch")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [group["id"] for group in payload["groups"]] == [3]
+    assert [account["id"] for account in payload["accounts"]] == [1, 3]
+    assert payload["accounts"][0]["group_ids"] == [3]
 
 
 def test_platform_dispatch_exclude_ungrouped_prunes_cache_and_updates_sync_default(tmp_path):

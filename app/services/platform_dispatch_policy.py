@@ -7,7 +7,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 from uuid import uuid4
 
-from app.models import Database, filter_platform_dispatch_accounts_by_groups, utc_now
+from app.models import (
+    Database,
+    filter_platform_dispatch_accounts_by_available_groups,
+    filter_platform_dispatch_accounts_by_groups,
+    utc_now,
+)
 from app.services.sub2api_admin import (
     Sub2ApiAdminClient,
     Sub2ApiAdminError,
@@ -108,6 +113,7 @@ FATAL_USAGE_MARKERS = (
 )
 TIMEOUT_MARKERS = ("timeout", "timed out", "deadline exceeded", "context deadline", "超时")
 UNGROUPED_POOL_KEY = "ungrouped"
+AUTO_DISPATCH_GROUP_IDS_FIELD = "_auto_dispatch_group_ids"
 DEFAULT_PROBE_MODELS_BY_GROUP_PLATFORM = {
     "openai": "gpt-5.5",
     "anthropic": "claude-sonnet-4-6",
@@ -555,7 +561,7 @@ def _resolve_probe_model(
         return account_model
 
     group_models = config.get("group_probe_models") or {}
-    group_ids = public_dispatch_account(account, []).get("group_ids") or []
+    group_ids = _account_group_ids(account)
     for group_id in sorted(set(group_ids)):
         group_model = str(
             group_models.get(str(group_id), group_models.get(group_id, "")) or ""
@@ -726,19 +732,32 @@ class PlatformDispatchPolicyScheduler:
         site_url = client.site_url
         if cache.get("source_site_url") != site_url:
             raise Sub2ApiAdminError("平台调度缓存与当前 Sub2API 站点不一致", status_code=409)
-        accounts = {
-            int(account["id"]): account
+        cached_accounts = [
+            account
             for account in cache.get("accounts") or []
             if isinstance(account, dict) and _optional_int(account.get("id"))
-        }
-        if not accounts:
+        ]
+        if not cached_accounts:
             raise Sub2ApiAdminError("请先同步账号信息", status_code=409)
+        cached_accounts_by_id = {int(account["id"]): account for account in cached_accounts}
+        config = validate_policy_config(
+            {}, self.db.get_platform_dispatch_policy(POLICY_DEFAULTS)["config"]
+        )
+        excluded_ids = {int(value) for value in config["excluded_account_ids"]}
+        candidates = [
+            account for account in cached_accounts if int(account["id"]) not in excluded_ids
+        ]
+        disabled_group_ids = self.db.disabled_platform_dispatch_group_ids(site_url)
+        accounts = {
+            int(account["id"]): account
+            for account in _filter_auto_dispatch_accounts(candidates, disabled_group_ids)
+        }
 
-        config = validate_policy_config({}, self.db.get_platform_dispatch_policy(POLICY_DEFAULTS)["config"])
         groups_by_id = {
             int(group["id"]): group
             for group in cache.get("groups") or []
             if isinstance(group, dict) and _optional_int(group.get("id"))
+            and int(group["id"]) not in disabled_group_ids
         }
         warnings, health, probe_results, _ = await self._collect_health_evidence(
             client,
@@ -755,7 +774,9 @@ class PlatformDispatchPolicyScheduler:
         for account_id, account in accounts.items():
             item = health[account_id]
             evidence_total += int(item["evidence_count"])
-            public = public_dispatch_account(account, _cached_activity(cache, account_id))
+            public = public_dispatch_account(
+                cached_accounts_by_id[account_id], _cached_activity(cache, account_id)
+            )
             public.update(
                 {
                     "health_score": _round_score(item["health_score"]),
@@ -874,10 +895,24 @@ class PlatformDispatchPolicyScheduler:
         site_url = client.site_url
         if cache.get("source_site_url") != site_url:
             raise Sub2ApiAdminError("平台调度缓存与当前 Sub2API 站点不一致", status_code=409)
+        excluded_ids = {int(value) for value in config["excluded_account_ids"]}
+        cached_candidates = [
+            account
+            for account in cache.get("accounts") or []
+            if isinstance(account, dict)
+            and _optional_int(account.get("id"))
+            and int(account["id"]) not in excluded_ids
+        ]
+        participating_count = len(
+            _filter_auto_dispatch_accounts(
+                cached_candidates,
+                self.db.disabled_platform_dispatch_group_ids(site_url),
+            )
+        )
         initial_progress = {
             "phase": "loading",
             "processed": 0,
-            "total": len(cache.get("accounts") or []),
+            "total": participating_count,
             "percent": 2,
             "message": "正在读取托管账号",
         }
@@ -951,7 +986,7 @@ class PlatformDispatchPolicyScheduler:
     ) -> dict[str, Any]:
         site_url = client.site_url
         excluded_ids = {int(value) for value in config["excluded_account_ids"]}
-        managed_ids = {
+        cached_managed_ids = {
             int(account["id"])
             for account in cache.get("accounts") or []
             if isinstance(account, dict) and _optional_int(account.get("id")) and int(account["id"]) not in excluded_ids
@@ -960,7 +995,22 @@ class PlatformDispatchPolicyScheduler:
         platform = str(refresh_filter.get("platform") or "")
         account_type = str(refresh_filter.get("type") or "")
         if progress:
-            progress("loading", 0, len(managed_ids))
+            cached_candidates = [
+                account
+                for account in cache.get("accounts") or []
+                if isinstance(account, dict)
+                and _optional_int(account.get("id")) in cached_managed_ids
+            ]
+            progress(
+                "loading",
+                0,
+                len(
+                    _filter_auto_dispatch_accounts(
+                        cached_candidates,
+                        self.db.disabled_platform_dispatch_group_ids(site_url),
+                    )
+                ),
+            )
         remote_accounts, groups = await asyncio.gather(
             client.list_accounts(platform=platform or None, account_type=account_type or None),
             client.list_groups(platform=platform or None),
@@ -969,26 +1019,41 @@ class PlatformDispatchPolicyScheduler:
             int(group["id"])
             for group in self.db.list_platform_dispatch_excluded_groups(site_url)
         }
-        groups = [
+        all_groups = [
             group
             for group in groups
             if isinstance(group, dict)
             and _optional_int(group.get("id"))
             and int(group["id"]) not in excluded_group_ids
         ]
-        filtered_remote_accounts = filter_platform_dispatch_accounts_by_groups(
-            remote_accounts,
-            excluded_group_ids,
+        available_group_ids = {int(group["id"]) for group in all_groups}
+        full_remote_accounts = (
+            filter_platform_dispatch_accounts_by_available_groups(
+                remote_accounts, available_group_ids
+            )
+            if excluded_group_ids
+            else remote_accounts
         )
-        accounts = {
+        full_remote_accounts_by_id = {
             int(account["id"]): account
-            for account in filtered_remote_accounts
-            if isinstance(account, dict) and _optional_int(account.get("id")) in managed_ids
+            for account in full_remote_accounts
+            if isinstance(account, dict)
+            and _optional_int(account.get("id")) in cached_managed_ids
         }
-        removed_managed_ids = managed_ids - set(accounts)
+        removed_managed_ids = cached_managed_ids - set(full_remote_accounts_by_id)
         if removed_managed_ids:
             self.db.remove_platform_dispatch_cached_accounts(site_url, removed_managed_ids)
-        managed_ids.intersection_update(accounts)
+
+        disabled_group_ids = self.db.disabled_platform_dispatch_group_ids(site_url)
+        groups = [
+            group for group in all_groups if int(group["id"]) not in disabled_group_ids
+        ]
+        accounts = {
+            int(account["id"]): account
+            for account in _filter_auto_dispatch_accounts(
+                list(full_remote_accounts_by_id.values()), disabled_group_ids
+            )
+        }
         group_map = {int(group["id"]): group for group in groups if isinstance(group, dict) and _optional_int(group.get("id"))}
         warnings, health, _, ttl_seconds = await self._collect_health_evidence(
             client,
@@ -1019,7 +1084,7 @@ class PlatformDispatchPolicyScheduler:
         concurrency_by_id = _keyed_account_map((concurrency_data or {}).get("account"))
         availability_by_id = _keyed_account_map((availability_data or {}).get("account"))
         states = {item["account_id"]: item for item in self.db.list_platform_dispatch_account_states(site_url)}
-        public_groups = [public_dispatch_group(group) for group in groups]
+        public_groups = [public_dispatch_group(group) for group in all_groups]
         self.db.update_platform_dispatch_cached_groups(site_url, public_groups)
         group_rates = {
             int(group["id"]): _optional_float(group.get("rate_multiplier"))
@@ -1056,7 +1121,9 @@ class PlatformDispatchPolicyScheduler:
             if runtime_available and item["evidence_fresh"] and (item["health_score"] or 0) >= config["health_threshold"]:
                 available_ids.append(account_id)
             current_concurrency = concurrency_by_id.get(account_id) or {}
-            public = public_dispatch_account(account, _cached_activity(cache, account_id))
+            public = public_dispatch_account(
+                full_remote_accounts_by_id[account_id], _cached_activity(cache, account_id)
+            )
             public.update(
                 {
                     "current_concurrency": _optional_int(current_concurrency.get("current_in_use")) or 0,
@@ -1147,7 +1214,7 @@ class PlatformDispatchPolicyScheduler:
             "scheduling_action": scheduling_action,
             "status_action": scheduling_action,
             "warnings": list(dict.fromkeys(warnings)),
-            "groups": len(public_groups),
+            "groups": len(group_map),
             "cost_bound_accounts": sum(1 for item in cost_profiles.values() if item["cost_binding"] is not None),
             "cost_unbound_accounts": sum(1 for item in cost_profiles.values() if item["price_protection_status"] == "unbound"),
             "cost_expired_accounts": sum(1 for item in cost_profiles.values() if item["price_protection_status"] == "rate_expired"),
@@ -1883,6 +1950,17 @@ def _cached_activity(cache: dict[str, Any], account_id: int) -> list[dict[str, A
     return []
 
 
+def _filter_auto_dispatch_accounts(
+    accounts: list[dict[str, Any]], disabled_group_ids: set[int]
+) -> list[dict[str, Any]]:
+    filtered = filter_platform_dispatch_accounts_by_groups(accounts, disabled_group_ids)
+    for account in filtered:
+        account[AUTO_DISPATCH_GROUP_IDS_FIELD] = list(
+            public_dispatch_account(account, []).get("group_ids") or []
+        )
+    return filtered
+
+
 def _keyed_account_map(value: Any) -> dict[int, dict[str, Any]]:
     if not isinstance(value, dict):
         return {}
@@ -1917,7 +1995,9 @@ def _effective_load_factor(account: dict[str, Any]) -> int:
 
 
 def _account_group_ids(account: dict[str, Any]) -> list[int]:
-    values = public_dispatch_account(account, []).get("group_ids", [])
+    values = account.get(AUTO_DISPATCH_GROUP_IDS_FIELD)
+    if values is None:
+        values = public_dispatch_account(account, []).get("group_ids", [])
     if not isinstance(values, list):
         values = [values]
     result: list[int] = []
