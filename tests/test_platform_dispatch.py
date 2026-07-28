@@ -428,6 +428,10 @@ def test_platform_dispatch_account_probe_api_uses_configured_model_and_updates_h
     }
     assert probe_client.probes == [(1, "group-model")]
     assert "accounts" not in response.json()
+    updated_account = response.json()["account"]
+    assert updated_account["id"] == 1
+    assert updated_account["health_score"] == 100.0
+    assert updated_account["probe_records"][0]["is_probe_success"] is True
     state = cache.json()["accounts"][0]
     assert state["health_score"] == 100.0
     assert state["probe_records"][0]["is_probe_success"] is True

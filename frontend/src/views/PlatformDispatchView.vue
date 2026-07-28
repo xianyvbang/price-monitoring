@@ -506,14 +506,10 @@ async function loadDispatch() {
 
 function applyDispatchPayload(payload) {
   const existingAccounts = new Map(accounts.value.map((account) => [Number(account.id), account]));
-  accounts.value = (payload.accounts || []).map((account) => ({
-    ...account,
-    is_enabled: account.is_enabled ?? account.isEnabled ?? account.status === "active",
-    schedulable: account.schedulable !== false,
-    probe_records: account.probe_records ?? account.probeRecords ?? existingAccounts.get(Number(account.id))?.probe_records ?? [],
-    short_evidence_records: account.short_evidence_records ?? account.shortEvidenceRecords ?? existingAccounts.get(Number(account.id))?.short_evidence_records ?? [],
-    recent_request_records: account.recent_request_records ?? account.recentRequestRecords ?? existingAccounts.get(Number(account.id))?.recent_request_records ?? []
-  }));
+  accounts.value = (payload.accounts || []).map((account) => normalizeDispatchAccount(
+    account,
+    existingAccounts.get(Number(account.id))
+  ));
   groups.value = payload.groups || [];
   excludedGroups.value = payload.excluded_groups || payload.excludedGroups || [];
   warnings.value = payload.warnings || [];
@@ -529,6 +525,29 @@ function applyDispatchPayload(payload) {
     include_ungrouped: refreshFilter.include_ungrouped ?? refreshFilter.includeUngrouped ?? true
   });
   loaded.value = true;
+}
+
+function normalizeDispatchAccount(account, existingAccount = null) {
+  return {
+    ...account,
+    is_enabled: account.is_enabled ?? account.isEnabled ?? account.status === "active",
+    schedulable: account.schedulable !== false,
+    probe_records: account.probe_records ?? account.probeRecords ?? existingAccount?.probe_records ?? [],
+    short_evidence_records: account.short_evidence_records ?? account.shortEvidenceRecords ?? existingAccount?.short_evidence_records ?? [],
+    recent_request_records: account.recent_request_records ?? account.recentRequestRecords ?? existingAccount?.recent_request_records ?? []
+  };
+}
+
+function applyDispatchAccount(account) {
+  const accountId = Number(account?.id);
+  if (!Number.isInteger(accountId) || accountId <= 0) return false;
+  let updated = false;
+  accounts.value = accounts.value.map((existingAccount) => {
+    if (Number(existingAccount.id) !== accountId) return existingAccount;
+    updated = true;
+    return normalizeDispatchAccount(account, existingAccount);
+  });
+  return updated;
 }
 
 function costStatus(account) {
@@ -982,8 +1001,7 @@ async function probeAccount(account) {
   setAccountProbing(accountId, true);
   try {
     const payload = await api.probePlatformDispatchAccount(accountId);
-    applyPolicyPayload(payload);
-    await loadDispatch();
+    applyDispatchAccount(payload.account);
     const probe = payload.probe || {};
     const model = probe.model || "Sub2API 默认模型";
     if (probe.success) {

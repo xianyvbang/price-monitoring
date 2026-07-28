@@ -1737,24 +1737,29 @@ class Database:
             self._prune_platform_dispatch_evidence(conn, site_url, account_id)
 
     def list_recent_platform_dispatch_probes(
-        self, source_site_url: str, per_account: int = 15
+        self, source_site_url: str, per_account: int = 15, account_id: int | None = None
     ) -> dict[int, list[dict[str, Any]]]:
         limit = max(1, min(60, int(per_account)))
+        account_filter = " AND account_id = ?" if account_id is not None else ""
+        parameters: list[Any] = [str(source_site_url or "").strip().rstrip("/")]
+        if account_id is not None:
+            parameters.append(int(account_id))
+        parameters.append(limit)
         with self.connect() as conn:
             rows = conn.execute(
-                """
+                f"""
                 WITH ranked AS (
                     SELECT *, ROW_NUMBER() OVER (
                         PARTITION BY account_id ORDER BY julianday(occurred_at) DESC, id DESC
                     ) AS row_number
                     FROM platform_dispatch_evidence
-                    WHERE source_site_url = ? AND source_kind = 'probe'
+                    WHERE source_site_url = ? AND source_kind = 'probe'{account_filter}
                 )
                 SELECT * FROM ranked
                 WHERE row_number <= ?
                 ORDER BY account_id, julianday(occurred_at) DESC, id DESC
                 """,
-                (str(source_site_url or "").strip().rstrip("/"), limit),
+                parameters,
             ).fetchall()
         grouped: dict[int, list[dict[str, Any]]] = {}
         for row in rows:
@@ -1764,24 +1769,29 @@ class Database:
         return grouped
 
     def list_recent_platform_dispatch_requests(
-        self, source_site_url: str, per_account: int = 10
+        self, source_site_url: str, per_account: int = 10, account_id: int | None = None
     ) -> dict[int, list[dict[str, Any]]]:
         limit = max(1, min(60, int(per_account)))
+        account_filter = " AND account_id = ?" if account_id is not None else ""
+        parameters: list[Any] = [str(source_site_url or "").strip().rstrip("/")]
+        if account_id is not None:
+            parameters.append(int(account_id))
+        parameters.append(limit)
         with self.connect() as conn:
             rows = conn.execute(
-                """
+                f"""
                 WITH ranked AS (
                     SELECT *, ROW_NUMBER() OVER (
                         PARTITION BY account_id ORDER BY julianday(occurred_at) DESC, id DESC
                     ) AS row_number
                     FROM platform_dispatch_evidence
-                    WHERE source_site_url = ? AND source_kind IN ('usage', 'error')
+                    WHERE source_site_url = ? AND source_kind IN ('usage', 'error'){account_filter}
                 )
                 SELECT * FROM ranked
                 WHERE row_number <= ?
                 ORDER BY account_id, julianday(occurred_at) DESC, id DESC
                 """,
-                (str(source_site_url or "").strip().rstrip("/"), limit),
+                parameters,
             ).fetchall()
         grouped: dict[int, list[dict[str, Any]]] = {}
         for row in rows:
@@ -1791,13 +1801,26 @@ class Database:
         return grouped
 
     def list_short_platform_dispatch_evidence(
-        self, source_site_url: str, per_account: int = 10, since: str | None = None
+        self,
+        source_site_url: str,
+        per_account: int = 10,
+        since: str | None = None,
+        account_id: int | None = None,
     ) -> dict[int, list[dict[str, Any]]]:
         limit = max(1, min(10, int(per_account)))
         cutoff = str(since or "").strip() or None
+        account_filter = " AND account_id = ?" if account_id is not None else ""
+        parameters: list[Any] = [
+            str(source_site_url or "").strip().rstrip("/"),
+            cutoff,
+            cutoff,
+        ]
+        if account_id is not None:
+            parameters.append(int(account_id))
+        parameters.append(limit)
         with self.connect() as conn:
             rows = conn.execute(
-                """
+                f"""
                 WITH ranked AS (
                     SELECT *, ROW_NUMBER() OVER (
                         PARTITION BY account_id ORDER BY julianday(occurred_at) DESC, id DESC
@@ -1805,12 +1828,13 @@ class Database:
                     FROM platform_dispatch_evidence
                     WHERE source_site_url = ?
                       AND (? IS NULL OR julianday(occurred_at) >= julianday(?))
+                      {account_filter}
                 )
                 SELECT * FROM ranked
                 WHERE row_number <= ?
                 ORDER BY account_id, julianday(occurred_at) DESC, id DESC
                 """,
-                (str(source_site_url or "").strip().rstrip("/"), cutoff, cutoff, limit),
+                parameters,
             ).fetchall()
         grouped: dict[int, list[dict[str, Any]]] = {}
         for row in rows:

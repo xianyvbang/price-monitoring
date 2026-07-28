@@ -1911,7 +1911,18 @@ async def api_platform_dispatch_account_probe(request: Request, account_id: int)
         f"Sub2API 调度账号 #{account_id} 单独探活{'成功' if result.get('success') else '失败'}"
         + (f"，模型 {result['model']}" if result.get("model") else ""),
     )
-    return {"ok": True, "probe": result, **platform_dispatch_policy_response()}
+    account_payload = platform_dispatch_cache_response(account_id=account_id)
+    updated_account = next(
+        (
+            item
+            for item in account_payload["accounts"]
+            if isinstance(item, dict) and _platform_dispatch_account_id(item) == account_id
+        ),
+        None,
+    )
+    if updated_account is None:
+        return JSONResponse({"ok": False, "message": "账号不存在"}, status_code=404)
+    return {"ok": True, "probe": result, "account": updated_account}
 
 
 @app.put("/api/platform-dispatch/groups/{group_id}/probe-model")
@@ -4799,7 +4810,7 @@ def public_platform_dispatch_excluded_group(group: dict[str, Any]) -> dict[str, 
     return result
 
 
-def platform_dispatch_cache_response() -> dict[str, Any]:
+def platform_dispatch_cache_response(account_id: int | None = None) -> dict[str, Any]:
     cache = db.get_platform_dispatch_cache()
     site_url = db.get_setting(SUB2API_SITE_URL_SETTING, "")
     excluded_group_rows = db.list_platform_dispatch_excluded_groups(site_url)
@@ -4849,6 +4860,13 @@ def platform_dispatch_cache_response() -> dict[str, Any]:
         accounts = filter_platform_dispatch_accounts_by_available_groups(
             accounts, available_group_ids
         )
+    if account_id is not None:
+        accounts = [
+            account
+            for account in accounts
+            if isinstance(account, dict)
+            and _platform_dispatch_account_id(account) == account_id
+        ]
     group_auto_dispatch_settings = (
         db.get_platform_dispatch_group_auto_dispatch_settings(source_site_url)
         if source_site_url
@@ -4884,12 +4902,20 @@ def platform_dispatch_cache_response() -> dict[str, Any]:
             group_rates,
             float(policy["minimum_profit_margin_percent"]),
         )
-        states = {
-            int(item["account_id"]): item
-            for item in db.list_platform_dispatch_account_states(source_site_url)
-        }
-        probes_by_account = db.list_recent_platform_dispatch_probes(source_site_url, 15)
-        requests_by_account = db.list_recent_platform_dispatch_requests(source_site_url, 10)
+        if account_id is None:
+            states = {
+                int(item["account_id"]): item
+                for item in db.list_platform_dispatch_account_states(source_site_url)
+            }
+        else:
+            state = db.get_platform_dispatch_account_state(source_site_url, account_id)
+            states = {account_id: state} if state else {}
+        probes_by_account = db.list_recent_platform_dispatch_probes(
+            source_site_url, 15, account_id=account_id
+        )
+        requests_by_account = db.list_recent_platform_dispatch_requests(
+            source_site_url, 10, account_id=account_id
+        )
         ttl_seconds = max(
             1,
             int(policy["probe_interval_seconds"])
@@ -4899,7 +4925,7 @@ def platform_dispatch_cache_response() -> dict[str, Any]:
             datetime.now(timezone.utc) - timedelta(seconds=ttl_seconds)
         ).isoformat()
         short_evidence_by_account = db.list_short_platform_dispatch_evidence(
-            source_site_url, 10, short_evidence_since
+            source_site_url, 10, short_evidence_since, account_id=account_id
         )
         for account_id, account in account_map.items():
             account.update(public_platform_dispatch_cost_profile(profiles[account_id]))
