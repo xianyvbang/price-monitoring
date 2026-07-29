@@ -726,6 +726,40 @@ async def test_sub2api_admin_probe_sends_configured_model_and_omits_empty_model(
     assert DummyAsyncClient.requests[1]["json"] == {}
 
 
+@pytest.mark.asyncio
+async def test_sub2api_admin_probe_extracts_status_code_from_sse_error(monkeypatch):
+    text_error_response = DummyResponse(None)
+    text_error_response.text = (
+        'data: {"type":"error","error":"API returned 503: '
+        '{\\"error\\":{\\"message\\":\\"Service temporarily unavailable\\"}}"}'
+    )
+    structured_error_response = DummyResponse(None)
+    structured_error_response.text = (
+        'data: {"type":"error","error":{"message":"upstream rejected",'
+        '"status_code":429}}'
+    )
+    DummyAsyncClient.requests = []
+    DummyAsyncClient.responses = [text_error_response, structured_error_response]
+    monkeypatch.setattr("app.services.sub2api_admin.httpx.AsyncClient", DummyAsyncClient)
+    admin_client = Sub2ApiAdminClient("https://sub.example", "admin-key")
+
+    text_error = await admin_client.probe_account(9)
+    structured_error = await admin_client.probe_account(10)
+
+    assert text_error == {
+        "success": False,
+        "is_timeout": False,
+        "message": 'API returned 503: {"error":{"message":"Service temporarily unavailable"}}',
+        "status_code": 503,
+    }
+    assert structured_error == {
+        "success": False,
+        "is_timeout": False,
+        "message": "upstream rejected",
+        "status_code": 429,
+    }
+
+
 def test_platform_dispatch_cache_roundtrip_replace_clear_and_status_merge(tmp_path):
     db = Database(str(tmp_path / "app.db"), "test-key")
     db.init()

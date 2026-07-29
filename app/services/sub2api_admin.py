@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -327,6 +328,7 @@ class Sub2ApiAdminClient:
                 "message": body.strip() or f"账号探活 HTTP {response.status_code}",
             }
         error = ""
+        error_status_code: int | None = None
         content_seen = False
         for line in body.splitlines():
             line = line.strip()
@@ -340,16 +342,29 @@ class Sub2ApiAdminClient:
             if not isinstance(event, dict):
                 continue
             if event.get("type") == "error":
-                error = str(event.get("error") or event.get("message") or "账号探活失败")
+                error_value = event.get("error") or event.get("message") or "账号探活失败"
+                if isinstance(error_value, dict):
+                    error = str(error_value.get("message") or error_value.get("error") or error_value)
+                else:
+                    error = str(error_value)
+                parsed_status_code = _probe_error_status_code(event, error_value, error)
+                if parsed_status_code is not None:
+                    error_status_code = parsed_status_code
             elif event.get("type") in {"content", "done", "end"}:
                 content_seen = True
         if error:
             lower = error.lower()
-            return {
+            result: dict[str, Any] = {
                 "success": False,
-                "is_timeout": "timeout" in lower or "timed out" in lower or "超时" in error,
+                "is_timeout": error_status_code in {408, 504}
+                or "timeout" in lower
+                or "timed out" in lower
+                or "超时" in error,
                 "message": error,
             }
+            if error_status_code is not None:
+                result["status_code"] = error_status_code
+            return result
         return {"success": True, "is_timeout": False, "message": "探活成功", "content_seen": content_seen}
 
     async def _list_all_pages(
@@ -768,6 +783,23 @@ def _optional_number(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _probe_error_status_code(event: dict[str, Any], error_value: Any, message: str) -> int | None:
+    mappings = [event]
+    if isinstance(error_value, dict):
+        mappings.append(error_value)
+    for mapping in mappings:
+        for key in ("status_code", "statusCode", "status", "code"):
+            status_code = _non_negative_int_or_none(mapping.get(key))
+            if status_code is not None and 100 <= status_code <= 599:
+                return status_code
+    match = re.search(
+        r"\b(?:API\s+returned|HTTP(?:\s+status)?)\s*[:=]?\s*([1-5]\d{2})\b",
+        message,
+        re.IGNORECASE,
+    )
+    return int(match.group(1)) if match else None
 
 
 def _timestamp_value(value: Any) -> float:
