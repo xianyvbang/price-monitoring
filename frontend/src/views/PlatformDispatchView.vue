@@ -246,8 +246,9 @@ const groupSections = computed(() => {
   const sections = [];
 
   knownGroups.forEach((group, id) => {
+    const allGroupAccounts = includedAccounts.value.filter((account) => accountGroupIds(account).includes(id));
     const groupAccounts = filteredAccounts.value.filter((account) => accountGroupIds(account).includes(id));
-    if (!groupAccounts.length) return;
+    if (!groupAccounts.length && allGroupAccounts.length) return;
     sections.push({
       key: `group-${id}`,
       group,
@@ -672,11 +673,32 @@ async function startAccountSync() {
     if (jobActive.value) {
       syncDialog.value = false;
       ElMessage.success("账号同步任务已启动");
+      monitorActiveJob();
     } else {
       await finishStartedJob();
     }
   } catch (error) {
     ElMessage.error(error.message || "启动账号同步失败");
+  } finally {
+    startingJob.value = false;
+  }
+}
+
+async function startGroupAccountSync(group) {
+  const groupId = Number(group?.id);
+  if (!Number.isInteger(groupId) || groupId <= 0) return;
+  startingJob.value = true;
+  try {
+    const payload = await api.syncPlatformDispatch({ group_id: groupId });
+    if (!setJobFromPayload(payload)) throw new Error("服务器未返回任务信息");
+    if (jobActive.value) {
+      ElMessage.success(`${group.name || `分组 ${groupId}`}同步任务已启动`);
+      monitorActiveJob();
+    } else {
+      await finishStartedJob();
+    }
+  } catch (error) {
+    ElMessage.error(error.message || "启动分组同步失败");
   } finally {
     startingJob.value = false;
   }
@@ -697,7 +719,10 @@ async function startEvidenceRefresh() {
   try {
     const payload = await api.refreshPlatformDispatchEvidence();
     if (!setJobFromPayload(payload)) throw new Error("服务器未返回任务信息");
-    if (jobActive.value) ElMessage.success("健康证据获取任务已启动");
+    if (jobActive.value) {
+      ElMessage.success("健康证据获取任务已启动");
+      monitorActiveJob();
+    }
     else await finishStartedJob();
   } catch (error) {
     ElMessage.error(error.message || "启动健康证据获取失败");
@@ -1149,9 +1174,28 @@ async function finishStartedJob() {
   await loadDispatch();
   if (evidenceJob.value) await refreshPolicyRuntime().catch(() => {});
   if (isSuccessfulJobStatus(job.value?.status)) {
-    ElMessage.success(evidenceJob.value ? "健康证据已重新获取并完成评分" : `账号同步完成，共 ${accounts.value.length} 个账号`);
+    ElMessage.success(evidenceJob.value ? "健康证据已重新获取并完成评分" : job.value.message || `账号同步完成，共 ${accounts.value.length} 个账号`);
   } else if (jobFailed.value) {
     ElMessage.error(job.value.error || "平台调度任务失败");
+  }
+}
+
+let jobMonitorRunning = false;
+
+async function monitorActiveJob() {
+  if (jobMonitorRunning) return;
+  jobMonitorRunning = true;
+  try {
+    while (jobActive.value) {
+      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+      const payload = await api.platformDispatchJob();
+      setJobFromPayload(payload);
+    }
+    await finishStartedJob();
+  } catch (error) {
+    ElMessage.error(error.message || "读取平台调度任务状态失败");
+  } finally {
+    jobMonitorRunning = false;
   }
 }
 
@@ -1159,9 +1203,15 @@ async function resumeJob() {
   try {
     const payload = await api.platformDispatchJob();
     setJobFromPayload(payload);
+    if (jobActive.value) monitorActiveJob();
   } catch (error) {
     if (error.status !== 404) ElMessage.error(error.message || "读取平台调度任务状态失败");
   }
+}
+
+function isGroupSyncing(group) {
+  const groupId = Number(job.value?.filter?.group_id ?? job.value?.filter?.groupId);
+  return jobActive.value && groupId === Number(group?.id);
 }
 
 async function toggleAccountSchedulable(account, schedulable) {
@@ -1846,6 +1896,17 @@ onBeforeUnmount(() => {
             </span>
           </div>
           <div class="dispatch-group-actions">
+            <el-tooltip v-if="section.group.id" content="同步该分组账号">
+              <el-button
+                circle
+                text
+                :icon="Refresh"
+                :loading="isGroupSyncing(section.group)"
+                :disabled="dispatchMutationDisabled"
+                :aria-label="`同步分组 ${section.group.name}`"
+                @click="startGroupAccountSync(section.group)"
+              />
+            </el-tooltip>
             <label v-if="section.group.id" class="group-auto-dispatch-control">
               <span>参与自动调度</span>
               <el-switch
@@ -1903,6 +1964,7 @@ onBeforeUnmount(() => {
         </header>
 
         <div v-show="!isCollapsed(section.key)" class="dispatch-account-grid">
+          <el-empty v-if="section.group.id && section.accounts.length === 0" description="该分组暂无账号" :image-size="72" />
           <article v-for="account in section.accounts" :key="`${section.key}-${account.id}`" class="dispatch-account-card">
             <header class="dispatch-account-head">
               <div class="dispatch-account-identity">

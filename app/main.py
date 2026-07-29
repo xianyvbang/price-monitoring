@@ -2134,6 +2134,27 @@ async def api_platform_dispatch_sync(request: Request):
         admin_client = sub2api_admin_client()
     except Sub2ApiAdminError as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=exc.status_code)
+    target_group_id = refresh_filter["group_id"]
+    if target_group_id is not None:
+        cache = db.get_platform_dispatch_cache()
+        cached_groups = (
+            cache.get("groups")
+            if cache and cache.get("source_site_url") == admin_client.site_url
+            else []
+        )
+        known_group_ids = {
+            _platform_dispatch_account_id(group)
+            for group in cached_groups
+            if isinstance(group, dict)
+        }
+        excluded_group_ids = {
+            int(group["id"])
+            for group in db.list_platform_dispatch_excluded_groups(admin_client.site_url)
+        }
+        if target_group_id in excluded_group_ids:
+            return JSONResponse({"ok": False, "message": "该分组已被排除，不能同步"}, status_code=400)
+        if target_group_id not in known_group_ids:
+            return JSONResponse({"ok": False, "message": "同步分组不存在，请先同步全部分组"}, status_code=404)
     job_id = uuid4().hex
     job = db.create_platform_dispatch_job(job_id, "accounts_sync", refresh_filter, admin_client.site_url)
     if job is None:
@@ -4522,7 +4543,10 @@ async def _run_platform_dispatch_account_sync_locked(
             message="正在获取分组信息",
         )
         old_cache = db.get_platform_dispatch_cache()
-        groups = await admin_client.list_groups(platform=refresh_filter["platform"] or None)
+        target_group_id = refresh_filter.get("group_id")
+        groups = await admin_client.list_groups(
+            platform=None if target_group_id is not None else refresh_filter["platform"] or None
+        )
         db.refresh_platform_dispatch_excluded_group_metadata(admin_client.site_url, groups)
         excluded_groups = db.list_platform_dispatch_excluded_groups(admin_client.site_url)
         excluded_group_ids = {int(group["id"]) for group in excluded_groups}
@@ -4534,14 +4558,27 @@ async def _run_platform_dispatch_account_sync_locked(
                 continue
             retained_group_ids.add(group_id)
             retained_groups.append(group)
-        public_groups = [public_dispatch_group(group) for group in retained_groups]
-
-        query_targets: list[tuple[int | str, str]] = [
-            (group_id, str(group.get("name") or f"分组 {group_id}"))
-            for group in retained_groups
-            if (group_id := _platform_dispatch_account_id(group))
-        ]
-        if refresh_filter["include_ungrouped"]:
+        if target_group_id is not None:
+            target_group = next(
+                (
+                    group
+                    for group in retained_groups
+                    if _platform_dispatch_account_id(group) == target_group_id
+                ),
+                None,
+            )
+            if target_group is None:
+                raise Sub2ApiAdminError("同步分组不存在或已被排除", status_code=404)
+            query_targets: list[tuple[int | str, str]] = [
+                (target_group_id, str(target_group.get("name") or f"分组 {target_group_id}"))
+            ]
+        else:
+            query_targets = [
+                (group_id, str(group.get("name") or f"分组 {group_id}"))
+                for group in retained_groups
+                if (group_id := _platform_dispatch_account_id(group))
+            ]
+        if target_group_id is None and refresh_filter["include_ungrouped"]:
             query_targets.append(("ungrouped", "未分组账号"))
 
         db.update_platform_dispatch_job(job_id, phase="accounts", message="正在按分组获取账号")
@@ -4556,9 +4593,9 @@ async def _run_platform_dispatch_account_sync_locked(
                 page_data = await admin_client.list_accounts_page(
                     page=page,
                     page_size=100,
-                    platform=refresh_filter["platform"] or None,
-                    account_type=refresh_filter["type"] or None,
-                    status=refresh_filter["status"] or None,
+                    platform=None if target_group_id is not None else refresh_filter["platform"] or None,
+                    account_type=None if target_group_id is not None else refresh_filter["type"] or None,
+                    status=None if target_group_id is not None else refresh_filter["status"] or None,
                     group_id=group_query,
                 )
                 pages_queried += 1
@@ -4630,18 +4667,23 @@ async def _run_platform_dispatch_account_sync_locked(
 
         db.update_platform_dispatch_job(job_id, phase="finalizing", percent=99, message="正在写入账号缓存")
         _ensure_platform_dispatch_site_unchanged(admin_client.site_url)
-        old_activity: dict[int, list[dict[str, Any]]] = {}
         activities_refreshed_at = ""
+        old_accounts: list[dict[str, Any]] = []
+        old_groups: list[dict[str, Any]] = []
         if old_cache and old_cache.get("source_site_url") == admin_client.site_url:
             activities_refreshed_at = str(old_cache.get("activities_refreshed_at") or "")
-            for account in old_cache.get("accounts") or []:
-                account_id = _platform_dispatch_account_id(account)
-                if account_id:
-                    old_activity[account_id] = account.get("recent_activity", account.get("recentActivity", [])) or []
-        public_accounts = [
-            public_dispatch_account(account, old_activity.get(_platform_dispatch_account_id(account), []))
-            for account in raw_accounts
-        ]
+            old_accounts = [account for account in old_cache.get("accounts") or [] if isinstance(account, dict)]
+            old_groups = [group for group in old_cache.get("groups") or [] if isinstance(group, dict)]
+        fetched_accounts = [public_dispatch_account(account, []) for account in raw_accounts]
+        public_accounts, added_count, existing_count, membership_count = _merge_platform_dispatch_accounts(
+            old_accounts,
+            fetched_accounts,
+        )
+        public_groups = _merge_platform_dispatch_groups(
+            old_groups,
+            [public_dispatch_group(group) for group in retained_groups],
+            excluded_group_ids,
+        )
         db.replace_platform_dispatch_cache(
             admin_client.site_url,
             public_accounts,
@@ -4659,11 +4701,20 @@ async def _run_platform_dispatch_account_sync_locked(
             processed=processed,
             total=total,
             percent=100,
-            message=f"账号同步完成，共缓存 {len(public_accounts)} 个账号",
+            message=(
+                f"账号同步完成：拉取 {processed} 个，新增 {added_count} 个，"
+                f"跳过 {existing_count} 个，补充分组归属 {membership_count} 个，"
+                f"共缓存 {len(public_accounts)} 个账号"
+            ),
             error="",
             finished_at=finished_at,
         )
-        db.add_log("info", "platform-dispatch", f"手动同步 Sub2API 平台调度缓存 {len(public_accounts)} 个账号")
+        db.add_log(
+            "info",
+            "platform-dispatch",
+            f"手动同步 Sub2API 平台调度缓存：拉取 {processed} 个，新增 {added_count} 个，"
+            f"跳过 {existing_count} 个，补充分组归属 {membership_count} 个，共缓存 {len(public_accounts)} 个账号",
+        )
     except asyncio.CancelledError:
         _fail_platform_dispatch_job(job_id, "任务因服务停止中断")
         raise
@@ -4791,6 +4842,67 @@ def _cached_platform_dispatch_group_ids(account: dict[str, Any]) -> set[int]:
         if group_id > 0:
             group_ids.add(group_id)
     return group_ids
+
+
+def _merge_platform_dispatch_accounts(
+    historical_accounts: list[dict[str, Any]],
+    fetched_accounts: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int, int, int]:
+    merged_by_id: dict[int, dict[str, Any]] = {}
+    for account in historical_accounts:
+        account_id = _platform_dispatch_account_id(account)
+        if account_id and account_id not in merged_by_id:
+            merged_by_id[account_id] = dict(account)
+
+    added_count = 0
+    existing_count = 0
+    membership_count = 0
+    for account in fetched_accounts:
+        account_id = _platform_dispatch_account_id(account)
+        if not account_id:
+            continue
+        historical = merged_by_id.get(account_id)
+        if historical is None:
+            merged_by_id[account_id] = dict(account)
+            added_count += 1
+            continue
+        existing_count += 1
+        historical_group_ids = _cached_platform_dispatch_group_ids(historical)
+        merged_group_ids = sorted(historical_group_ids | _cached_platform_dispatch_group_ids(account))
+        if set(merged_group_ids) != historical_group_ids:
+            historical["group_ids"] = merged_group_ids
+            historical["groupIds"] = merged_group_ids
+            membership_count += 1
+
+    merged = list(merged_by_id.values())
+    merged.sort(
+        key=lambda account: (
+            str(account.get("name") or "").strip().lower(),
+            _platform_dispatch_account_id(account),
+        )
+    )
+    return merged, added_count, existing_count, membership_count
+
+
+def _merge_platform_dispatch_groups(
+    historical_groups: list[dict[str, Any]],
+    fetched_groups: list[dict[str, Any]],
+    excluded_group_ids: set[int],
+) -> list[dict[str, Any]]:
+    merged_by_id: dict[int, dict[str, Any]] = {}
+    for group in [*historical_groups, *fetched_groups]:
+        group_id = _platform_dispatch_account_id(group)
+        if not group_id or group_id in excluded_group_ids or group_id in merged_by_id:
+            continue
+        merged_by_id[group_id] = dict(group)
+    return sorted(
+        merged_by_id.values(),
+        key=lambda group: (
+            str(group.get("platform") or "").strip().lower(),
+            str(group.get("name") or "").strip().lower(),
+            _platform_dispatch_account_id(group),
+        ),
+    )
 
 
 def _fail_platform_dispatch_job(job_id: str, error: str) -> None:
@@ -5081,6 +5193,19 @@ def platform_dispatch_refresh_filter(payload: Any) -> dict[str, Any]:
     if not isinstance(include_ungrouped, bool):
         raise ValueError("include_ungrouped 必须是布尔值")
     values["include_ungrouped"] = include_ungrouped
+    raw_group_id = payload.get("group_id", payload.get("groupId"))
+    if raw_group_id is None or raw_group_id == "":
+        values["group_id"] = None
+    else:
+        if isinstance(raw_group_id, bool):
+            raise ValueError("group_id 必须是正整数")
+        try:
+            group_id = int(raw_group_id)
+        except (TypeError, ValueError):
+            raise ValueError("group_id 必须是正整数") from None
+        if group_id <= 0 or str(raw_group_id).strip() != str(group_id):
+            raise ValueError("group_id 必须是正整数")
+        values["group_id"] = group_id
     return values
 
 

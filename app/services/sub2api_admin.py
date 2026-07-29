@@ -192,6 +192,45 @@ class Sub2ApiAdminClient:
             "total": _non_negative_int_or_none(data.get("total")) if isinstance(data, dict) else None,
         }
 
+    async def list_recent_upstream_errors(
+        self, account_id: int | None = None, limit: int = 6
+    ) -> list[dict[str, Any]]:
+        page = await self.list_upstream_errors_page(account_id, page=1, page_size=limit)
+        return page["records"]
+
+    async def list_upstream_errors_page(
+        self,
+        account_id: int | None = None,
+        *,
+        page: int = 1,
+        page_size: int = 100,
+        time_range: str = "30d",
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "page": max(1, int(page)),
+            "page_size": max(1, min(500, int(page_size))),
+            "time_range": str(time_range or "30d"),
+            "sort_by": "created_at",
+            "sort_order": "desc",
+        }
+        if account_id is not None:
+            params["account_id"] = int(account_id)
+        payload = await self._request(
+            "GET", "/api/v1/admin/ops/upstream-errors", params=params
+        )
+        records = _extract_sub2api_list(
+            payload, ("items", "errors", "records", "rows", "list", "data")
+        )
+        if records is None:
+            raise Sub2ApiAdminError("Sub2API 上游错误记录响应格式不正确", status_code=502)
+        data = _unwrap_sub2api_data(payload)
+        return {
+            "records": [record for record in records if isinstance(record, dict)],
+            "page": _positive_int(data.get("page")) if isinstance(data, dict) else params["page"],
+            "pages": _positive_int(data.get("pages")) if isinstance(data, dict) else None,
+            "total": _non_negative_int_or_none(data.get("total")) if isinstance(data, dict) else None,
+        }
+
     async def get_concurrency_stats(self, platform: str | None = None) -> dict[str, Any]:
         params = {"platform": platform} if platform else None
         payload = await self._request("GET", "/api/v1/admin/ops/concurrency", params=params)

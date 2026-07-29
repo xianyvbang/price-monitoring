@@ -1479,7 +1479,7 @@ def test_opencode_go_bulk_import_sub2api_skips_duplicate_names_in_group(tmp_path
     assert list_request["method"] == "GET"
     assert list_request["url"] == "https://sub.example/api/v1/admin/accounts"
     assert list_request["params"]["platform"] == "openai"
-    assert list_request["params"]["group_id"] == 8
+    assert list_request["params"]["group"] == 8
 
     preview_requests = [request for request in DummySub2ApiClient.requests if request["url"].endswith("/models/sync-upstream-preview")]
     create_requests = [request for request in DummySub2ApiClient.requests if request["method"] == "POST" and request["url"] == "https://sub.example/api/v1/admin/accounts"]

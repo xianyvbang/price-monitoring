@@ -672,6 +672,49 @@ async def test_sub2api_admin_list_accounts_reads_all_pages(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_sub2api_admin_lists_upstream_errors_with_supported_filters(monkeypatch):
+    DummyAsyncClient.requests = []
+    DummyAsyncClient.responses = [
+        DummyResponse(
+            {
+                "code": 0,
+                "data": {
+                    "items": [{"id": 31, "account_id": 7, "status_code": 503}],
+                    "total": 1,
+                    "page": 2,
+                    "page_size": 500,
+                    "pages": 3,
+                },
+            }
+        )
+    ]
+    monkeypatch.setattr("app.services.sub2api_admin.httpx.AsyncClient", DummyAsyncClient)
+
+    client = Sub2ApiAdminClient("https://sub.example", "admin-key")
+    result = await client.list_upstream_errors_page(
+        7, page=2, page_size=999, time_range="6h"
+    )
+
+    assert result == {
+        "records": [{"id": 31, "account_id": 7, "status_code": 503}],
+        "page": 2,
+        "pages": 3,
+        "total": 1,
+    }
+    request = DummyAsyncClient.requests[0]
+    assert request["method"] == "GET"
+    assert request["url"] == "https://sub.example/api/v1/admin/ops/upstream-errors"
+    assert request["params"] == {
+        "account_id": 7,
+        "page": 2,
+        "page_size": 500,
+        "time_range": "6h",
+        "sort_by": "created_at",
+        "sort_order": "desc",
+    }
+
+
+@pytest.mark.asyncio
 async def test_sub2api_admin_filters_accounts_with_upstream_group_parameter(monkeypatch):
     DummyAsyncClient.requests = []
     DummyAsyncClient.responses = [
@@ -861,7 +904,8 @@ def test_platform_dispatch_syncs_pages_without_loading_activity_and_preserves_ca
                 "isEnabled": True,
                 "recent_activity": [{"id": "old-activity"}],
                 "recentActivity": [{"id": "old-activity"}],
-            }
+            },
+            {"id": 8, "name": "z-history-only", "status": "inactive", "group_ids": [2]},
         ],
         [],
         [],
@@ -964,9 +1008,12 @@ def test_platform_dispatch_syncs_pages_without_loading_activity_and_preserves_ca
     }
     assert response_accounts.json().keys() == {"ok", "accounts"}
     accounts_by_id = {account["id"]: account for account in response_accounts.json()["accounts"]}
+    assert accounts_by_id[9]["name"] == "cached"
     assert accounts_by_id[9]["recent_activity"] == [{"id": "old-activity"}]
+    assert accounts_by_id[9]["group_ids"] == [2]
     assert accounts_by_id[10]["recent_activity"] == []
-    assert set(accounts_by_id) == {9, 10}
+    assert accounts_by_id[8]["name"] == "z-history-only"
+    assert set(accounts_by_id) == {8, 9, 10}
     assert response.json()["activities_refreshed_at"] == "2026-07-25T01:00:00+00:00"
     assert invalid.status_code == 400
     assert updated.status_code == 200
@@ -978,6 +1025,124 @@ def test_platform_dispatch_syncs_pages_without_loading_activity_and_preserves_ca
     assert updated_account["recent_activity"] == [{"id": "old-activity"}]
     assert_snake_case_keys(after_update.json())
     assert fake.updated == [(9, False)]
+
+
+def test_platform_dispatch_group_sync_only_adds_accounts_and_merges_membership(tmp_path, monkeypatch):
+    test_db = setup_test_db(tmp_path, monkeypatch)
+    test_db.set_setting("sub2api_site_url", "https://sub.example")
+    test_db.replace_platform_dispatch_cache(
+        "https://sub.example",
+        [
+            {
+                "id": 1,
+                "name": "historical-name",
+                "status": "inactive",
+                "group_ids": [3],
+                "recent_activity": [{"id": "historical-activity"}],
+            },
+            {"id": 7, "name": "history-only", "status": "active", "group_ids": [4]},
+        ],
+        [
+            {"id": 3, "name": "历史分组", "platform": "openai"},
+            {"id": 4, "name": "目标分组旧名称", "platform": "openai"},
+        ],
+        [],
+        {"platform": "", "type": "", "status": "", "include_ungrouped": True},
+        activities_refreshed_at="2026-07-25T01:00:00+00:00",
+    )
+
+    class GroupSyncClient:
+        site_url = "https://sub.example"
+
+        def __init__(self):
+            self.group_platforms = []
+            self.account_queries = []
+
+        async def list_groups(self, platform=None):
+            self.group_platforms.append(platform)
+            return [
+                {"id": 4, "name": "目标分组远端名称", "platform": "openai"},
+                {"id": 5, "name": "远端空分组", "platform": "anthropic"},
+            ]
+
+        async def list_accounts_page(self, page, page_size, **filters):
+            self.account_queries.append((page, page_size, filters))
+            return {
+                "accounts": [
+                    {"id": 1, "name": "remote-name", "status": "active", "platform": "openai"},
+                    {"id": 2, "name": "new-account", "status": "active", "platform": "openai"},
+                ],
+                "total": 2,
+                "pages": 1,
+            }
+
+    admin_client = GroupSyncClient()
+    monkeypatch.setattr("app.main.sub2api_admin_client", lambda: admin_client)
+
+    with TestClient(app) as client:
+        login(client)
+        started = client.post("/api/platform-dispatch/sync", json={"groupId": 4})
+        job = wait_for_dispatch_job(client)
+        payload = client.get("/api/platform-dispatch").json()
+        accounts = client.get("/api/platform-dispatch/accounts").json()["accounts"]
+
+    assert started.status_code == 202
+    assert started.json()["job"]["refresh_filter"]["group_id"] == 4
+    assert job["status"] == "succeeded"
+    assert job["refresh_filter"]["group_id"] == 4
+    assert "拉取 2 个，新增 1 个，跳过 1 个，补充分组归属 1 个" in job["message"]
+    assert admin_client.group_platforms == [None]
+    assert admin_client.account_queries == [
+        (
+            1,
+            100,
+            {"platform": None, "account_type": None, "status": None, "group_id": 4},
+        )
+    ]
+    accounts_by_id = {account["id"]: account for account in accounts}
+    assert set(accounts_by_id) == {1, 2, 7}
+    assert accounts_by_id[1]["name"] == "historical-name"
+    assert accounts_by_id[1]["status"] == "inactive"
+    assert accounts_by_id[1]["recent_activity"] == [{"id": "historical-activity"}]
+    assert accounts_by_id[1]["group_ids"] == [3, 4]
+    assert accounts_by_id[2]["group_ids"] == [4]
+    assert accounts_by_id[7]["name"] == "history-only"
+    groups_by_id = {group["id"]: group for group in payload["groups"]}
+    assert set(groups_by_id) == {3, 4, 5}
+    assert groups_by_id[4]["name"] == "目标分组旧名称"
+
+
+def test_platform_dispatch_group_sync_validates_group_id_and_exclusions(tmp_path, monkeypatch):
+    test_db = setup_test_db(tmp_path, monkeypatch)
+    test_db.set_setting("sub2api_site_url", "https://sub.example")
+    test_db.replace_platform_dispatch_cache(
+        "https://sub.example",
+        [],
+        [{"id": 4, "name": "目标分组"}, {"id": 5, "name": "排除分组"}],
+        [],
+        {"platform": "", "type": "", "status": "", "include_ungrouped": True},
+    )
+    test_db.exclude_platform_dispatch_group("https://sub.example", 5, "排除分组", "openai")
+
+    class ValidationClient:
+        site_url = "https://sub.example"
+
+    monkeypatch.setattr("app.main.sub2api_admin_client", lambda: ValidationClient())
+
+    with TestClient(app) as client:
+        login(client)
+        invalid_zero = client.post("/api/platform-dispatch/sync", json={"group_id": 0})
+        invalid_bool = client.post("/api/platform-dispatch/sync", json={"group_id": True})
+        invalid_decimal = client.post("/api/platform-dispatch/sync", json={"group_id": 4.5})
+        missing = client.post("/api/platform-dispatch/sync", json={"group_id": 99})
+        excluded = client.post("/api/platform-dispatch/sync", json={"group_id": 5})
+
+    assert invalid_zero.status_code == 400
+    assert invalid_bool.status_code == 400
+    assert invalid_decimal.status_code == 400
+    assert missing.status_code == 404
+    assert excluded.status_code == 400
+    assert "已被排除" in excluded.json()["message"]
 
 
 def test_platform_dispatch_sync_failure_keeps_cache_and_site_change_clears_it(tmp_path, monkeypatch):
@@ -1068,6 +1233,7 @@ def test_platform_dispatch_evidence_refresh_reloads_history_probes_and_recalcula
 
         def __init__(self):
             self.probe_models = []
+            self.upstream_error_reads = []
 
         async def list_usage_page(self, account_id, page, page_size, start_date):
             assert page_size == 100
@@ -1100,6 +1266,30 @@ def test_platform_dispatch_evidence_refresh_reloads_history_probes_and_recalcula
                 "pages": 1,
             }
 
+        async def list_upstream_errors_page(self, account_id, page, page_size, time_range):
+            assert page_size == 100
+            assert time_range == "30d"
+            self.upstream_error_reads.append((account_id, page))
+            if account_id == 2:
+                raise Sub2ApiAdminError("upstream errors unavailable", status_code=502)
+            return {
+                "records": [
+                    {
+                        "id": 100,
+                        "created_at": (evidence_now - timedelta(seconds=5)).isoformat(),
+                        "status_code": 200,
+                        "message": "recovered upstream error",
+                    },
+                    {
+                        "id": 99,
+                        "created_at": (evidence_now - timedelta(seconds=10)).isoformat(),
+                        "status_code": 503,
+                        "message": "duplicate upstream error",
+                    },
+                ],
+                "pages": 1,
+            }
+
         async def probe_account(self, account_id, model=None):
             self.probe_models.append((account_id, model))
             if account_id == 2:
@@ -1123,6 +1313,7 @@ def test_platform_dispatch_evidence_refresh_reloads_history_probes_and_recalcula
     assert job["total"] == 2
     assert job["kind"] == "evidence_refresh"
     assert evidence_client.probe_models == [(1, "group-model"), (2, "group-model")]
+    assert evidence_client.upstream_error_reads == [(1, 1), (2, 1)]
     cached_accounts = accounts_response.json()["accounts"]
     assert_snake_case_keys(response.json())
     assert_snake_case_keys(accounts_response.json())
@@ -1133,16 +1324,20 @@ def test_platform_dispatch_evidence_refresh_reloads_history_probes_and_recalcula
     assert any("usage unavailable" in warning for warning in response.json()["warnings"])
     assert "accounts" not in policy.json()
     states = {item["id"]: item for item in cached_accounts}
-    assert states[1]["health_evidence_count"] == 8
+    assert states[1]["health_evidence_count"] == 9
     assert states[1]["probe_records"][0]["is_probe_success"] is True
     short_evidence = states[1]["short_evidence_records"]
     assert "shortEvidenceRecords" not in states[1]
-    assert [item["source_kind"] for item in short_evidence] == ["probe", "error"] + ["usage"] * 6
+    assert [item["source_kind"] for item in short_evidence] == ["probe", "error", "error"] + ["usage"] * 6
+    assert [item["message"] for item in short_evidence if item["source_kind"] == "error"] == [
+        "recovered upstream error",
+        "latest error",
+    ]
     assert "sourceKind" not in short_evidence[0]
     assert "isProbeSuccess" not in short_evidence[0]
     recent_requests = states[1]["recent_request_records"]
     assert "recentRequestRecords" not in states[1]
-    assert [item["source_kind"] for item in recent_requests] == ["error"] + ["usage"] * 6
+    assert [item["source_kind"] for item in recent_requests] == ["error", "error"] + ["usage"] * 6
     assert all(item["source_kind"] != "probe" for item in recent_requests)
     assert {
         "source_kind",

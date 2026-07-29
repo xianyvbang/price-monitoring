@@ -1300,6 +1300,22 @@ class PlatformDispatchPolicyScheduler:
                         page_size=100,
                         time_range="30d",
                     )
+                elif source_kind == "upstream_error" and hasattr(
+                    client, "list_upstream_errors_page"
+                ):
+                    page_data = await client.list_upstream_errors_page(
+                        account_id,
+                        page=page,
+                        page_size=100,
+                        time_range="30d",
+                    )
+                elif source_kind == "upstream_error" and hasattr(
+                    client, "list_recent_upstream_errors"
+                ):
+                    page_data = {
+                        "records": await client.list_recent_upstream_errors(account_id, 60),
+                        "pages": 1,
+                    }
                 else:
                     fallback = (
                         await client.list_recent_usage(account_id, 60)
@@ -1334,12 +1350,26 @@ class PlatformDispatchPolicyScheduler:
 
         async def load(account_id: int) -> None:
             nonlocal completed
+            upstream_errors_supported = hasattr(client, "list_upstream_errors_page") or hasattr(
+                client, "list_recent_upstream_errors"
+            )
             async with semaphore:
-                usage, errors = await asyncio.gather(
-                    load_source(account_id, "usage"),
-                    load_source(account_id, "error"),
+                source_results = await asyncio.gather(
+                    *(
+                        [
+                            load_source(account_id, "usage"),
+                            load_source(account_id, "error"),
+                        ]
+                        + (
+                            [load_source(account_id, "upstream_error")]
+                            if upstream_errors_supported
+                            else []
+                        )
+                    ),
                     return_exceptions=True,
                 )
+            usage, errors = source_results[:2]
+            upstream_errors = source_results[2] if upstream_errors_supported else None
             name = str(accounts[account_id].get("name") or account_id)
             if isinstance(usage, Exception):
                 warnings.append(f"账号 {name} 使用记录读取失败: {usage}")
@@ -1371,36 +1401,53 @@ class PlatformDispatchPolicyScheduler:
                         str(usage_newest.get("id") or ""),
                         str(usage_newest.get("created_at") or ""),
                     )
-            if isinstance(errors, Exception):
-                warnings.append(f"账号 {name} 错误记录读取失败: {errors}")
-            else:
-                error_records, error_newest = errors
-                error_evidence: list[dict[str, Any]] = []
-                for raw in error_records:
-                    activity = normalize_sub2api_error_record(raw)
-                    classified = classify_activity(activity)
-                    item = {
+
+            error_source_results = [("error", "错误记录", errors)]
+            if upstream_errors_supported:
+                error_source_results.append(
+                    ("upstream_error", "上游错误记录", upstream_errors)
+                )
+            error_sources_complete = True
+            error_records_by_id: dict[str, dict[str, Any]] = {}
+            for cursor_kind, source_label, result in error_source_results:
+                if isinstance(result, Exception):
+                    error_sources_complete = False
+                    warnings.append(f"账号 {name} {source_label}读取失败: {result}")
+                    continue
+                records, newest = result
+                for index, raw in enumerate(records):
+                    source_id = str(raw.get("id") or "")
+                    dedupe_key = source_id or f"{cursor_kind}-{index}"
+                    error_records_by_id.setdefault(dedupe_key, raw)
+                if newest is not None:
+                    self.db.save_platform_dispatch_cursor(
+                        site_url,
+                        account_id,
+                        cursor_kind,
+                        str(newest.get("id") or ""),
+                        str(newest.get("created_at") or ""),
+                    )
+
+            error_evidence: list[dict[str, Any]] = []
+            for raw in error_records_by_id.values():
+                activity = normalize_sub2api_error_record(raw)
+                classified = classify_activity(activity)
+                error_evidence.append(
+                    {
                         "account_id": account_id,
                         "source_kind": "error",
                         "source_id": str(activity.get("source_id")),
                         "occurred_at": activity.get("created_at") or utc_now(),
                         **classified,
                     }
-                    error_evidence.append(item)
-                    if not force_full:
-                        self.db.add_platform_dispatch_evidence(site_url, item)
-                if force_full:
-                    self.db.replace_platform_dispatch_evidence_source(
-                        site_url, account_id, "error", error_evidence
-                    )
-                if error_newest is not None:
-                    self.db.save_platform_dispatch_cursor(
-                        site_url,
-                        account_id,
-                        "error",
-                        str(error_newest.get("id") or ""),
-                        str(error_newest.get("created_at") or ""),
-                    )
+                )
+            if force_full and error_sources_complete:
+                self.db.replace_platform_dispatch_evidence_source(
+                    site_url, account_id, "error", error_evidence
+                )
+            else:
+                for item in error_evidence:
+                    self.db.add_platform_dispatch_evidence(site_url, item)
             completed += 1
             if progress:
                 progress("evidence", completed, len(accounts))
