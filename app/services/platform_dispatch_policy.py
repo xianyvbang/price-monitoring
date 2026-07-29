@@ -1557,7 +1557,9 @@ class PlatformDispatchPolicyScheduler:
             failure_count = sum(
                 1
                 for event in recent_failures
-                if event.get("is_timeout") or _optional_int(event.get("status_code")) in {429, 502, 503}
+                if event.get("category") == "probe_failure"
+                or event.get("is_timeout")
+                or _optional_int(event.get("status_code")) in {429, 502, 503}
             )
             recent_slow = evidence[: int(config["slow_window"])]
             slow_count = sum(

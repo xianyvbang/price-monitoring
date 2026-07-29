@@ -877,6 +877,34 @@ async def test_slow_first_token_does_not_disable_account_above_failure_health_th
 
 
 @pytest.mark.asyncio
+async def test_generic_probe_failures_count_toward_scheduling_threshold(tmp_path):
+    db = make_db(tmp_path)
+    accounts = {
+        1: {"id": 1, "name": "generic-failure", "status": "active", "schedulable": True, "group_ids": [10]},
+        2: {"id": 2, "name": "peer", "status": "active", "schedulable": True, "group_ids": [10]},
+    }
+    client = PolicyClient(list(accounts.values()))
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+    failed_health = failing_state(30)
+    for event in failed_health["evidence"]:
+        event.pop("status_code")
+
+    action = await scheduler._apply_schedulable_policy(
+        client,
+        client.site_url,
+        accounts,
+        {1: failed_health, 2: healthy_state()},
+        [2],
+        {**POLICY_DEFAULTS, "enabled": True},
+        180,
+    )
+
+    assert client.updates == [(1, "schedulable", False)]
+    assert action.startswith("关闭调度 generic-failure")
+    assert "最近 5 次异常达到 3 次" in action
+
+
+@pytest.mark.asyncio
 async def test_threshold_policy_closes_one_account_per_pool(tmp_path):
     db = make_db(tmp_path)
     accounts = {
