@@ -877,6 +877,100 @@ async def test_slow_first_token_does_not_disable_account_above_failure_health_th
 
 
 @pytest.mark.asyncio
+async def test_threshold_policy_closes_one_account_per_pool(tmp_path):
+    db = make_db(tmp_path)
+    accounts = {
+        1: {"id": 1, "name": "failing-ten", "status": "active", "schedulable": True, "group_ids": [10]},
+        2: {"id": 2, "name": "peer-ten", "status": "active", "schedulable": True, "group_ids": [10]},
+        3: {"id": 3, "name": "failing-twenty", "status": "active", "schedulable": True, "group_ids": [20]},
+        4: {"id": 4, "name": "peer-twenty", "status": "active", "schedulable": True, "group_ids": [20]},
+    }
+    client = PolicyClient(list(accounts.values()))
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+
+    action = await scheduler._apply_schedulable_policy(
+        client,
+        client.site_url,
+        accounts,
+        {
+            1: failing_state(40),
+            2: healthy_state(),
+            3: failing_state(30),
+            4: healthy_state(),
+        },
+        [2, 4],
+        {**POLICY_DEFAULTS, "enabled": True},
+        180,
+    )
+
+    assert client.updates == [
+        (3, "schedulable", False),
+        (1, "schedulable", False),
+    ]
+    assert action.count("关闭调度") == 2
+    assert "failing-ten" in action
+    assert "failing-twenty" in action
+
+
+@pytest.mark.asyncio
+async def test_threshold_policy_closes_only_lowest_score_in_same_pool(tmp_path):
+    db = make_db(tmp_path)
+    accounts = {
+        1: {"id": 1, "name": "lower", "status": "active", "schedulable": True, "group_ids": [10]},
+        2: {"id": 2, "name": "higher", "status": "active", "schedulable": True, "group_ids": [10]},
+        3: {"id": 3, "name": "peer", "status": "active", "schedulable": True, "group_ids": [10]},
+    }
+    client = PolicyClient(list(accounts.values()))
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+
+    action = await scheduler._apply_schedulable_policy(
+        client,
+        client.site_url,
+        accounts,
+        {1: failing_state(20), 2: failing_state(40), 3: healthy_state()},
+        [3],
+        {**POLICY_DEFAULTS, "enabled": True},
+        180,
+    )
+
+    assert client.updates == [(1, "schedulable", False)]
+    assert action.startswith("关闭调度 lower")
+
+
+@pytest.mark.asyncio
+async def test_threshold_policy_multi_group_closure_uses_all_pool_quotas(tmp_path):
+    db = make_db(tmp_path)
+    accounts = {
+        1: {"id": 1, "name": "multi", "status": "active", "schedulable": True, "group_ids": [10, 20]},
+        2: {"id": 2, "name": "failing-ten", "status": "active", "schedulable": True, "group_ids": [10]},
+        3: {"id": 3, "name": "failing-twenty", "status": "active", "schedulable": True, "group_ids": [20]},
+        4: {"id": 4, "name": "peer-ten", "status": "active", "schedulable": True, "group_ids": [10]},
+        5: {"id": 5, "name": "peer-twenty", "status": "active", "schedulable": True, "group_ids": [20]},
+    }
+    client = PolicyClient(list(accounts.values()))
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+
+    action = await scheduler._apply_schedulable_policy(
+        client,
+        client.site_url,
+        accounts,
+        {
+            1: failing_state(10),
+            2: failing_state(20),
+            3: failing_state(30),
+            4: healthy_state(),
+            5: healthy_state(),
+        },
+        [4, 5],
+        {**POLICY_DEFAULTS, "enabled": True},
+        180,
+    )
+
+    assert client.updates == [(1, "schedulable", False)]
+    assert action.startswith("关闭调度 multi")
+
+
+@pytest.mark.asyncio
 async def test_threshold_policy_keeps_last_schedulable_account_in_each_pool(tmp_path):
     db = make_db(tmp_path)
     accounts = {
@@ -984,6 +1078,36 @@ async def test_fatal_failure_can_disable_last_schedulable_account(tmp_path):
 
     assert action.startswith("关闭调度 fatal")
     assert client.updates == [(1, "schedulable", False)]
+
+
+@pytest.mark.asyncio
+async def test_fatal_failure_closes_one_account_in_each_pool(tmp_path):
+    db = make_db(tmp_path)
+    accounts = {
+        1: {"id": 1, "name": "fatal-ten", "status": "active", "schedulable": True, "group_ids": [10]},
+        2: {"id": 2, "name": "fatal-twenty", "status": "active", "schedulable": True, "group_ids": [20]},
+    }
+    client = PolicyClient(list(accounts.values()))
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+
+    action = await scheduler._apply_schedulable_policy(
+        client,
+        client.site_url,
+        accounts,
+        {
+            1: failing_state(0, category="fatal_auth", count=1),
+            2: failing_state(0, category="fatal_balance", count=1),
+        },
+        [],
+        {**POLICY_DEFAULTS, "enabled": True},
+        180,
+    )
+
+    assert client.updates == [
+        (1, "schedulable", False),
+        (2, "schedulable", False),
+    ]
+    assert action.count("关闭调度") == 2
 
 
 @pytest.mark.asyncio

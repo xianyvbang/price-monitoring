@@ -1574,48 +1574,113 @@ class PlatformDispatchPolicyScheduler:
             ):
                 threshold.append((account_id, f"最近 {config['slow_window']} 次慢首字达到 {slow_count} 次"))
 
-        candidate: tuple[int, bool, str] | None = None
         minimum = int(config["minimum_available_accounts"])
-        eligible_threshold = [
-            item
-            for item in threshold
-            if _preserves_schedulable_pool_minimum(accounts, item[0], minimum)
+
+        async def apply_candidate(account_id: int, schedulable: bool, reason: str) -> str:
+            account = accounts[account_id]
+            previous_state = self.db.get_platform_dispatch_account_state(site_url, account_id) or {}
+            if schedulable:
+                manually_disabled = str(previous_state.get("decision_reason") or "").startswith("人工关闭调度")
+                reason = f"{reason}；覆盖人工关闭状态：{'是' if manually_disabled else '否'}"
+            old_value = account.get("schedulable") is not False
+            try:
+                updated = await client.update_account_schedulable(account_id, schedulable)
+            except Exception as exc:
+                self._record_action(
+                    site_url,
+                    account,
+                    "enable_scheduling" if schedulable else "disable_scheduling",
+                    "schedulable",
+                    old_value,
+                    schedulable,
+                    reason,
+                    exc,
+                )
+                return ""
+            account.update(updated)
+            account["schedulable"] = schedulable
+            self.db.update_platform_dispatch_cached_account(updated)
+            self.db.upsert_platform_dispatch_account_state(
+                site_url,
+                account_id,
+                price_protection_blocked=0,
+                price_protection_blocked_at=None,
+                price_protection_reason="",
+            )
+            self._record_action(
+                site_url,
+                account,
+                "enable_scheduling" if schedulable else "disable_scheduling",
+                "schedulable",
+                old_value,
+                schedulable,
+                reason,
+            )
+            return f"{'开启调度' if schedulable else '关闭调度'} {account.get('name') or account_id}: {reason}"
+
+        closure_candidates = [
+            (account_id, reason, True) for account_id, reason in fatal
         ]
-        if fatal:
-            account_id, reason = min(fatal, key=lambda pair: ((health[pair[0]]["health_score"] or 0), pair[0]))
-            candidate = (account_id, False, reason)
-        elif eligible_threshold:
-            account_id, reason = min(eligible_threshold, key=lambda pair: ((health[pair[0]]["health_score"] or 0), pair[0]))
-            candidate = (account_id, False, reason)
-        else:
-            price_recovery = [
-                account_id
-                for account_id, account in accounts.items()
-                if str(account.get("status") or "inactive") == "active"
-                and account.get("schedulable") is False
-                and account_id not in price_unsafe_ids
-                and (cost_profiles.get(account_id) or {}).get("price_protection_status") == "safe"
-                and health[account_id]["evidence_fresh"]
-                and (health[account_id]["health_score"] or 0) >= float(config["health_threshold"])
-            ]
-            if config["price_protection_enabled"] and price_recovery:
-                account_id = max(
-                    price_recovery,
-                    key=lambda value: (health[value]["health_score"] or 0, -value),
-                )
-                profile = cost_profiles[account_id]
-                binding = profile.get("cost_binding") or {}
-                source = (
-                    f"{binding.get('balance_account_name') or binding.get('balance_account_id') or '余额账号'} / "
-                    f"{binding.get('group_name') or binding.get('monitor_group_id') or '监控分组'}"
-                )
-                candidate = (
-                    account_id,
-                    True,
-                    f"价格已安全：本地最低倍率 {profile['local_min_rate_multiplier']:.6g}，"
-                    f"最低安全倍率 {profile['minimum_safe_rate_multiplier']:.6g}，"
-                    f"上游成本 {profile['upstream_cost_multiplier']:.6g}，成本来源：{source}",
-                )
+        closure_candidates.extend(
+            (account_id, reason, False) for account_id, reason in threshold
+        )
+        closure_candidates.sort(
+            key=lambda item: (
+                not item[2],
+                health[item[0]]["health_score"] or 0,
+                item[0],
+            )
+        )
+        closed_pool_keys: set[int | str] = set()
+        closure_actions: list[str] = []
+        attempted_closure = False
+        for account_id, reason, is_fatal in closure_candidates:
+            pool_keys = set(_account_pool_keys(accounts[account_id]))
+            if pool_keys & closed_pool_keys:
+                continue
+            if not is_fatal and not _preserves_schedulable_pool_minimum(
+                accounts, account_id, minimum
+            ):
+                continue
+            attempted_closure = True
+            action = await apply_candidate(account_id, False, reason)
+            if action:
+                closed_pool_keys.update(pool_keys)
+                closure_actions.append(action)
+        if closure_actions:
+            return "；".join(closure_actions)
+        if attempted_closure:
+            return ""
+
+        candidate: tuple[int, bool, str] | None = None
+        price_recovery = [
+            account_id
+            for account_id, account in accounts.items()
+            if str(account.get("status") or "inactive") == "active"
+            and account.get("schedulable") is False
+            and account_id not in price_unsafe_ids
+            and (cost_profiles.get(account_id) or {}).get("price_protection_status") == "safe"
+            and health[account_id]["evidence_fresh"]
+            and (health[account_id]["health_score"] or 0) >= float(config["health_threshold"])
+        ]
+        if config["price_protection_enabled"] and price_recovery:
+            account_id = max(
+                price_recovery,
+                key=lambda value: (health[value]["health_score"] or 0, -value),
+            )
+            profile = cost_profiles[account_id]
+            binding = profile.get("cost_binding") or {}
+            source = (
+                f"{binding.get('balance_account_name') or binding.get('balance_account_id') or '余额账号'} / "
+                f"{binding.get('group_name') or binding.get('monitor_group_id') or '监控分组'}"
+            )
+            candidate = (
+                account_id,
+                True,
+                f"价格已安全：本地最低倍率 {profile['local_min_rate_multiplier']:.6g}，"
+                f"最低安全倍率 {profile['minimum_safe_rate_multiplier']:.6g}，"
+                f"上游成本 {profile['upstream_cost_multiplier']:.6g}，成本来源：{source}",
+            )
 
         if candidate is None:
             pools = _group_availability_summary(accounts, available_ids, group_map or {}, config)
@@ -1669,46 +1734,7 @@ class PlatformDispatchPolicyScheduler:
         if candidate is None:
             return ""
         account_id, schedulable, reason = candidate
-        account = accounts[account_id]
-        previous_state = self.db.get_platform_dispatch_account_state(site_url, account_id) or {}
-        if schedulable:
-            manually_disabled = str(previous_state.get("decision_reason") or "").startswith("人工关闭调度")
-            reason = f"{reason}；覆盖人工关闭状态：{'是' if manually_disabled else '否'}"
-        old_value = account.get("schedulable") is not False
-        try:
-            updated = await client.update_account_schedulable(account_id, schedulable)
-        except Exception as exc:
-            self._record_action(
-                site_url,
-                account,
-                "enable_scheduling" if schedulable else "disable_scheduling",
-                "schedulable",
-                old_value,
-                schedulable,
-                reason,
-                exc,
-            )
-            return ""
-        account.update(updated)
-        account["schedulable"] = schedulable
-        self.db.update_platform_dispatch_cached_account(updated)
-        self.db.upsert_platform_dispatch_account_state(
-            site_url,
-            account_id,
-            price_protection_blocked=0,
-            price_protection_blocked_at=None,
-            price_protection_reason="",
-        )
-        self._record_action(
-            site_url,
-            account,
-            "enable_scheduling" if schedulable else "disable_scheduling",
-            "schedulable",
-            old_value,
-            schedulable,
-            reason,
-        )
-        return f"{'开启调度' if schedulable else '关闭调度'} {account.get('name') or account_id}: {reason}"
+        return await apply_candidate(account_id, schedulable, reason)
 
     async def _apply_concurrency_policy(
         self,

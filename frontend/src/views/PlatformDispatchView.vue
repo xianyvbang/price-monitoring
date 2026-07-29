@@ -1557,9 +1557,9 @@ onBeforeUnmount(() => {
         <span v-if="!policyConfig.auto_scoring_enabled">自动评分和自动调度均关闭；后台不再读取证据或重算健康分。</span>
         <span v-else-if="!policyConfig.enabled">自动评分开启：后台增量读取请求证据、探活并计算健康评分，不修改 Sub2API 账号状态或调度参数。</span>
         <span v-else-if="!policyConfig.return_pool_enabled && !policyConfig.smart_expand_enabled && !policyConfig.load_factor_enabled && !policyConfig.price_protection_enabled">
-          四项可选策略均关闭；仍会关闭异常账号。任一分组低于每组最低保障 {{ policyConfig.minimum_available_accounts }} 个时，会将符合条件的账号逐个重新开启。
+          四项可选策略均关闭；健康异常策略每轮每个分组仍最多关闭 1 个账号。任一分组低于每组最低保障 {{ policyConfig.minimum_available_accounts }} 个时，会将符合条件的账号逐个重新开启。
         </span>
-        <span v-else>每 {{ policyConfig.probe_interval_seconds }} 秒评估托管账号；每个分组独立执行最低保障与健康回池，每轮最多在 Sub2API 关闭或开启 1 个账号的调度。</span>
+        <span v-else>每 {{ policyConfig.probe_interval_seconds }} 秒评估托管账号；健康异常策略每轮每个分组最多关闭 1 个账号，全部分组最多开启 1 个。价格保护仍会立即关闭全部价格不安全账号。</span>
       </div>
 
       <div class="policy-strategies">
