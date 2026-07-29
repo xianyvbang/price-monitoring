@@ -1843,6 +1843,48 @@ class Database:
             grouped.setdefault(int(item["account_id"]), []).append(item)
         return grouped
 
+    def list_platform_dispatch_evidence_page(
+        self,
+        source_site_url: str,
+        account_id: int,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        since: str | None = None,
+    ) -> dict[str, Any]:
+        page = max(1, int(page))
+        page_size = max(1, min(100, int(page_size)))
+        site_url = str(source_site_url or "").strip().rstrip("/")
+        cutoff = str(since or "").strip() or None
+        parameters = (site_url, int(account_id), cutoff, cutoff)
+        where = """
+            source_site_url = ? AND account_id = ?
+            AND (? IS NULL OR julianday(occurred_at) >= julianday(?))
+        """
+        with self.connect() as conn:
+            total = int(
+                conn.execute(
+                    f"SELECT COUNT(*) FROM platform_dispatch_evidence WHERE {where}",
+                    parameters,
+                ).fetchone()[0]
+            )
+            rows = conn.execute(
+                f"""
+                SELECT * FROM platform_dispatch_evidence
+                WHERE {where}
+                ORDER BY julianday(occurred_at) DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (*parameters, page_size, (page - 1) * page_size),
+            ).fetchall()
+        return {
+            "items": [row_to_dict(row) for row in rows],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "pages": max(1, (total + page_size - 1) // page_size),
+        }
+
     def upsert_platform_dispatch_account_state(self, source_site_url: str, account_id: int, **fields: Any) -> None:
         allowed = {
             "name", "health_score", "short_score", "long_score", "evidence_count", "evidence_at",

@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { ArrowDown, ArrowRight, Check, CircleClose, Delete, Hide, Link, Refresh, RefreshLeft, Search, Setting, Timer, VideoPause, VideoPlay } from "@element-plus/icons-vue";
+import { ArrowDown, ArrowRight, Check, CircleClose, Delete, Hide, Link, Refresh, RefreshLeft, Search, Setting, Timer, VideoPause, VideoPlay, View } from "@element-plus/icons-vue";
 import { api } from "../api";
 import { boolValue, formatTime } from "../utils";
 
@@ -90,6 +90,16 @@ const actionHistory = ref([]);
 const actionHistoryPagination = reactive({
   page: 1,
   page_size: 50,
+  total: 0
+});
+const shortEvidenceDialog = ref(false);
+const shortEvidenceLoading = ref(false);
+const shortEvidenceAccount = ref(null);
+const shortEvidenceRecords = ref([]);
+const shortEvidenceWindowSeconds = ref(0);
+const shortEvidencePagination = reactive({
+  page: 1,
+  page_size: 20,
   total: 0
 });
 const excludedAccountText = ref("");
@@ -414,6 +424,35 @@ async function loadActionHistory(page = actionHistoryPagination.page) {
 async function openActionHistory() {
   actionHistoryDialog.value = true;
   await loadActionHistory(1);
+}
+
+async function loadShortEvidence(page = shortEvidencePagination.page) {
+  if (!shortEvidenceAccount.value) return;
+  shortEvidenceLoading.value = true;
+  try {
+    const payload = await api.platformDispatchAccountEvidence(shortEvidenceAccount.value.id, {
+      page,
+      page_size: shortEvidencePagination.page_size
+    });
+    shortEvidenceRecords.value = payload.items || [];
+    shortEvidencePagination.page = Number(payload.page) || page;
+    shortEvidencePagination.page_size = Number(payload.page_size || payload.pageSize) || shortEvidencePagination.page_size;
+    shortEvidencePagination.total = Number(payload.total) || 0;
+    shortEvidenceWindowSeconds.value = Number(payload.short_window_seconds || payload.shortWindowSeconds) || 0;
+  } catch (error) {
+    ElMessage.error(error.message || "加载短期记录失败");
+  } finally {
+    shortEvidenceLoading.value = false;
+  }
+}
+
+async function openShortEvidence(account) {
+  shortEvidenceAccount.value = { id: account.id, name: account.name };
+  shortEvidenceRecords.value = [];
+  shortEvidencePagination.page = 1;
+  shortEvidencePagination.total = 0;
+  shortEvidenceDialog.value = true;
+  await loadShortEvidence(1);
 }
 
 function parseExcludedAccountIds() {
@@ -1411,6 +1450,30 @@ function requestFailed(record) {
   return (record.source_kind || record.sourceKind) === "error";
 }
 
+function evidenceResultText(record) {
+  const sourceKind = record.source_kind || record.sourceKind;
+  if (sourceKind === "probe") return probeSucceeded(record) ? "探活成功" : "探活失败";
+  return requestResultText(record);
+}
+
+function evidenceFailed(record) {
+  const sourceKind = record.source_kind || record.sourceKind;
+  return sourceKind === "error" || (sourceKind === "probe" && !probeSucceeded(record));
+}
+
+function evidenceScoreText(record) {
+  const score = Number(record.score);
+  return Number.isFinite(score) ? score.toFixed(1) : "-";
+}
+
+function shortEvidenceWindowText() {
+  const seconds = shortEvidenceWindowSeconds.value;
+  if (!seconds) return "-";
+  if (seconds % 3600 === 0) return `${seconds / 3600} 小时`;
+  if (seconds % 60 === 0) return `${seconds / 60} 分钟`;
+  return `${seconds} 秒`;
+}
+
 function probeSucceeded(record) {
   return Boolean(record.is_probe_success ?? record.isProbeSuccess);
 }
@@ -2172,6 +2235,11 @@ onBeforeUnmount(() => {
               </div>
               <div v-else class="short-evidence-empty">暂无使用成功或错误请求</div>
             </details>
+            <div class="short-evidence-actions">
+              <el-button text type="primary" :icon="View" @click="openShortEvidence(account)">
+                查看全部短期记录
+              </el-button>
+            </div>
           </article>
         </div>
       </section>
@@ -2231,6 +2299,72 @@ onBeforeUnmount(() => {
       />
       <template #footer>
         <el-button @click="actionHistoryDialog = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="shortEvidenceDialog"
+      :title="`短期记录 · ${shortEvidenceAccount?.name || ''}`"
+      width="min(980px, calc(100vw - 24px))"
+      destroy-on-close
+    >
+      <div class="short-evidence-dialog-toolbar">
+        <span>短期窗口 {{ shortEvidenceWindowText() }} · 共 {{ shortEvidencePagination.total }} 条</span>
+        <el-tooltip content="刷新">
+          <el-button
+            circle
+            text
+            :icon="Refresh"
+            :loading="shortEvidenceLoading"
+            aria-label="刷新短期记录"
+            @click="loadShortEvidence()"
+          />
+        </el-tooltip>
+      </div>
+      <el-table
+        v-loading="shortEvidenceLoading"
+        :data="shortEvidenceRecords"
+        border
+        stripe
+        max-height="520"
+        empty-text="当前短期窗口暂无记录"
+        class="short-evidence-dialog-table"
+      >
+        <el-table-column label="结果" width="108">
+          <template #default="{ row }">
+            <el-tag :type="evidenceFailed(row) ? 'danger' : 'success'" size="small">
+              {{ evidenceResultText(row) }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="评分" width="76">
+          <template #default="{ row }">
+            <strong class="short-evidence-dialog-score">{{ evidenceScoreText(row) }}</strong>
+          </template>
+        </el-table-column>
+        <el-table-column label="类型" width="104">
+          <template #default="{ row }">{{ evidenceCategoryText(row.category) }}</template>
+        </el-table-column>
+        <el-table-column label="状态与信息" min-width="320">
+          <template #default="{ row }">
+            <span class="short-evidence-dialog-message" :title="evidenceDetail(row)">{{ evidenceDetail(row) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="时间" width="180">
+          <template #default="{ row }">{{ evidenceTime(row) }}</template>
+        </el-table-column>
+      </el-table>
+      <el-pagination
+        v-if="shortEvidencePagination.total > shortEvidencePagination.page_size"
+        v-model:current-page="shortEvidencePagination.page"
+        :page-size="shortEvidencePagination.page_size"
+        :total="shortEvidencePagination.total"
+        layout="prev, pager, next, total"
+        class="short-evidence-dialog-pagination"
+        @current-change="loadShortEvidence"
+      />
+      <template #footer>
+        <el-button @click="shortEvidenceDialog = false">关闭</el-button>
       </template>
     </el-dialog>
 
@@ -3269,6 +3403,43 @@ onBeforeUnmount(() => {
   padding: 10px 12px;
 }
 
+.short-evidence-actions {
+  align-items: center;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+  display: flex;
+  justify-content: flex-end;
+  min-height: 36px;
+  padding: 3px 8px;
+}
+
+.short-evidence-dialog-toolbar {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  font-size: 13px;
+  justify-content: space-between;
+  min-height: 32px;
+}
+
+.short-evidence-dialog-table {
+  width: 100%;
+}
+
+.short-evidence-dialog-score {
+  font-variant-numeric: tabular-nums;
+}
+
+.short-evidence-dialog-message {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.short-evidence-dialog-pagination {
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+
 .account-policy-metrics {
   background: var(--panel-soft);
   border-bottom: 1px solid var(--line);
@@ -3473,7 +3644,8 @@ onBeforeUnmount(() => {
     margin-left: 0;
   }
 
-  .policy-action-history-pagination {
+  .policy-action-history-pagination,
+  .short-evidence-dialog-pagination {
     justify-content: center;
   }
 

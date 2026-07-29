@@ -1359,6 +1359,67 @@ def test_platform_dispatch_evidence_refresh_reloads_history_probes_and_recalcula
     assert states[2]["recent_request_records"] == []
 
 
+def test_platform_dispatch_account_evidence_api_paginates_current_short_window(tmp_path, monkeypatch):
+    test_db = setup_test_db(tmp_path, monkeypatch)
+    test_db.set_setting("sub2api_site_url", "https://sub.example")
+    test_db.replace_platform_dispatch_cache(
+        "https://sub.example",
+        [{"id": 1, "name": "evidence-account", "status": "active"}],
+        [],
+        [],
+        {"platform": "", "type": "", "status": ""},
+    )
+    now = datetime.now(timezone.utc)
+    test_db.add_platform_dispatch_evidence(
+        "https://sub.example",
+        {
+            "account_id": 1,
+            "source_kind": "error",
+            "source_id": "stale",
+            "category": "upstream_error",
+            "score": 40,
+            "occurred_at": (now - timedelta(seconds=181)).isoformat(),
+        },
+    )
+    for index in range(25):
+        source_kind = "probe" if index % 3 == 0 else ("error" if index % 3 == 1 else "usage")
+        test_db.add_platform_dispatch_evidence(
+            "https://sub.example",
+            {
+                "account_id": 1,
+                "source_kind": source_kind,
+                "source_id": f"recent-{index}",
+                "category": "healthy" if source_kind != "error" else "upstream_error",
+                "score": 100 if source_kind != "error" else 40,
+                "is_probe_success": source_kind == "probe",
+                "message": f"record {index}",
+                "occurred_at": (now - timedelta(seconds=index)).isoformat(),
+            },
+        )
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.get(
+            "/api/platform-dispatch/accounts/1/evidence",
+            params={"page": 2, "page_size": 10},
+        )
+        missing = client.get("/api/platform-dispatch/accounts/99/evidence")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["account"] == {"id": 1, "name": "evidence-account"}
+    assert payload["short_window_seconds"] == 180
+    assert payload["total"] == 25
+    assert payload["page"] == 2
+    assert payload["page_size"] == 10
+    assert payload["pages"] == 3
+    assert [item["message"] for item in payload["items"]] == [
+        f"record {index}" for index in range(10, 20)
+    ]
+    assert all("source_id" not in item and "account_id" not in item for item in payload["items"])
+    assert missing.status_code == 404
+
+
 def test_platform_dispatch_job_exclusion_interrupt_and_activity_without_cache(tmp_path, monkeypatch):
     test_db = setup_test_db(tmp_path, monkeypatch)
     first = test_db.create_platform_dispatch_job("job-1", "accounts_sync", {}, "https://sub.example")

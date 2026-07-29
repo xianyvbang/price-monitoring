@@ -1724,6 +1724,55 @@ async def api_platform_dispatch_accounts(request: Request):
     return platform_dispatch_accounts_response()
 
 
+@app.get("/api/platform-dispatch/accounts/{account_id}/evidence")
+async def api_platform_dispatch_account_evidence(
+    request: Request, account_id: int, page: int = 1, page_size: int = 20
+):
+    require_user(request)
+    if account_id <= 0:
+        return JSONResponse({"ok": False, "message": "账号 ID 必须是正整数"}, status_code=400)
+    site_url = db.get_setting(SUB2API_SITE_URL_SETTING, "").strip().rstrip("/")
+    cache = db.get_platform_dispatch_cache()
+    if not cache or cache.get("source_site_url") != site_url:
+        return JSONResponse({"ok": False, "message": "请先同步当前站点的账号信息"}, status_code=409)
+    account = next(
+        (
+            item
+            for item in cache.get("accounts") or []
+            if isinstance(item, dict) and _platform_dispatch_account_id(item) == account_id
+        ),
+        None,
+    )
+    if account is None:
+        return JSONResponse({"ok": False, "message": "账号不存在"}, status_code=404)
+    policy = db.get_platform_dispatch_policy(POLICY_DEFAULTS)["config"]
+    short_window_seconds = max(
+        1,
+        int(policy["probe_interval_seconds"])
+        * int(policy["evidence_ttl_multiplier"]),
+    )
+    since = (
+        datetime.now(timezone.utc) - timedelta(seconds=short_window_seconds)
+    ).isoformat()
+    result = db.list_platform_dispatch_evidence_page(
+        site_url,
+        account_id,
+        page=page,
+        page_size=page_size,
+        since=since,
+    )
+    return {
+        "ok": True,
+        "account": {
+            "id": account_id,
+            "name": str(account.get("name") or f"账号 {account_id}"),
+        },
+        "short_window_seconds": short_window_seconds,
+        **result,
+        "items": [public_platform_dispatch_evidence(item) for item in result["items"]],
+    }
+
+
 @app.get("/api/platform-dispatch/policy")
 async def api_platform_dispatch_policy(request: Request):
     require_user(request)
