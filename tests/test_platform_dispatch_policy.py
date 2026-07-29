@@ -820,7 +820,7 @@ async def test_oauth_accounts_do_not_affect_apikey_scheduling(tmp_path):
 
     summary = await scheduler.run_once()
 
-    assert [read.get("account_type") for read in client.account_read_filters] == [None]
+    assert [read.get("account_type") for read in client.account_read_filters] == ["apikey"]
     assert "oauth_group_statistics" not in summary
     assert summary["scheduling_action"] == ""
     assert client.updates == []

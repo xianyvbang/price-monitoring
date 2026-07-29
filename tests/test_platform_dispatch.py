@@ -968,7 +968,7 @@ def test_platform_dispatch_syncs_pages_without_loading_activity_and_preserves_ca
         invalid_filter = client.post("/api/platform-dispatch/refresh", json={"status": "unknown"})
         started = client.post(
             "/api/platform-dispatch/sync",
-            json={"platform": " openai ", "type": "apikey", "status": "ACTIVE"},
+            json={"platform": " openai ", "type": "oauth", "status": "ACTIVE"},
         )
         job = wait_for_dispatch_job(client)
         response = client.get("/api/platform-dispatch")
@@ -1041,6 +1041,7 @@ def test_platform_dispatch_group_sync_only_adds_accounts_and_merges_membership(t
                 "recent_activity": [{"id": "historical-activity"}],
             },
             {"id": 7, "name": "history-only", "status": "active", "group_ids": [4]},
+            {"id": 8, "name": "old-oauth", "type": "oauth", "status": "active", "group_ids": [4]},
         ],
         [
             {"id": 3, "name": "历史分组", "platform": "openai"},
@@ -1088,15 +1089,17 @@ def test_platform_dispatch_group_sync_only_adds_accounts_and_merges_membership(t
 
     assert started.status_code == 202
     assert started.json()["job"]["refresh_filter"]["group_id"] == 4
+    assert started.json()["job"]["refresh_filter"]["type"] == "apikey"
     assert job["status"] == "succeeded"
     assert job["refresh_filter"]["group_id"] == 4
+    assert job["refresh_filter"]["type"] == "apikey"
     assert "拉取 2 个，新增 1 个，跳过 1 个，补充分组归属 1 个" in job["message"]
     assert admin_client.group_platforms == [None]
     assert admin_client.account_queries == [
         (
             1,
             100,
-            {"platform": None, "account_type": None, "status": None, "group_id": 4},
+            {"platform": None, "account_type": "apikey", "status": None, "group_id": 4},
         )
     ]
     accounts_by_id = {account["id"]: account for account in accounts}
@@ -1107,6 +1110,7 @@ def test_platform_dispatch_group_sync_only_adds_accounts_and_merges_membership(t
     assert accounts_by_id[1]["group_ids"] == [3, 4]
     assert accounts_by_id[2]["group_ids"] == [4]
     assert accounts_by_id[7]["name"] == "history-only"
+    assert 8 not in accounts_by_id
     groups_by_id = {group["id"]: group for group in payload["groups"]}
     assert set(groups_by_id) == {3, 4, 5}
     assert groups_by_id[4]["name"] == "目标分组旧名称"

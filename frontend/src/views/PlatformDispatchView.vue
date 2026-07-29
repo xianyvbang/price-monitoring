@@ -2450,17 +2450,6 @@ onBeforeUnmount(() => {
             <el-option v-for="option in platformOptions" :key="option.value" :label="option.label" :value="option.value" />
           </el-select>
         </el-form-item>
-        <el-form-item label="类型">
-          <el-select
-            v-model="refreshForm.type"
-            clearable
-            filterable
-            :disabled="startingJob"
-            placeholder="全部类型"
-          >
-            <el-option v-for="option in typeOptions" :key="option.value" :label="option.label" :value="option.value" />
-          </el-select>
-        </el-form-item>
         <el-form-item label="状态">
           <el-select v-model="refreshForm.status" clearable :disabled="startingJob" placeholder="全部状态">
             <el-option v-for="option in STATUS_FILTER_OPTIONS" :key="option.value" :label="option.label" :value="option.value" />

@@ -981,7 +981,7 @@ class PlatformDispatchPolicyScheduler:
         }
         refresh_filter = cache.get("refresh_filter") or {}
         platform = str(refresh_filter.get("platform") or "")
-        account_type = str(refresh_filter.get("type") or "")
+        account_type = "apikey"
         if progress:
             cached_candidates = [
                 account
@@ -1000,7 +1000,7 @@ class PlatformDispatchPolicyScheduler:
                 ),
             )
         remote_accounts, groups = await asyncio.gather(
-            client.list_accounts(platform=platform or None, account_type=account_type or None),
+            client.list_accounts(platform=platform or None, account_type=account_type),
             client.list_groups(platform=platform or None),
         )
         excluded_group_ids = {

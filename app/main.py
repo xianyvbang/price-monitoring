@@ -4643,7 +4643,7 @@ async def _run_platform_dispatch_account_sync_locked(
                     page=page,
                     page_size=100,
                     platform=None if target_group_id is not None else refresh_filter["platform"] or None,
-                    account_type=None if target_group_id is not None else refresh_filter["type"] or None,
+                    account_type="apikey",
                     status=None if target_group_id is not None else refresh_filter["status"] or None,
                     group_id=group_query,
                 )
@@ -4721,7 +4721,15 @@ async def _run_platform_dispatch_account_sync_locked(
         old_groups: list[dict[str, Any]] = []
         if old_cache and old_cache.get("source_site_url") == admin_client.site_url:
             activities_refreshed_at = str(old_cache.get("activities_refreshed_at") or "")
-            old_accounts = [account for account in old_cache.get("accounts") or [] if isinstance(account, dict)]
+            old_accounts = [
+                account
+                for account in old_cache.get("accounts") or []
+                if isinstance(account, dict)
+                and str(account.get("type") or account.get("account_type") or account.get("accountType") or "")
+                .strip()
+                .casefold()
+                in {"", "apikey"}
+            ]
             old_groups = [group for group in old_cache.get("groups") or [] if isinstance(group, dict)]
         fetched_accounts = [public_dispatch_account(account, []) for account in raw_accounts]
         public_accounts, added_count, existing_count, membership_count = _merge_platform_dispatch_accounts(
@@ -5255,6 +5263,7 @@ def platform_dispatch_refresh_filter(payload: Any) -> dict[str, Any]:
         if group_id <= 0 or str(raw_group_id).strip() != str(group_id):
             raise ValueError("group_id 必须是正整数")
         values["group_id"] = group_id
+    values["type"] = "apikey"
     return values
 
 
