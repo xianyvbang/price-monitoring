@@ -1773,6 +1773,11 @@ onBeforeUnmount(() => {
       <div class="policy-rules">
         <p><strong>Sub2API 调度开关</strong><span>认证、余额和用量上限异常时立即关闭账号调度；价格安全且健康达标时，可重新开启系统或人员手动关闭的 active 账号。</span></p>
         <p><strong>系统计算</strong><span>短期只统计当前时间向前 {{ Number(policyConfig.probe_interval_seconds) * Number(policyConfig.evidence_ttl_multiplier) }} 秒内最多 10 条证据，最新一条与其余均值各 50%；窗口外数据只参与最近 60 条长期均值，最终评分为短期 70% + 长期 30%。</span></p>
+        <p><strong>数据来源</strong><span>健康分证据来自 Sub2API 最近使用记录、账号错误记录、上游错误记录和系统主动探活，并使用请求是否成功、HTTP 状态码、错误信息、是否超时及首字耗时进行分类。自动调度还会读取远端账号状态与调度开关、实时可用性、并发占用、排队数及账号所属分组倍率；这些数据只用于判断可用池、触发扩容和比较价格，不直接计入健康分。</span></p>
+        <p><strong>证据分值</strong><span>请求成功为 100 分；成功但首字耗时超过 {{ Number(policyConfig.slow_first_token_ms) / 1000 }} 秒为 65 分；认证失败（401/403）、余额不足或用量上限异常为 0 分；超时或主动探活失败为 10 分；HTTP 429/502/503 为 25 分；其他上游错误为 40 分。每条分值按“系统计算”的短期和长期占比合成健康分，上游价格不参与健康分计算。</span></p>
+        <p><strong>关闭调度</strong><span>自动调度开启后，最新有效证据为认证、余额或用量上限致命异常时进入关闭名单；最近 {{ policyConfig.failure_window }} 条有效证据中，探活失败、超时或 HTTP 429/502/503 达到 {{ policyConfig.failure_threshold }} 次，且健康分低于 {{ policyConfig.failure_health_threshold }} 分时也会关闭；最近 {{ policyConfig.slow_window }} 条有效证据中，慢首字达到 {{ policyConfig.slow_threshold }} 次且健康分低于 {{ policyConfig.failure_health_threshold }} 分时同样关闭。健康异常每轮每个分组最多关闭 1 个，多分组账号会占用其全部所属分组的名额；非致命异常关闭后，每个所属分组仍须至少保留 {{ policyConfig.minimum_available_accounts }} 个 active 且已开启调度的账号，致命异常不受最低保障限制。价格保护不受上述每组限额和最低保障限制，可在同一轮关闭全部价格不安全账号。</span></p>
+        <p><strong>开启调度</strong><span>只考虑远端状态仍为 active、当前调度已关闭、证据有效、健康分达到 {{ policyConfig.health_threshold }} 分且未被价格保护判定为不安全的账号。价格保护开启且成本已明确恢复安全时，系统优先选择健康分最高的账号恢复；否则，当任一分组的健康可用账号少于 {{ policyConfig.minimum_available_accounts }} 个时始终执行最低保障回池，开启健康回池后还会继续恢复到每组 {{ policyConfig.healthy_target_accounts }} 个。正常回池还要求账号在当前证据有效期内探活成功，并优先选择可覆盖最多不足分组、健康分更高的账号；全部分组每轮合计最多开启 1 个，可能覆盖系统或人员手动关闭状态，inactive 或 error 账号不会自动开启。</span></p>
+        <p><strong>上游价格</strong><span>账号需绑定余额监控分组，上游成本倍率 = 有效分组倍率 × 充值实付金额 ÷ 充值到账金额；账号所属本地平台分组中的最小正数倍率作为销售倍率，最低安全倍率 = 上游成本倍率 × (1 + {{ policyConfig.minimum_profit_margin_percent }}% 最低利润率)。开启价格保护后，销售倍率低于安全线会关闭调度，重新安全且健康达标后可恢复。智能扩容和负载因子使用“健康分 ÷ 上游成本倍率 ^ {{ policyConfig.rate_weight_exponent }}”作为分配权重，因此成本越低，获得的扩容并发和负载越多，但不会改变健康分。未绑定、倍率未知、本地销售倍率未知或超过两个自动查询周期的成本数据只告警，不参与成本调权，保持现有并发和负载，也不会仅因成本未知而关闭调度。</span></p>
       </div>
 
       <div v-if="policyActions.length" class="policy-recent-actions">

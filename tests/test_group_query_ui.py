@@ -107,6 +107,64 @@ def test_monitor_pause_api_updates_dashboard_payload(tmp_path, monkeypatch):
     assert resume.json()["settings"]["monitor_paused"] is False
 
 
+def test_top_menu_visibility_settings_api_and_session(tmp_path, monkeypatch):
+    test_db = Database(str(tmp_path / "app.db"), "test-key")
+    test_db.init()
+    test_db.ensure_admin("admin", "password123")
+    test_db.update_general_settings(20, 600, 3, 1200)
+    monkeypatch.setattr("app.main.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.db", test_db)
+    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
+    monkeypatch.setattr("app.main.scheduler.notify_settings_changed", lambda: None)
+
+    async def stop_scheduler():
+        return None
+
+    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
+
+    with TestClient(app) as client:
+        login(client)
+        initial = client.get("/api/session")
+        saved = client.post(
+            "/api/settings/general",
+            json={
+                "top_menu_visibility": {"accounts": False, "logs": False, "unknown": False},
+            },
+        )
+        legacy = client.post(
+            "/api/settings/general",
+            json={
+                "request_timeout": 20,
+                "query_interval": 600,
+                "group_rate_query_interval": 1200,
+                "default_threshold": 3,
+                "monitor_paused": False,
+            },
+        )
+        session = client.get("/api/session")
+        settings = client.get("/api/settings")
+        hidden_page = client.get("/accounts")
+
+    assert initial.status_code == 200
+    assert all(initial.json()["top_menu_visibility"].values())
+    assert saved.status_code == 200
+    assert saved.json()["settings"]["request_timeout"] == 20
+    assert saved.json()["settings"]["query_interval"] == 600
+    assert saved.json()["settings"]["group_rate_query_interval"] == 1200
+    assert saved.json()["settings"]["default_threshold"] == 3
+    assert saved.json()["settings"]["top_menu_visibility"] == {
+        "dashboard": True,
+        "accounts": False,
+        "platform_dispatch": True,
+        "opencode_go": True,
+        "logs": False,
+    }
+    assert legacy.json()["settings"]["top_menu_visibility"] == saved.json()["settings"]["top_menu_visibility"]
+    assert session.json()["top_menu_visibility"] == saved.json()["settings"]["top_menu_visibility"]
+    assert settings.json()["settings"]["top_menu_visibility"] == saved.json()["settings"]["top_menu_visibility"]
+    assert_spa_page(hidden_page)
+
+
 def test_sub2api_settings_api_encrypts_admin_key(tmp_path, monkeypatch):
     test_db = Database(str(tmp_path / "app.db"), "test-key")
     test_db.init()

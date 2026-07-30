@@ -25,6 +25,30 @@ CONSUMPTION_QUERY_BATCH_SIZE = 500
 REQUEST_TIMEOUT_SECONDS = 60
 BALANCE_QUERY_INTERVAL_SECONDS = 5 * 60
 GROUP_RATE_QUERY_INTERVAL_SECONDS = 20 * 60
+TOP_MENU_VISIBILITY_SETTING = "top_menu_visibility"
+TOP_MENU_VISIBILITY_DEFAULTS = {
+    "dashboard": True,
+    "accounts": True,
+    "platform_dispatch": True,
+    "opencode_go": True,
+    "logs": True,
+}
+
+
+def normalize_top_menu_visibility(value: Any) -> dict[str, bool]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            value = None
+    if not isinstance(value, dict):
+        return dict(TOP_MENU_VISIBILITY_DEFAULTS)
+
+    visibility = dict(TOP_MENU_VISIBILITY_DEFAULTS)
+    for key in visibility:
+        if type(value.get(key)) is bool:
+            visibility[key] = value[key]
+    return visibility
 
 
 def format_china_time(value: Any) -> str:
@@ -444,6 +468,7 @@ class Database:
             self._set_default(conn, "group_rate_query_interval", str(GROUP_RATE_QUERY_INTERVAL_SECONDS))
             self._set_default(conn, "default_threshold", "5")
             self._set_default(conn, "monitor_paused", "0")
+            self._set_default(conn, TOP_MENU_VISIBILITY_SETTING, json.dumps(TOP_MENU_VISIBILITY_DEFAULTS, sort_keys=True))
             self._set_default(conn, "opencode_go_cpa_auto_delete_enabled", "0")
             conn.execute(
                 """
@@ -789,6 +814,7 @@ class Database:
             "group_rate_query_interval": int(float(values.get("group_rate_query_interval", str(GROUP_RATE_QUERY_INTERVAL_SECONDS)))),
             "default_threshold": float(values.get("default_threshold", "5")),
             "monitor_paused": str(values.get("monitor_paused", "0")).strip().lower() in {"1", "true", "yes", "on"},
+            "top_menu_visibility": normalize_top_menu_visibility(values.get(TOP_MENU_VISIBILITY_SETTING)),
         }
 
     def update_general_settings(
@@ -798,6 +824,7 @@ class Database:
         default_threshold: float,
         group_rate_query_interval: int = GROUP_RATE_QUERY_INTERVAL_SECONDS,
         monitor_paused: bool | None = None,
+        top_menu_visibility: dict[str, Any] | None = None,
     ) -> None:
         with self.connect() as conn:
             values = {
@@ -808,6 +835,16 @@ class Database:
             }
             if monitor_paused is not None:
                 values["monitor_paused"] = "1" if monitor_paused else "0"
+            if isinstance(top_menu_visibility, dict):
+                row = conn.execute("SELECT value FROM settings WHERE key = ?", (TOP_MENU_VISIBILITY_SETTING,)).fetchone()
+                visibility = normalize_top_menu_visibility(row["value"] if row else None)
+                updated = False
+                for key in visibility:
+                    if key in top_menu_visibility and type(top_menu_visibility[key]) is bool:
+                        visibility[key] = top_menu_visibility[key]
+                        updated = True
+                if updated:
+                    values[TOP_MENU_VISIBILITY_SETTING] = json.dumps(visibility, sort_keys=True)
             for key, value in values.items():
                 conn.execute(
                     "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",

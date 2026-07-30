@@ -2,13 +2,15 @@
 import { inject, onMounted, reactive, ref } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { Bell, Check, Connection, Delete, Edit, Lock, Message, Plus, Refresh, Setting } from "@element-plus/icons-vue";
+import { Bell, Check, Connection, Delete, Edit, Lock, Menu, Message, Plus, Refresh, Setting } from "@element-plus/icons-vue";
 import { api } from "../api";
 
 const router = useRouter();
 const refreshSession = inject("refreshSession");
+const updateTopMenuVisibility = inject("updateTopMenuVisibility");
 const loading = ref(false);
 const savingGeneral = ref(false);
+const savingTopMenu = ref(false);
 const savingSub2Api = ref(false);
 const savingCpa = ref(false);
 const savingSmtp = ref(false);
@@ -19,6 +21,7 @@ const savingReminder = ref(false);
 const deletingReminderId = ref(null);
 
 const queryDialog = ref(false);
+const topMenuDialog = ref(false);
 const sub2ApiDialog = ref(false);
 const cpaDialog = ref(false);
 const smtpDialog = ref(false);
@@ -34,6 +37,14 @@ const general = reactive({
   default_threshold: 5,
   monitor_paused: false
 });
+const topMenuVisibility = reactive({
+  dashboard: true,
+  accounts: true,
+  platform_dispatch: true,
+  opencode_go: true,
+  logs: true
+});
+const savedTopMenuVisibility = ref({ ...topMenuVisibility });
 const sub2api = reactive({
   admin_key: "",
   admin_key_masked: "",
@@ -73,7 +84,8 @@ async function loadSettings() {
   loading.value = true;
   try {
     const payload = await api.settings();
-    Object.assign(general, payload.settings || {});
+    assignGeneralSettings(payload.settings || {});
+    setTopMenuVisibility(payload.settings?.top_menu_visibility || payload.settings?.topMenuVisibility);
     assignSub2Api(payload.sub2api || {});
     assignCpa(payload.cpa || {});
     Object.assign(smtp, payload.smtp || {});
@@ -84,6 +96,37 @@ async function loadSettings() {
   } finally {
     loading.value = false;
   }
+}
+
+function assignGeneralSettings(value) {
+  Object.assign(general, {
+    request_timeout: value.request_timeout ?? general.request_timeout,
+    query_interval: value.query_interval ?? general.query_interval,
+    group_rate_query_interval: value.group_rate_query_interval ?? value.groupRateQueryInterval ?? general.group_rate_query_interval,
+    default_threshold: value.default_threshold ?? general.default_threshold,
+    monitor_paused: typeof value.monitor_paused === "boolean" ? value.monitor_paused : general.monitor_paused
+  });
+}
+
+function assignTopMenuVisibility(value) {
+  Object.keys(topMenuVisibility).forEach((key) => {
+    topMenuVisibility[key] = typeof value?.[key] === "boolean" ? value[key] : true;
+  });
+}
+
+function setTopMenuVisibility(value) {
+  assignTopMenuVisibility(value);
+  savedTopMenuVisibility.value = { ...topMenuVisibility };
+}
+
+function openTopMenuDialog() {
+  assignTopMenuVisibility(savedTopMenuVisibility.value);
+  topMenuDialog.value = true;
+}
+
+function cancelTopMenuDialog() {
+  assignTopMenuVisibility(savedTopMenuVisibility.value);
+  topMenuDialog.value = false;
 }
 
 function assignSub2Api(value) {
@@ -116,13 +159,31 @@ async function saveGeneral() {
   savingGeneral.value = true;
   try {
     const payload = await api.saveGeneralSettings(general);
-    Object.assign(general, payload.settings);
+    assignGeneralSettings(payload.settings || {});
     queryDialog.value = false;
     ElMessage.success("查询设置已保存");
   } catch (error) {
     ElMessage.error(error.message || "保存失败");
   } finally {
     savingGeneral.value = false;
+  }
+}
+
+async function saveTopMenu() {
+  savingTopMenu.value = true;
+  try {
+    const payload = await api.saveGeneralSettings({
+      top_menu_visibility: { ...topMenuVisibility }
+    });
+    assignGeneralSettings(payload.settings || {});
+    setTopMenuVisibility(payload.settings?.top_menu_visibility || payload.settings?.topMenuVisibility);
+    updateTopMenuVisibility?.(topMenuVisibility);
+    topMenuDialog.value = false;
+    ElMessage.success("顶部菜单设置已保存");
+  } catch (error) {
+    ElMessage.error(error.message || "保存失败");
+  } finally {
+    savingTopMenu.value = false;
   }
 }
 
@@ -291,13 +352,16 @@ onMounted(loadSettings);
     <div class="page-head">
       <div>
         <h1>通用设置</h1>
-        <p>配置查询节奏、SMTP 邮件、登录密码和定时提醒。</p>
+        <p>配置查询节奏、顶部菜单、SMTP 邮件、登录密码和定时提醒。</p>
       </div>
     </div>
 
     <div class="settings-launch-grid">
       <el-button class="settings-launch-button" :icon="Setting" @click="queryDialog = true">
         查询设置
+      </el-button>
+      <el-button class="settings-launch-button" :icon="Menu" @click="openTopMenuDialog">
+        顶部菜单设置
       </el-button>
       <el-button class="settings-launch-button" :icon="Connection" @click="sub2ApiDialog = true">
         Sub2API 配置
@@ -315,6 +379,22 @@ onMounted(loadSettings);
         定时提醒事项
       </el-button>
     </div>
+
+    <el-dialog v-model="topMenuDialog" title="顶部菜单设置" width="520px">
+      <el-form label-position="left" label-width="120px">
+        <el-form-item label="仪表盘"><el-switch v-model="topMenuVisibility.dashboard" active-text="显示" inactive-text="隐藏" /></el-form-item>
+        <el-form-item label="平台配置"><el-switch v-model="topMenuVisibility.accounts" active-text="显示" inactive-text="隐藏" /></el-form-item>
+        <el-form-item label="平台调度"><el-switch v-model="topMenuVisibility.platform_dispatch" active-text="显示" inactive-text="隐藏" /></el-form-item>
+        <el-form-item label="OpenCode Go"><el-switch v-model="topMenuVisibility.opencode_go" active-text="显示" inactive-text="隐藏" /></el-form-item>
+        <el-form-item label="日志"><el-switch v-model="topMenuVisibility.logs" active-text="显示" inactive-text="隐藏" /></el-form-item>
+      </el-form>
+      <template #footer>
+        <div class="dialog-footer">
+          <el-button @click="cancelTopMenuDialog">取消</el-button>
+          <el-button type="primary" :icon="Check" :loading="savingTopMenu" @click="saveTopMenu">保存</el-button>
+        </div>
+      </template>
+    </el-dialog>
 
     <el-dialog v-model="queryDialog" title="查询设置" width="560px">
       <el-form :model="general" label-position="top" @submit.prevent="saveGeneral">
@@ -513,7 +593,7 @@ onMounted(loadSettings);
 .settings-launch-grid {
   display: grid;
   gap: 16px;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
 }
 
 .settings-launch-button.el-button {

@@ -5,6 +5,7 @@ from app.models import (
     BALANCE_QUERY_INTERVAL_SECONDS,
     GROUP_RATE_QUERY_INTERVAL_SECONDS,
     REQUEST_TIMEOUT_SECONDS,
+    TOP_MENU_VISIBILITY_DEFAULTS,
     Database,
     actual_consumption_amount,
     format_china_time,
@@ -921,6 +922,40 @@ def test_monitor_pause_setting_can_be_toggled(tmp_path):
     db.update_general_settings(15, BALANCE_QUERY_INTERVAL_SECONDS, 5, GROUP_RATE_QUERY_INTERVAL_SECONDS, False)
 
     assert db.get_general_settings()["monitor_paused"] is False
+
+
+def test_top_menu_visibility_defaults_and_partial_updates(tmp_path):
+    db = Database(str(tmp_path / "app.db"), "test-key")
+    db.init()
+
+    assert db.get_general_settings()["top_menu_visibility"] == TOP_MENU_VISIBILITY_DEFAULTS
+
+    db.update_general_settings(
+        15,
+        BALANCE_QUERY_INTERVAL_SECONDS,
+        5,
+        GROUP_RATE_QUERY_INTERVAL_SECONDS,
+        top_menu_visibility={"dashboard": False, "logs": False, "unknown": False},
+    )
+    db.update_general_settings(
+        15,
+        BALANCE_QUERY_INTERVAL_SECONDS,
+        5,
+        GROUP_RATE_QUERY_INTERVAL_SECONDS,
+        top_menu_visibility={"accounts": False, "logs": "invalid"},
+    )
+
+    assert db.get_general_settings()["top_menu_visibility"] == {
+        "dashboard": False,
+        "accounts": False,
+        "platform_dispatch": True,
+        "opencode_go": True,
+        "logs": False,
+    }
+
+    db.set_setting("top_menu_visibility", "invalid")
+
+    assert db.get_general_settings()["top_menu_visibility"] == TOP_MENU_VISIBILITY_DEFAULTS
 
 
 def test_reminder_crud_and_update_resets_sent_state(tmp_path):

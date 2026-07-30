@@ -217,7 +217,11 @@ async def favicon_ico():
 @app.get("/api/session")
 async def api_session(request: Request):
     user = current_user(request)
-    return {"authenticated": bool(user), "user": {"username": user} if user else None}
+    return {
+        "authenticated": bool(user),
+        "user": {"username": user} if user else None,
+        "top_menu_visibility": db.get_general_settings()["top_menu_visibility"],
+    }
 
 
 def current_user(request: Request) -> str | None:
@@ -3939,12 +3943,14 @@ async def api_delete_reminder(request: Request, reminder_id: int):
 async def api_general_settings(request: Request):
     require_user(request)
     payload = await request.json()
+    current = db.get_general_settings()
     db.update_general_settings(
-        float(payload.get("request_timeout", REQUEST_TIMEOUT_SECONDS)),
-        int(payload.get("query_interval", BALANCE_QUERY_INTERVAL_SECONDS)),
-        float(payload.get("default_threshold", 5)),
-        int(payload.get("group_rate_query_interval", payload.get("groupRateQueryInterval", GROUP_RATE_QUERY_INTERVAL_SECONDS))),
+        float(payload.get("request_timeout", current["request_timeout"])),
+        int(payload.get("query_interval", current["query_interval"])),
+        float(payload.get("default_threshold", current["default_threshold"])),
+        int(payload.get("group_rate_query_interval", payload.get("groupRateQueryInterval", current["group_rate_query_interval"]))),
         _optional_bool_payload(payload, "monitor_paused", "monitorPaused"),
+        payload.get("top_menu_visibility", payload.get("topMenuVisibility")),
     )
     scheduler.notify_settings_changed()
     db.add_log("info", "settings", "API 更新通用设置")
