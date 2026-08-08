@@ -495,6 +495,148 @@ def test_platform_dispatch_account_probe_api_uses_group_platform_default(tmp_pat
     assert probe_client.probes == [(1, "claude-sonnet-4-6")]
 
 
+def test_platform_dispatch_priority_api_sets_and_restores_override(tmp_path, monkeypatch):
+    test_db = setup_test_db(tmp_path, monkeypatch)
+    test_db.set_setting("sub2api_site_url", "https://sub.example")
+    test_db.replace_platform_dispatch_cache(
+        "https://sub.example",
+        [{"id": 1, "name": "priority-account", "status": "active", "priority": 2}],
+        [],
+        [],
+        {"platform": "", "type": "", "status": "", "include_ungrouped": True},
+    )
+
+    class PriorityClient:
+        site_url = "https://sub.example"
+
+        def __init__(self):
+            self.updates = []
+
+        async def update_account_fields(self, account_id, fields):
+            self.updates.append((account_id, dict(fields)))
+            return {
+                "id": account_id,
+                "name": "priority-account",
+                "status": "active",
+                "priority": fields["priority"],
+            }
+
+    priority_client = PriorityClient()
+    monkeypatch.setattr("app.main.sub2api_admin_client", lambda: priority_client)
+
+    with TestClient(app) as client:
+        login(client)
+        configured = client.put(
+            "/api/platform-dispatch/accounts/1/priority", json={"index": 7}
+        )
+        invalid = client.put(
+            "/api/platform-dispatch/accounts/1/priority", json={"priority": 1001}
+        )
+        restored = client.put(
+            "/api/platform-dispatch/accounts/1/priority", json={"priority": None}
+        )
+
+    assert configured.status_code == 200
+    assert configured.json()["config"]["account_priority_overrides"] == {"1": 7}
+    assert configured.json()["account"]["priority"] == 7
+    assert configured.json()["account"]["priority_override"] == 7
+    assert configured.json()["account"]["default_priority"] == 2
+    assert invalid.status_code == 400
+    assert restored.status_code == 200
+    assert restored.json()["config"]["account_priority_overrides"] == {}
+    assert restored.json()["account"]["priority"] == 2
+    assert restored.json()["account"]["priority_override"] is None
+    assert priority_client.updates == [(1, {"priority": 7}), (1, {"priority": 2})]
+
+
+def test_platform_dispatch_priority_api_does_not_persist_failed_remote_update(tmp_path, monkeypatch):
+    test_db = setup_test_db(tmp_path, monkeypatch)
+    test_db.set_setting("sub2api_site_url", "https://sub.example")
+    test_db.replace_platform_dispatch_cache(
+        "https://sub.example",
+        [{"id": 1, "name": "priority-account", "status": "active", "priority": 2}],
+        [],
+        [],
+        {"platform": "", "type": "", "status": "", "include_ungrouped": True},
+    )
+
+    class FailingPriorityClient:
+        async def update_account_fields(self, account_id, fields):
+            raise Sub2ApiAdminError("update failed", status_code=502)
+
+    monkeypatch.setattr("app.main.sub2api_admin_client", lambda: FailingPriorityClient())
+
+    with TestClient(app) as client:
+        login(client)
+        response = client.put(
+            "/api/platform-dispatch/accounts/1/priority", json={"priority": 7}
+        )
+
+    assert response.status_code == 502
+    policy = test_db.get_platform_dispatch_policy(app_main.POLICY_DEFAULTS)["config"]
+    assert policy["account_priority_overrides"] == {}
+
+
+def test_account_probe_lock_only_blocks_mutations_for_same_account(tmp_path, monkeypatch):
+    test_db = setup_test_db(tmp_path, monkeypatch)
+    test_db.set_setting("sub2api_site_url", "https://sub.example")
+    test_db.replace_platform_dispatch_cache(
+        "https://sub.example",
+        [
+            {"id": 1, "name": "probing", "status": "active", "schedulable": True},
+            {"id": 2, "name": "other", "status": "active", "schedulable": True},
+        ],
+        [],
+        [],
+        {"platform": "", "type": "", "status": "", "include_ungrouped": True},
+    )
+
+    class AccountLock:
+        def __init__(self, busy):
+            self.busy = busy
+
+        def locked(self):
+            return self.busy
+
+        async def __aenter__(self):
+            self.busy = True
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            self.busy = False
+
+    locks = {1: AccountLock(True), 2: AccountLock(False)}
+    monkeypatch.setattr(
+        app_main.platform_dispatch_policy_scheduler,
+        "account_lock",
+        lambda account_id: locks[account_id],
+    )
+
+    class SchedulingClient:
+        async def update_account_schedulable(self, account_id, schedulable):
+            return {
+                "id": account_id,
+                "name": "other",
+                "status": "active",
+                "schedulable": schedulable,
+            }
+
+    monkeypatch.setattr("app.main.sub2api_admin_client", lambda: SchedulingClient())
+
+    with TestClient(app) as client:
+        login(client)
+        same_account = client.post(
+            "/api/platform-dispatch/accounts/1/schedulable", json={"schedulable": False}
+        )
+        other_account = client.post(
+            "/api/platform-dispatch/accounts/2/schedulable", json={"schedulable": False}
+        )
+
+    assert same_account.status_code == 409
+    assert other_account.status_code == 200
+    assert other_account.json()["account"]["schedulable"] is False
+
+
 def test_platform_dispatch_group_probe_model_api_sets_override_and_restores_default(tmp_path, monkeypatch):
     test_db = setup_test_db(tmp_path, monkeypatch)
     test_db.set_setting("sub2api_site_url", "https://sub.example")

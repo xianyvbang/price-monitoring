@@ -92,6 +92,7 @@ from app.services.sub2api_admin import (
     public_dispatch_group,
 )
 from app.services.platform_dispatch_policy import (
+    DEFAULT_ACCOUNT_PRIORITY,
     POLICY_DEFAULTS,
     PlatformDispatchPolicyScheduler,
     public_platform_dispatch_cost_profile,
@@ -1990,14 +1991,15 @@ async def api_platform_dispatch_account_probe(request: Request, account_id: int)
         return JSONResponse({"ok": False, "message": "账号 ID 必须是正整数"}, status_code=400)
     if db.has_active_platform_dispatch_job():
         return JSONResponse({"ok": False, "message": "平台调度任务执行期间不能单独探活"}, status_code=409)
-    if platform_dispatch_policy_scheduler.lock.locked():
-        return JSONResponse({"ok": False, "message": "自动调度策略执行期间不能单独探活"}, status_code=409)
     cache = db.get_platform_dispatch_cache()
     if not cache or not cache.get("accounts"):
         return JSONResponse({"ok": False, "message": "请先同步账号信息"}, status_code=409)
     try:
         admin_client = sub2api_admin_client()
-        async with platform_dispatch_policy_scheduler.lock:
+        account_lock = platform_dispatch_policy_scheduler.account_lock(account_id)
+        if account_lock.locked():
+            return JSONResponse({"ok": False, "message": "该账号正在执行其他操作"}, status_code=409)
+        async with account_lock:
             result = await platform_dispatch_policy_scheduler.probe_account_health(
                 admin_client, cache, account_id
             )
@@ -2025,6 +2027,77 @@ async def api_platform_dispatch_account_probe(request: Request, account_id: int)
     if updated_account is None:
         return JSONResponse({"ok": False, "message": "账号不存在"}, status_code=404)
     return {"ok": True, "probe": result, "account": updated_account}
+
+
+@app.put("/api/platform-dispatch/accounts/{account_id}/priority")
+async def api_platform_dispatch_account_priority_update(request: Request, account_id: int):
+    require_user(request)
+    if account_id <= 0:
+        return JSONResponse({"ok": False, "message": "账号 ID 必须是正整数"}, status_code=400)
+    if db.has_active_platform_dispatch_job():
+        return JSONResponse({"ok": False, "message": "平台调度任务执行期间不能修改 Index"}, status_code=409)
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict) or not any(key in payload for key in ("priority", "index")):
+            raise ValueError("priority 或 index 字段不能为空")
+        raw_priority = payload.get("priority", payload.get("index"))
+        current = db.get_platform_dispatch_policy(POLICY_DEFAULTS)["config"]
+        overrides = dict(current.get("account_priority_overrides") or {})
+        if raw_priority is None or (isinstance(raw_priority, str) and not raw_priority.strip()):
+            overrides.pop(str(account_id), None)
+        else:
+            overrides[str(account_id)] = raw_priority
+        config_value = validate_policy_config({"account_priority_overrides": overrides}, current)
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+
+    site_url = db.get_setting(SUB2API_SITE_URL_SETTING, "").strip().rstrip("/")
+    cache = db.get_platform_dispatch_cache()
+    if not cache or cache.get("source_site_url") != site_url:
+        return JSONResponse({"ok": False, "message": "请先同步当前站点的账号信息"}, status_code=409)
+    account = next(
+        (
+            item for item in cache.get("accounts") or []
+            if isinstance(item, dict) and _platform_dispatch_account_id(item) == account_id
+        ),
+        None,
+    )
+    if account is None:
+        return JSONResponse({"ok": False, "message": "账号不存在"}, status_code=404)
+
+    account_lock = platform_dispatch_policy_scheduler.account_lock(account_id)
+    if account_lock.locked():
+        return JSONResponse({"ok": False, "message": "该账号正在执行其他操作"}, status_code=409)
+    priority = config_value["account_priority_overrides"].get(
+        str(account_id), DEFAULT_ACCOUNT_PRIORITY
+    )
+    try:
+        async with account_lock:
+            if _optional_int(account.get("priority")) == priority:
+                updated = public_dispatch_account(account, account.get("recent_activity") or [])
+            else:
+                updated = await sub2api_admin_client().update_account_fields(
+                    account_id, {"priority": priority}
+                )
+    except Sub2ApiAdminError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=exc.status_code)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=502)
+
+    db.update_platform_dispatch_cached_account(updated)
+    db.save_platform_dispatch_policy(config_value, site_url)
+    platform_dispatch_policy_scheduler.notify_changed(run_immediately=False)
+    db.add_log(
+        "info",
+        "platform-dispatch-policy",
+        f"Sub2API 调度账号 {account.get('name') or account_id} (#{account_id}) Index 设置为 {priority}",
+    )
+    response = platform_dispatch_accounts_response(account_id=account_id)
+    return {
+        "ok": True,
+        "account": response["accounts"][0],
+        "config": config_value,
+    }
 
 
 @app.put("/api/platform-dispatch/groups/{group_id}/probe-model")
@@ -2323,14 +2396,17 @@ async def api_platform_dispatch_excluded_group_delete(request: Request, group_id
 @app.post("/api/platform-dispatch/accounts/{account_id}/schedulable")
 async def api_platform_dispatch_account_schedulable(request: Request, account_id: int):
     require_user(request)
-    if platform_dispatch_policy_scheduler.lock.locked():
-        return JSONResponse({"ok": False, "message": "自动调度策略正在执行"}, status_code=409)
+    if db.has_active_platform_dispatch_job():
+        return JSONResponse({"ok": False, "message": "平台调度任务执行期间不能修改调度状态"}, status_code=409)
     payload = await request.json()
     if not isinstance(payload, dict) or not isinstance(payload.get("schedulable"), bool):
         return JSONResponse({"ok": False, "message": "schedulable 必须是布尔值"}, status_code=400)
     schedulable = payload["schedulable"]
+    account_lock = platform_dispatch_policy_scheduler.account_lock(account_id)
+    if account_lock.locked():
+        return JSONResponse({"ok": False, "message": "该账号正在执行其他操作"}, status_code=409)
     try:
-        async with platform_dispatch_policy_scheduler.lock:
+        async with account_lock:
             account = await sub2api_admin_client().update_account_schedulable(account_id, schedulable)
     except Sub2ApiAdminError as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=exc.status_code)
@@ -5138,6 +5214,7 @@ def platform_dispatch_cache_response(
             if isinstance(group, dict) and _platform_dispatch_account_id(group)
         }
         policy = db.get_platform_dispatch_policy(POLICY_DEFAULTS)["config"]
+        priority_overrides = policy.get("account_priority_overrides") or {}
         profiles = resolve_platform_dispatch_cost_profiles(
             db,
             source_site_url,
@@ -5171,6 +5248,18 @@ def platform_dispatch_cache_response(
             source_site_url, 10, short_evidence_since, account_id=account_id
         )
         for account_id, account in account_map.items():
+            priority_override = priority_overrides.get(str(account_id))
+            effective_priority = (
+                int(priority_override)
+                if priority_override is not None
+                else DEFAULT_ACCOUNT_PRIORITY
+            )
+            account["remote_priority"] = _optional_int(account.get("priority"))
+            account["priority"] = effective_priority
+            account["index"] = effective_priority
+            account["priority_override"] = priority_override
+            account["default_priority"] = DEFAULT_ACCOUNT_PRIORITY
+            account["effective_priority"] = effective_priority
             account.update(public_platform_dispatch_cost_profile(profiles[account_id]))
             state = states.get(account_id) or {}
             account["health_score"] = state.get("health_score")

@@ -104,6 +104,14 @@ def test_config_validation_and_deterministic_allocators():
     assert probe_models["default_probe_model"] == "default-model"
     assert probe_models["group_probe_models"] == {"4": "group-model"}
     assert probe_models["account_probe_models"] == {"2": "custom-model"}
+    priorities = validate_policy_config(
+        {"accountPriorityOverrides": {"2": 0, "3": "8", "4": ""}}
+    )
+    assert priorities["account_priority_overrides"] == {"2": 0, "3": 8}
+    with pytest.raises(ValueError, match="Index"):
+        validate_policy_config({"account_priority_overrides": {"2": -1}})
+    with pytest.raises(ValueError, match="Index"):
+        validate_policy_config({"account_priority_overrides": {"2": 1001}})
     with pytest.raises(ValueError, match="字符串"):
         validate_policy_config({"default_probe_model": 123})
     with pytest.raises(ValueError, match="正整数"):
@@ -1532,6 +1540,37 @@ async def test_load_factor_adjustment_flattens_all_priorities_to_two(tmp_path):
     assert payloads[1]["priority"] == 2
     assert payloads[2]["priority"] == 2
     assert accounts[1]["priority"] == 2
+    assert accounts[2]["priority"] == 2
+
+
+@pytest.mark.asyncio
+async def test_load_factor_policy_uses_account_priority_override(tmp_path):
+    db = make_db(tmp_path)
+    accounts = {
+        1: {"id": 1, "name": "custom", "status": "active", "load_factor": 20, "priority": 2},
+        2: {"id": 2, "name": "default", "status": "active", "load_factor": 20, "priority": 9},
+    }
+    client = PolicyClient(list(accounts.values()))
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+    config = {
+        **POLICY_DEFAULTS,
+        "account_priority_overrides": {"1": 7},
+    }
+
+    await scheduler._apply_load_policy(
+        client,
+        client.site_url,
+        accounts,
+        {1: healthy_state(), 2: healthy_state()},
+        {
+            1: {"cost_available": True, "upstream_cost_multiplier": 1},
+            2: {"cost_available": True, "upstream_cost_multiplier": 1},
+        },
+        config,
+    )
+
+    assert dict(client.field_payloads) == {1: {"priority": 7}, 2: {"priority": 2}}
+    assert accounts[1]["priority"] == 7
     assert accounts[2]["priority"] == 2
 
 

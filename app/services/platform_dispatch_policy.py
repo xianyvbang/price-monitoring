@@ -56,8 +56,11 @@ POLICY_DEFAULTS: dict[str, Any] = {
     "default_probe_model": "",
     "group_probe_models": {},
     "account_probe_models": {},
+    "account_priority_overrides": {},
     "excluded_account_ids": [],
 }
+DEFAULT_ACCOUNT_PRIORITY = 2
+MAX_ACCOUNT_PRIORITY = 1000
 
 BOOL_FIELDS = {
     "enabled",
@@ -137,6 +140,7 @@ def validate_policy_config(payload: Any, current: dict[str, Any] | None = None) 
         "defaultProbeModel": "default_probe_model",
         "groupProbeModels": "group_probe_models",
         "accountProbeModels": "account_probe_models",
+        "accountPriorityOverrides": "account_priority_overrides",
         "excludedAccountIds": "excluded_account_ids",
     }
     normalized = {aliases.get(key, key): value for key, value in payload.items()}
@@ -216,6 +220,30 @@ def validate_policy_config(payload: Any, current: dict[str, Any] | None = None) 
             if model:
                 account_models[str(account_id)] = model
         config["account_probe_models"] = account_models
+    if "account_priority_overrides" in normalized:
+        raw_priorities = normalized["account_priority_overrides"]
+        if not isinstance(raw_priorities, dict):
+            raise ValueError("account_priority_overrides 必须是对象")
+        priorities: dict[str, int] = {}
+        for raw_account_id, raw_priority in raw_priorities.items():
+            try:
+                account_id = int(raw_account_id)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Index 账号 ID 必须是正整数") from exc
+            if account_id <= 0:
+                raise ValueError("Index 账号 ID 必须是正整数")
+            if raw_priority is None or (isinstance(raw_priority, str) and not raw_priority.strip()):
+                continue
+            if isinstance(raw_priority, bool):
+                raise ValueError("Index 必须是整数")
+            try:
+                priority = int(raw_priority)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Index 必须是整数") from exc
+            if priority < 0 or priority > MAX_ACCOUNT_PRIORITY:
+                raise ValueError(f"Index 必须在 0 到 {MAX_ACCOUNT_PRIORITY} 之间")
+            priorities[str(account_id)] = priority
+        config["account_priority_overrides"] = priorities
 
     for key in (
         "health_threshold", "failure_health_threshold", "expand_trigger_percent", "expand_step_percent",
@@ -575,6 +603,7 @@ class PlatformDispatchPolicyScheduler:
         self.db = db
         self.client_factory = client_factory
         self.lock = asyncio.Lock()
+        self._account_locks: dict[int, asyncio.Lock] = {}
         self._task: asyncio.Task[None] | None = None
         self._automatic_run_task: asyncio.Task[dict[str, Any]] | None = None
         self._stopped = asyncio.Event()
@@ -585,6 +614,7 @@ class PlatformDispatchPolicyScheduler:
     def start(self) -> None:
         if self._task is None or self._task.done():
             self.lock = asyncio.Lock()
+            self._account_locks = {}
             self._stopped = asyncio.Event()
             self._changed = asyncio.Event()
             self._run_after_change = False
@@ -609,6 +639,15 @@ class PlatformDispatchPolicyScheduler:
             with suppress(asyncio.CancelledError, Exception):
                 await automatic_run_task
         self._automatic_run_task = None
+        self._account_locks = {}
+
+    def account_lock(self, account_id: int) -> asyncio.Lock:
+        account_id = int(account_id)
+        lock = self._account_locks.get(account_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._account_locks[account_id] = lock
+        return lock
 
     @property
     def automatic_round_running(self) -> bool:
@@ -829,6 +868,7 @@ class PlatformDispatchPolicyScheduler:
             groups_by_id=groups_by_id,
             refresh_sources=False,
             force_probe=True,
+            locked_account_ids={account_id},
         )
         item = health[account_id]
         public = public_dispatch_account(account, _cached_activity(cache, account_id))
@@ -1225,6 +1265,7 @@ class PlatformDispatchPolicyScheduler:
         refresh_sources: bool = True,
         force_full: bool = False,
         force_probe: bool = False,
+        locked_account_ids: set[int] | None = None,
         progress: Callable[[str, int, int], None] | None = None,
     ) -> tuple[list[str], dict[int, dict[str, Any]], dict[int, dict[str, Any]], int]:
         warnings = []
@@ -1252,6 +1293,7 @@ class PlatformDispatchPolicyScheduler:
             config,
             groups_by_id=groups_by_id,
             force=force_probe,
+            locked_account_ids=locked_account_ids,
             progress=progress,
         )
         now = datetime.now(timezone.utc)
@@ -1467,6 +1509,7 @@ class PlatformDispatchPolicyScheduler:
         *,
         groups_by_id: dict[int, dict[str, Any]] | None = None,
         force: bool = False,
+        locked_account_ids: set[int] | None = None,
         progress: Callable[[str, int, int], None] | None = None,
     ) -> dict[int, dict[str, Any]]:
         semaphore = asyncio.Semaphore(8)
@@ -1481,7 +1524,11 @@ class PlatformDispatchPolicyScheduler:
             )
             try:
                 async with semaphore:
-                    result = await client.probe_account(account_id, model=probe_model or None)
+                    if account_id in (locked_account_ids or set()):
+                        result = await client.probe_account(account_id, model=probe_model or None)
+                    else:
+                        async with self.account_lock(account_id):
+                            result = await client.probe_account(account_id, model=probe_model or None)
             except Exception as exc:
                 result = {"success": False, "is_timeout": False, "message": f"账号探活失败: {exc}"}
             results[account_id] = result
@@ -1907,8 +1954,12 @@ class PlatformDispatchPolicyScheduler:
             if load_factor_writes[account_id]:
                 fields["load_factor"] = final_targets[account_id]
             current_priority = _optional_int(account.get("priority"))
-            if current_priority != 2:
-                fields["priority"] = 2
+            overrides = config.get("account_priority_overrides") or {}
+            target_priority = _optional_int(overrides.get(str(account_id)))
+            if target_priority is None:
+                target_priority = DEFAULT_ACCOUNT_PRIORITY
+            if current_priority != target_priority:
+                fields["priority"] = target_priority
             if not fields:
                 continue
             if await self._write_account_fields(client, site_url, account, fields, "负载因子调权"):
@@ -1943,6 +1994,17 @@ class PlatformDispatchPolicyScheduler:
         )
 
     async def _write_account_fields(
+        self,
+        client: Sub2ApiAdminClient,
+        site_url: str,
+        account: dict[str, Any],
+        fields: dict[str, Any],
+        reason: str,
+    ) -> bool:
+        async with self.account_lock(int(account["id"])):
+            return await self._write_account_fields_locked(client, site_url, account, fields, reason)
+
+    async def _write_account_fields_locked(
         self,
         client: Sub2ApiAdminClient,
         site_url: str,

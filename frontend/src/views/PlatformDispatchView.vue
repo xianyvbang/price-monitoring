@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { ArrowDown, ArrowRight, Check, CircleClose, Delete, Hide, Link, Refresh, RefreshLeft, Search, Setting, Timer, VideoPause, VideoPlay, View } from "@element-plus/icons-vue";
+import { ArrowDown, ArrowRight, Check, CircleClose, Delete, EditPen, Hide, Link, Refresh, RefreshLeft, Search, Setting, Timer, VideoPause, VideoPlay, View } from "@element-plus/icons-vue";
 import { api } from "../api";
 import { boolValue, formatTime } from "../utils";
 
@@ -56,6 +56,7 @@ const updatingIds = ref(new Set());
 const updatingGroupIds = ref(new Set());
 const updatingExcludedAccountIds = ref(new Set());
 const probingAccountIds = ref(new Set());
+const updatingPriorityIds = ref(new Set());
 const updatingProbeModelIds = ref(new Set());
 const updatingGroupProbeModelIds = ref(new Set());
 const updatingGroupAutoDispatchIds = ref(new Set());
@@ -136,6 +137,7 @@ const policyConfig = reactive({
   default_probe_model: "",
   group_probe_models: {},
   account_probe_models: {},
+  account_priority_overrides: {},
   excluded_account_ids: []
 });
 const jobActive = computed(() => isActiveJobStatus(job.value?.status));
@@ -338,7 +340,7 @@ const policyCountdownText = computed(() => {
   if (minutes > 0) return `${minutes} 分 ${String(remainingSeconds).padStart(2, "0")} 秒`;
   return `${remainingSeconds} 秒`;
 });
-const dispatchMutationDisabled = computed(() => controlsDisabled.value || policyAutoRunning.value || probingAccountIds.value.size > 0);
+const dispatchMutationDisabled = computed(() => controlsDisabled.value || policyAutoRunning.value);
 const policyStatusText = computed(() => {
   if (policyAutoRunning.value) return policyConfig.enabled ? "正在自动调度" : "正在评分";
   if (policyRuntime.value?.status === "failed" && (policyConfig.enabled || policyConfig.auto_scoring_enabled)) return "执行异常";
@@ -1072,6 +1074,71 @@ function setAccountProbing(accountId, probing) {
 
 function isAccountProbing(account) {
   return probingAccountIds.value.has(Number(account?.id));
+}
+
+function accountPriorityOverride(account) {
+  const accountId = String(Number(account?.id));
+  const overrides = policyConfig.account_priority_overrides || {};
+  const value = overrides[accountId];
+  return value === null || value === undefined || value === "" ? null : Number(value);
+}
+
+function prioritySourceText(account) {
+  return accountPriorityOverride(account) === null ? "默认" : "自定义";
+}
+
+function setPriorityUpdating(accountId, updating) {
+  const next = new Set(updatingPriorityIds.value);
+  if (updating) next.add(accountId);
+  else next.delete(accountId);
+  updatingPriorityIds.value = next;
+}
+
+function isPriorityUpdating(account) {
+  return updatingPriorityIds.value.has(Number(account?.id));
+}
+
+async function configurePriority(account) {
+  const accountId = Number(account?.id);
+  if (!Number.isInteger(accountId) || accountId <= 0) return;
+  const currentOverride = accountPriorityOverride(account);
+  let value;
+  try {
+    const result = await ElMessageBox.prompt(
+      "留空将恢复默认 Index 2；数值越小，调度优先级越高。",
+      `设置 Index - ${account.name || accountId}`,
+      {
+        confirmButtonText: "保存",
+        cancelButtonText: "取消",
+        inputValue: currentOverride === null ? "" : String(currentOverride),
+        inputPlaceholder: "默认 2",
+        inputValidator: (input) => {
+          const text = String(input || "").trim();
+          if (!text) return true;
+          return /^\d+$/.test(text) && Number(text) <= 1000 || "Index 必须是 0 到 1000 之间的整数";
+        }
+      }
+    );
+    const text = String(result.value || "").trim();
+    value = text ? Number(text) : null;
+  } catch {
+    return;
+  }
+
+  setPriorityUpdating(accountId, true);
+  try {
+    const payload = await api.setPlatformDispatchPriority(accountId, value);
+    policyConfig.account_priority_overrides = {
+      ...(payload.config?.account_priority_overrides || payload.config?.accountPriorityOverrides || {})
+    };
+    applyDispatchAccount(payload.account);
+    ElMessage.success(value === null ? "已恢复默认 Index 2" : `Index 已设置为 ${value}`);
+  } catch (error) {
+    if (error.status === 409) await refreshPolicyRuntime().catch(() => {});
+    ElMessage.error(error.message || "保存 Index 失败");
+  } finally {
+    setPriorityUpdating(accountId, false);
+  }
 }
 
 async function probeAccount(account) {
@@ -2083,9 +2150,20 @@ onBeforeUnmount(() => {
                     text
                     :icon="VideoPlay"
                     :loading="isAccountProbing(account)"
-                    :disabled="dispatchMutationDisabled"
+                    :disabled="dispatchMutationDisabled || isUpdating(account.id) || isPriorityUpdating(account)"
                     :aria-label="`单独探活 ${account.name}`"
                     @click="probeAccount(account)"
+                  />
+                </el-tooltip>
+                <el-tooltip content="设置 Index">
+                  <el-button
+                    circle
+                    text
+                    :icon="EditPen"
+                    :loading="isPriorityUpdating(account)"
+                    :disabled="dispatchMutationDisabled || isAccountProbing(account) || isUpdating(account.id)"
+                    :aria-label="`设置 Index ${account.name}`"
+                    @click="configurePriority(account)"
                   />
                 </el-tooltip>
                 <el-tooltip content="设置探活模型">
@@ -2131,7 +2209,7 @@ onBeforeUnmount(() => {
                     :active-color="accountSwitchColor(account, true)"
                     :inactive-color="accountSwitchColor(account, false)"
                     :loading="isUpdating(account.id)"
-                    :disabled="dispatchMutationDisabled || isUpdating(account.id)"
+                    :disabled="dispatchMutationDisabled || isUpdating(account.id) || isAccountProbing(account) || isPriorityUpdating(account)"
                     :aria-label="`${account.name} 的 Sub2API 调度开关：${accountSwitchText(account, account.schedulable)}`"
                     @change="toggleAccountSchedulable(account, $event)"
                   />
@@ -2186,9 +2264,9 @@ onBeforeUnmount(() => {
                 <el-tag :type="costStatusType(account)" size="small" effect="plain">{{ costStatusText(account) }}</el-tag>
               </div>
               <div>
-                <span>优先级</span>
-                <strong>{{ metricText(account.priority) }}</strong>
-                <small>数值越小越优先</small>
+                <span>Index</span>
+                <strong>{{ metricText(account.priority ?? account.index) }}</strong>
+                <small>{{ prioritySourceText(account) }} · 数值越小越优先</small>
               </div>
               <p
                 v-if="account.decision_reason || account.decisionReason"

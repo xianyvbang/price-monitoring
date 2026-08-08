@@ -52,6 +52,7 @@ export const api = {
   excludePlatformDispatchAccount: (id) => request(`/api/platform-dispatch/accounts/${id}/exclude`, { method: "POST" }),
   restorePlatformDispatchAccount: (id) => request(`/api/platform-dispatch/excluded-accounts/${id}`, { method: "DELETE" }),
   probePlatformDispatchAccount: (id) => request(`/api/platform-dispatch/accounts/${id}/probe`, { method: "POST" }),
+  setPlatformDispatchPriority: (id, priority) => request(`/api/platform-dispatch/accounts/${id}/priority`, { method: "PUT", body: JSON.stringify({ priority }) }),
   setPlatformDispatchProbeModel: (id, model) => request(`/api/platform-dispatch/accounts/${id}/probe-model`, { method: "PUT", body: JSON.stringify({ model }) }),
   setPlatformDispatchGroupProbeModel: (id, model) => request(`/api/platform-dispatch/groups/${id}/probe-model`, { method: "PUT", body: JSON.stringify({ model }) }),
   setPlatformDispatchGroupAutoDispatch: (id, enabled) => request(`/api/platform-dispatch/groups/${id}/auto-dispatch`, { method: "PUT", body: JSON.stringify({ enabled }) }),

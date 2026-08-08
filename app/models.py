@@ -999,6 +999,7 @@ class Database:
                     "groups": "groups",
                     "concurrency": "concurrency",
                     "load_factor": "loadFactor",
+                    "priority": "index",
                     "schedulable": "schedulable",
                     "current_concurrency": "currentConcurrency",
                     "waiting_in_queue": "waitingInQueue",

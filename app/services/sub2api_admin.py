@@ -695,6 +695,7 @@ def public_dispatch_account(account: dict[str, Any], recent_activity: list[dict[
     }
     if "priority" in account:
         result["priority"] = _non_negative_int(account.get("priority"))
+        result["index"] = result["priority"]
     if "concurrency" in account:
         result["concurrency"] = _non_negative_int(account.get("concurrency"))
     if "load_factor" in account:
