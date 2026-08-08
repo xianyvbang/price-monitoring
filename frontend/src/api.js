@@ -60,6 +60,7 @@ export const api = {
   setPlatformDispatchCostBinding: (id, monitorGroupId) => request(`/api/platform-dispatch/accounts/${id}/cost-binding`, { method: "PUT", body: JSON.stringify({ monitor_group_id: monitorGroupId }) }),
   deletePlatformDispatchCostBinding: (id) => request(`/api/platform-dispatch/accounts/${id}/cost-binding`, { method: "DELETE" }),
   setPlatformDispatchSchedulable: (id, value) => request(`/api/platform-dispatch/accounts/${id}/schedulable`, { method: "POST", body: JSON.stringify({ schedulable: value }) }),
+  setPlatformDispatchAutoDispatchPause: (id, payload) => request(`/api/platform-dispatch/accounts/${id}/auto-dispatch-pause`, { method: "PUT", body: JSON.stringify(payload) }),
   accounts: (params = {}) => request(`/api/accounts${queryString(params)}`),
   account: (id) => request(`/api/accounts/${id}`),
   createAccount: (payload) => request("/api/accounts", { method: "POST", body: JSON.stringify(payload) }),

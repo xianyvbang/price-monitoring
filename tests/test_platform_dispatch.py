@@ -996,6 +996,55 @@ def test_platform_dispatch_cache_roundtrip_replace_clear_and_status_merge(tmp_pa
     assert db.get_platform_dispatch_cache() is None
 
 
+def test_platform_dispatch_auto_pause_api_validates_and_preserves_remote_schedule(tmp_path, monkeypatch):
+    test_db = setup_test_db(tmp_path, monkeypatch)
+    test_db.set_setting("sub2api_site_url", "https://sub.example")
+    test_db.replace_platform_dispatch_cache(
+        "https://sub.example",
+        [{"id": 9, "name": "paused", "status": "active", "schedulable": True}],
+        [],
+        [],
+        {"platform": "", "type": "", "status": "", "include_ungrouped": True},
+    )
+    monkeypatch.setattr(app_main.platform_dispatch_policy_scheduler, "notify_changed", lambda **kwargs: None)
+
+    with TestClient(app) as client:
+        login(client)
+        invalid = client.put(
+            "/api/platform-dispatch/accounts/9/auto-dispatch-pause",
+            json={"paused": True, "duration_minutes": 0},
+        )
+        paused = client.put(
+            "/api/platform-dispatch/accounts/9/auto-dispatch-pause",
+            json={"paused": True, "duration_minutes": 50},
+        )
+        listed = client.get("/api/platform-dispatch/accounts")
+        resumed = client.put(
+            "/api/platform-dispatch/accounts/9/auto-dispatch-pause",
+            json={"paused": False},
+        )
+        test_db.create_platform_dispatch_job("active-job", "accounts_sync", {}, "https://sub.example")
+        conflict = client.put(
+            "/api/platform-dispatch/accounts/9/auto-dispatch-pause",
+            json={"paused": True},
+        )
+
+    assert invalid.status_code == 400
+    assert paused.status_code == 200
+    assert paused.json()["account"]["auto_dispatch_paused"] is True
+    assert paused.json()["account"]["auto_dispatch_pause_until"]
+    assert test_db.get_platform_dispatch_cache()["accounts"][0]["schedulable"] is True
+    listed_account = listed.json()["accounts"][0]
+    assert listed_account["auto_dispatch_paused"] is True
+    assert listed_account["auto_dispatch_paused_at"]
+    assert listed_account["auto_dispatch_pause_until"]
+    assert resumed.status_code == 200
+    assert resumed.json()["account"]["auto_dispatch_paused"] is False
+    assert resumed.json()["account"]["auto_dispatch_paused_at"] is None
+    assert resumed.json()["account"]["auto_dispatch_pause_until"] is None
+    assert conflict.status_code == 409
+
+
 @pytest.mark.asyncio
 async def test_platform_dispatch_passes_filters_to_accounts_api():
     client = Sub2ApiAdminClient("https://sub.example", "admin-key")

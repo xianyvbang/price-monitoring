@@ -45,6 +45,38 @@ def test_monitor_groups_query_status_migration(tmp_path):
     assert status == "never"
 
 
+def test_platform_dispatch_account_state_auto_pause_migration(tmp_path):
+    database_path = tmp_path / "legacy.db"
+    with sqlite3.connect(database_path) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            CREATE TABLE platform_dispatch_account_state (
+                source_site_url TEXT NOT NULL,
+                account_id INTEGER NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (source_site_url, account_id)
+            )
+            """
+        )
+        Database._migrate_platform_dispatch_account_state(conn)
+        columns = {row["name"]: row for row in conn.execute("PRAGMA table_info(platform_dispatch_account_state)")}
+        conn.execute(
+            "INSERT INTO platform_dispatch_account_state (source_site_url, account_id, updated_at) VALUES (?, ?, ?)",
+            ("https://sub.example", 1, "2026-08-08T00:00:00+00:00"),
+        )
+        row = conn.execute(
+            "SELECT auto_dispatch_paused, auto_dispatch_paused_at, auto_dispatch_pause_until "
+            "FROM platform_dispatch_account_state WHERE account_id = 1"
+        ).fetchone()
+
+    assert columns["auto_dispatch_paused"]["notnull"] == 1
+    assert columns["auto_dispatch_paused"]["dflt_value"] == "0"
+    assert row["auto_dispatch_paused"] == 0
+    assert row["auto_dispatch_paused_at"] is None
+    assert row["auto_dispatch_pause_until"] is None
+
+
 def test_newapi_uses_api_key_as_access_token_when_missing(tmp_path):
     db = Database(str(tmp_path / "app.db"), "test-key")
     db.init()

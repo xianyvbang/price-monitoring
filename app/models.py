@@ -386,6 +386,9 @@ class Database:
                     price_protection_blocked INTEGER NOT NULL DEFAULT 0,
                     price_protection_blocked_at TEXT,
                     price_protection_reason TEXT NOT NULL DEFAULT '',
+                    auto_dispatch_paused INTEGER NOT NULL DEFAULT 0,
+                    auto_dispatch_paused_at TEXT,
+                    auto_dispatch_pause_until TEXT,
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (source_site_url, account_id)
                 );
@@ -750,6 +753,18 @@ class Database:
         if "price_protection_reason" not in column_names:
             conn.execute(
                 "ALTER TABLE platform_dispatch_account_state ADD COLUMN price_protection_reason TEXT NOT NULL DEFAULT ''"
+            )
+        if "auto_dispatch_paused" not in column_names:
+            conn.execute(
+                "ALTER TABLE platform_dispatch_account_state ADD COLUMN auto_dispatch_paused INTEGER NOT NULL DEFAULT 0"
+            )
+        if "auto_dispatch_paused_at" not in column_names:
+            conn.execute(
+                "ALTER TABLE platform_dispatch_account_state ADD COLUMN auto_dispatch_paused_at TEXT"
+            )
+        if "auto_dispatch_pause_until" not in column_names:
+            conn.execute(
+                "ALTER TABLE platform_dispatch_account_state ADD COLUMN auto_dispatch_pause_until TEXT"
             )
 
     def _migrate_legacy_selected_groups(self, conn: sqlite3.Connection) -> None:
@@ -1930,6 +1945,7 @@ class Database:
             "target_load_factor", "baseline_load_factor", "last_concurrency_write_at",
             "last_load_factor_write_at", "last_action_at",
             "price_protection_blocked", "price_protection_blocked_at", "price_protection_reason",
+            "auto_dispatch_paused", "auto_dispatch_paused_at", "auto_dispatch_pause_until",
         }
         values = {key: value for key, value in fields.items() if key in allowed}
         site_url = str(source_site_url or "").strip().rstrip("/")
@@ -1968,6 +1984,82 @@ class Database:
                 (str(source_site_url or "").strip().rstrip("/"), int(account_id)),
             ).fetchone()
         return row_to_dict(row) if row else None
+
+    def set_platform_dispatch_account_auto_dispatch_pause(
+        self,
+        source_site_url: str,
+        account_id: int,
+        paused: bool,
+        duration_minutes: int | None = None,
+        now: str | None = None,
+    ) -> dict[str, Any]:
+        site_url = str(source_site_url or "").strip().rstrip("/")
+        account_id = int(account_id)
+        paused_at = now or utc_now()
+        pause_until = None
+        if paused and duration_minutes is not None:
+            started_at = _parse_iso_datetime(paused_at)
+            pause_until = (started_at + timedelta(minutes=int(duration_minutes))).isoformat(timespec="seconds")
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO platform_dispatch_account_state (
+                    source_site_url, account_id, name, updated_at
+                ) VALUES (?, ?, '', ?)
+                """,
+                (site_url, account_id, paused_at),
+            )
+            conn.execute(
+                """
+                UPDATE platform_dispatch_account_state
+                SET auto_dispatch_paused = ?,
+                    auto_dispatch_paused_at = ?,
+                    auto_dispatch_pause_until = ?,
+                    updated_at = ?
+                WHERE source_site_url = ? AND account_id = ?
+                """,
+                (
+                    1 if paused else 0,
+                    paused_at if paused else None,
+                    pause_until if paused else None,
+                    paused_at,
+                    site_url,
+                    account_id,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM platform_dispatch_account_state WHERE source_site_url = ? AND account_id = ?",
+                (site_url, account_id),
+            ).fetchone()
+        return row_to_dict(row)
+
+    def active_platform_dispatch_auto_dispatch_pause_ids(
+        self, source_site_url: str, now: str | None = None
+    ) -> set[int]:
+        site_url = str(source_site_url or "").strip().rstrip("/")
+        current = _parse_iso_datetime(now or utc_now())
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT account_id, auto_dispatch_pause_until
+                FROM platform_dispatch_account_state
+                WHERE source_site_url = ? AND auto_dispatch_paused = 1
+                """,
+                (site_url,),
+            ).fetchall()
+        active_ids: set[int] = set()
+        for row in rows:
+            pause_until = row["auto_dispatch_pause_until"]
+            if not pause_until:
+                active_ids.add(int(row["account_id"]))
+                continue
+            try:
+                if _parse_iso_datetime(pause_until) > current:
+                    active_ids.add(int(row["account_id"]))
+            except (TypeError, ValueError):
+                # An invalid legacy timestamp must never create an indefinite pause.
+                continue
+        return active_ids
 
     def get_platform_dispatch_cursor(
         self, source_site_url: str, account_id: int, source_kind: str

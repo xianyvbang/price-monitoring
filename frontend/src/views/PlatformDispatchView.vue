@@ -36,6 +36,7 @@ const GROUP_PLATFORM_LABELS = Object.freeze({
   openai: "OpenAI",
   anthropic: "Anthropic"
 });
+const AUTO_DISPATCH_PAUSE_DURATIONS = Object.freeze([30, 50, 60, 120, 1440]);
 
 const loading = ref(false);
 const loaded = ref(false);
@@ -61,6 +62,11 @@ const updatingProbeModelIds = ref(new Set());
 const updatingGroupProbeModelIds = ref(new Set());
 const updatingGroupAutoDispatchIds = ref(new Set());
 const excludingUngrouped = ref(false);
+const autoDispatchPauseDialog = ref(false);
+const autoDispatchPauseAccount = ref(null);
+const autoDispatchPauseSaving = ref(false);
+const autoDispatchPauseMode = ref("timed");
+const autoDispatchPauseDuration = ref(50);
 const costBindingDialog = ref(false);
 const costBindingAccount = ref(null);
 const costSourceOptions = ref([]);
@@ -1342,6 +1348,97 @@ async function toggleAccountSchedulable(account, schedulable) {
   }
 }
 
+function autoDispatchPauseUntil(account) {
+  return account?.auto_dispatch_pause_until || account?.autoDispatchPauseUntil || "";
+}
+
+function isAutoDispatchPaused(account) {
+  if (!boolValue(account?.auto_dispatch_paused ?? account?.autoDispatchPaused)) return false;
+  const pauseUntil = autoDispatchPauseUntil(account);
+  if (!pauseUntil) return true;
+  const target = Date.parse(pauseUntil);
+  return Number.isFinite(target) && target > countdownNow.value;
+}
+
+function autoDispatchPauseRemainingText(account) {
+  const target = Date.parse(autoDispatchPauseUntil(account));
+  if (!Number.isFinite(target)) return "";
+  const seconds = Math.max(0, Math.ceil((target - countdownNow.value) / 1000));
+  if (seconds === 0) return "已到期";
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (days > 0) return `${days} 天 ${hours} 小时`;
+  if (hours > 0) return `${hours} 小时 ${minutes} 分钟`;
+  return `${Math.max(1, minutes)} 分钟`;
+}
+
+function autoDispatchPauseText(account) {
+  return autoDispatchPauseUntil(account)
+    ? `自动暂停 ${autoDispatchPauseRemainingText(account)}`
+    : "自动调度已暂停";
+}
+
+function openAutoDispatchPauseDialog(account) {
+  autoDispatchPauseAccount.value = account;
+  autoDispatchPauseMode.value = autoDispatchPauseUntil(account) ? "timed" : "permanent";
+  autoDispatchPauseDuration.value = 50;
+  autoDispatchPauseDialog.value = true;
+}
+
+function applyAutoDispatchPauseAccount(updated) {
+  const accountId = Number(updated?.id);
+  if (!Number.isInteger(accountId) || accountId <= 0) return;
+  accounts.value.forEach((account) => {
+    if (Number(account.id) === accountId) Object.assign(account, updated);
+  });
+  if (autoDispatchPauseAccount.value && Number(autoDispatchPauseAccount.value.id) === accountId) {
+    Object.assign(autoDispatchPauseAccount.value, updated);
+  }
+}
+
+async function saveAutoDispatchPause() {
+  const account = autoDispatchPauseAccount.value;
+  if (!account) return;
+  const durationMinutes = Number(autoDispatchPauseDuration.value);
+  if (
+    autoDispatchPauseMode.value === "timed"
+    && (!Number.isInteger(durationMinutes) || durationMinutes < 1 || durationMinutes > 525600)
+  ) {
+    ElMessage.error("暂停时长必须是 1 到 525600 的整数分钟");
+    return;
+  }
+  autoDispatchPauseSaving.value = true;
+  try {
+    const payload = await api.setPlatformDispatchAutoDispatchPause(account.id, {
+      paused: true,
+      duration_minutes: autoDispatchPauseMode.value === "timed" ? durationMinutes : null
+    });
+    applyAutoDispatchPauseAccount(payload.account);
+    ElMessage.success(autoDispatchPauseMode.value === "timed" ? "自动调度已限时暂停" : "自动调度已永久暂停");
+    autoDispatchPauseDialog.value = false;
+  } catch (error) {
+    ElMessage.error(error.message || "设置自动调度暂停失败");
+  } finally {
+    autoDispatchPauseSaving.value = false;
+  }
+}
+
+async function resumeAutoDispatch(account = autoDispatchPauseAccount.value) {
+  if (!account) return;
+  autoDispatchPauseSaving.value = true;
+  try {
+    const payload = await api.setPlatformDispatchAutoDispatchPause(account.id, { paused: false });
+    applyAutoDispatchPauseAccount(payload.account);
+    ElMessage.success("账号已恢复参与自动调度");
+    autoDispatchPauseDialog.value = false;
+  } catch (error) {
+    ElMessage.error(error.message || "恢复自动调度失败");
+  } finally {
+    autoDispatchPauseSaving.value = false;
+  }
+}
+
 function resetFilters() {
   Object.assign(filters, { search: "", platform: "", type: "", status: "", group_id: "" });
 }
@@ -2115,9 +2212,20 @@ onBeforeUnmount(() => {
                   </span>
                 </div>
               </div>
-              <el-tag :type="statusType(accountFilterStatus(account))" size="small" class="dispatch-account-status">
-                {{ statusText(accountFilterStatus(account)) }}
-              </el-tag>
+              <div class="dispatch-account-statuses">
+                <el-tag :type="statusType(accountFilterStatus(account))" size="small" class="dispatch-account-status">
+                  {{ statusText(accountFilterStatus(account)) }}
+                </el-tag>
+                <el-tag
+                  v-if="isAutoDispatchPaused(account)"
+                  type="warning"
+                  size="small"
+                  effect="plain"
+                  :title="autoDispatchPauseUntil(account) ? `暂停至 ${formatTime(autoDispatchPauseUntil(account))}` : '永久暂停'"
+                >
+                  {{ autoDispatchPauseText(account) }}
+                </el-tag>
+              </div>
             </header>
 
             <div class="dispatch-account-tools">
@@ -2175,6 +2283,17 @@ onBeforeUnmount(() => {
                     :disabled="dispatchMutationDisabled || policySaving || isProbeModelUpdating(account)"
                     :aria-label="`设置探活模型 ${account.name}`"
                     @click="configureProbeModel(account)"
+                  />
+                </el-tooltip>
+                <el-tooltip :content="isAutoDispatchPaused(account) ? '管理自动调度暂停' : '暂停自动调度'">
+                  <el-button
+                    circle
+                    text
+                    :type="isAutoDispatchPaused(account) ? 'warning' : undefined"
+                    :icon="VideoPause"
+                    :disabled="dispatchMutationDisabled || policySaving || autoDispatchPauseSaving"
+                    :aria-label="`${account.name} ${isAutoDispatchPaused(account) ? '管理自动调度暂停' : '暂停自动调度'}`"
+                    @click="openAutoDispatchPauseDialog(account)"
                   />
                 </el-tooltip>
                 <el-tooltip content="排除账号">
@@ -2448,6 +2567,65 @@ onBeforeUnmount(() => {
       />
       <template #footer>
         <el-button @click="shortEvidenceDialog = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="autoDispatchPauseDialog"
+      :title="`自动调度暂停 · ${autoDispatchPauseAccount?.name || ''}`"
+      width="min(460px, calc(100vw - 24px))"
+      destroy-on-close
+    >
+      <el-form label-position="top">
+        <el-form-item label="暂停方式">
+          <el-radio-group v-model="autoDispatchPauseMode" :disabled="autoDispatchPauseSaving">
+            <el-radio-button label="timed">限时暂停</el-radio-button>
+            <el-radio-button label="permanent">永久暂停</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item v-if="autoDispatchPauseMode === 'timed'" label="暂停时长">
+          <div class="auto-dispatch-pause-duration">
+            <el-button
+              v-for="duration in AUTO_DISPATCH_PAUSE_DURATIONS"
+              :key="duration"
+              size="small"
+              :type="Number(autoDispatchPauseDuration) === duration ? 'primary' : undefined"
+              :disabled="autoDispatchPauseSaving"
+              @click="autoDispatchPauseDuration = duration"
+            >{{ duration >= 1440 ? `${duration / 1440} 天` : `${duration} 分钟` }}</el-button>
+          </div>
+          <el-input-number
+            v-model="autoDispatchPauseDuration"
+            :min="1"
+            :max="525600"
+            :step="1"
+            :precision="0"
+            :disabled="autoDispatchPauseSaving"
+            controls-position="right"
+            style="width: 100%; margin-top: 10px"
+          />
+        </el-form-item>
+        <el-alert
+          v-if="isAutoDispatchPaused(autoDispatchPauseAccount)"
+          :title="autoDispatchPauseText(autoDispatchPauseAccount)"
+          type="warning"
+          :closable="false"
+          show-icon
+        />
+      </el-form>
+      <template #footer>
+        <div class="dialog-footer auto-dispatch-pause-footer">
+          <el-button
+            v-if="isAutoDispatchPaused(autoDispatchPauseAccount)"
+            type="warning"
+            text
+            :loading="autoDispatchPauseSaving"
+            @click="resumeAutoDispatch()"
+          >恢复自动调度</el-button>
+          <span />
+          <el-button :disabled="autoDispatchPauseSaving" @click="autoDispatchPauseDialog = false">取消</el-button>
+          <el-button type="primary" :loading="autoDispatchPauseSaving" @click="saveAutoDispatchPause">保存</el-button>
+        </div>
       </template>
     </el-dialog>
 
@@ -3243,6 +3421,22 @@ onBeforeUnmount(() => {
   flex: none;
 }
 
+.dispatch-account-statuses {
+  align-items: flex-end;
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.dispatch-account-statuses .el-tag {
+  max-width: min(220px, 38vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .probe-model-meta {
   max-width: min(200px, 100%);
   overflow: hidden;
@@ -3327,6 +3521,16 @@ onBeforeUnmount(() => {
   height: 28px;
   padding: 6px;
   width: 28px;
+}
+
+.auto-dispatch-pause-duration {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.auto-dispatch-pause-footer > span {
+  flex: 1;
 }
 
 .dispatch-account-error {

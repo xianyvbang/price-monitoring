@@ -771,8 +771,12 @@ class PlatformDispatchPolicyScheduler:
             {}, self.db.get_platform_dispatch_policy(POLICY_DEFAULTS)["config"]
         )
         excluded_ids = {int(value) for value in config["excluded_account_ids"]}
+        paused_ids = self.db.active_platform_dispatch_auto_dispatch_pause_ids(site_url)
         candidates = [
-            account for account in cached_accounts if int(account["id"]) not in excluded_ids
+            account
+            for account in cached_accounts
+            if int(account["id"]) not in excluded_ids
+            and int(account["id"]) not in paused_ids
         ]
         disabled_group_ids = self.db.disabled_platform_dispatch_group_ids(site_url)
         accounts = {
@@ -924,12 +928,14 @@ class PlatformDispatchPolicyScheduler:
         if cache.get("source_site_url") != site_url:
             raise Sub2ApiAdminError("平台调度缓存与当前 Sub2API 站点不一致", status_code=409)
         excluded_ids = {int(value) for value in config["excluded_account_ids"]}
+        paused_ids = self.db.active_platform_dispatch_auto_dispatch_pause_ids(site_url)
         cached_candidates = [
             account
             for account in cache.get("accounts") or []
             if isinstance(account, dict)
             and _optional_int(account.get("id"))
             and int(account["id"]) not in excluded_ids
+            and int(account["id"]) not in paused_ids
         ]
         participating_count = len(
             _filter_auto_dispatch_accounts(
@@ -1014,10 +1020,14 @@ class PlatformDispatchPolicyScheduler:
     ) -> dict[str, Any]:
         site_url = client.site_url
         excluded_ids = {int(value) for value in config["excluded_account_ids"]}
+        paused_ids = self.db.active_platform_dispatch_auto_dispatch_pause_ids(site_url)
         cached_managed_ids = {
             int(account["id"])
             for account in cache.get("accounts") or []
-            if isinstance(account, dict) and _optional_int(account.get("id")) and int(account["id"]) not in excluded_ids
+            if isinstance(account, dict)
+            and _optional_int(account.get("id"))
+            and int(account["id"]) not in excluded_ids
+            and int(account["id"]) not in paused_ids
         }
         refresh_filter = cache.get("refresh_filter") or {}
         platform = str(refresh_filter.get("platform") or "")

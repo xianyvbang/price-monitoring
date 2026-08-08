@@ -2429,6 +2429,72 @@ async def api_platform_dispatch_account_schedulable(request: Request, account_id
     return {"ok": True, "account": public_dispatch_account(account, [])}
 
 
+@app.put("/api/platform-dispatch/accounts/{account_id}/auto-dispatch-pause")
+async def api_platform_dispatch_account_auto_dispatch_pause(request: Request, account_id: int):
+    require_user(request)
+    if account_id <= 0:
+        return JSONResponse({"ok": False, "message": "账号 ID 必须是正整数"}, status_code=400)
+    if db.has_active_platform_dispatch_job() or platform_dispatch_policy_scheduler.lock.locked():
+        return JSONResponse(
+            {"ok": False, "message": "平台调度任务执行期间不能修改自动调度暂停状态"},
+            status_code=409,
+        )
+    payload = await request.json()
+    if not isinstance(payload, dict) or type(payload.get("paused")) is not bool:
+        return JSONResponse({"ok": False, "message": "paused 必须是布尔值"}, status_code=400)
+    paused = payload["paused"]
+    duration_minutes = payload.get("duration_minutes")
+    if paused and duration_minutes is not None:
+        if (
+            type(duration_minutes) is not int
+            or duration_minutes < 1
+            or duration_minutes > 525600
+        ):
+            return JSONResponse(
+                {"ok": False, "message": "duration_minutes 必须是 1 到 525600 的整数"},
+                status_code=400,
+            )
+
+    site_url = db.get_setting(SUB2API_SITE_URL_SETTING, "").strip().rstrip("/")
+    cache = db.get_platform_dispatch_cache()
+    if not cache or cache.get("source_site_url") != site_url:
+        return JSONResponse({"ok": False, "message": "请先同步当前站点的账号信息"}, status_code=409)
+    account = next(
+        (
+            item
+            for item in cache.get("accounts") or []
+            if isinstance(item, dict) and _platform_dispatch_account_id(item) == account_id
+        ),
+        None,
+    )
+    if account is None:
+        return JSONResponse({"ok": False, "message": "账号不存在"}, status_code=404)
+
+    state = db.set_platform_dispatch_account_auto_dispatch_pause(
+        site_url,
+        account_id,
+        paused,
+        duration_minutes if paused else None,
+    )
+    if paused:
+        detail = "永久暂停" if duration_minutes is None else f"暂停 {duration_minutes} 分钟"
+        message = f"Sub2API 调度账号 {account.get('name') or account_id}: {detail}自动调度"
+    else:
+        message = f"Sub2API 调度账号 {account.get('name') or account_id}: 恢复自动调度"
+    db.add_log("info", "platform-dispatch-policy", message)
+    platform_dispatch_policy_scheduler.notify_changed(run_immediately=False)
+
+    public_account = public_dispatch_account(account, account.get("recent_activity") or [])
+    public_account.update(
+        {
+            "auto_dispatch_paused": account_id in db.active_platform_dispatch_auto_dispatch_pause_ids(site_url),
+            "auto_dispatch_paused_at": state.get("auto_dispatch_paused_at") if paused else None,
+            "auto_dispatch_pause_until": state.get("auto_dispatch_pause_until") if paused else None,
+        }
+    )
+    return {"ok": True, "account": public_account}
+
+
 @app.get("/api/dashboard")
 async def api_dashboard(request: Request):
     require_user(request)
@@ -5230,6 +5296,7 @@ def platform_dispatch_cache_response(
         else:
             state = db.get_platform_dispatch_account_state(source_site_url, account_id)
             states = {account_id: state} if state else {}
+        paused_account_ids = db.active_platform_dispatch_auto_dispatch_pause_ids(source_site_url)
         probes_by_account = db.list_recent_platform_dispatch_probes(
             source_site_url, 15, account_id=account_id
         )
@@ -5273,6 +5340,14 @@ def platform_dispatch_cache_response(
             account["price_protection_blocked"] = bool(state.get("price_protection_blocked"))
             account["price_protection_blocked_at"] = state.get("price_protection_blocked_at")
             account["price_protection_reason"] = str(state.get("price_protection_reason") or "")
+            is_auto_dispatch_paused = account_id in paused_account_ids
+            account["auto_dispatch_paused"] = is_auto_dispatch_paused
+            account["auto_dispatch_paused_at"] = (
+                state.get("auto_dispatch_paused_at") if is_auto_dispatch_paused else None
+            )
+            account["auto_dispatch_pause_until"] = (
+                state.get("auto_dispatch_pause_until") if is_auto_dispatch_paused else None
+            )
             if state.get("decision_reason"):
                 account["decision_reason"] = state["decision_reason"]
             if state.get("last_action_at"):

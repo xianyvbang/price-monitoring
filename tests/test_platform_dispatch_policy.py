@@ -488,6 +488,53 @@ async def test_disabled_group_skips_bulk_policy_but_keeps_multi_group_and_cache_
 
 
 @pytest.mark.asyncio
+async def test_auto_dispatch_pause_skips_bulk_policy_but_not_single_account_probe(tmp_path):
+    db = make_db(tmp_path)
+    accounts = [
+        {"id": 1, "name": "paused", "status": "active", "schedulable": True},
+        {"id": 2, "name": "managed", "status": "active", "schedulable": True},
+    ]
+    prepare_cache(db, accounts)
+    db.save_platform_dispatch_policy({**POLICY_DEFAULTS, "enabled": True}, "https://sub.example")
+    db.set_platform_dispatch_account_auto_dispatch_pause("https://sub.example", 1, True)
+    client = PolicyClient(accounts)
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+
+    summary = await scheduler.run_once()
+
+    assert summary["managed_accounts"] == 1
+    assert client.usage_reads == [(2, 60)]
+    assert client.error_reads == [(2, 60)]
+    assert client.probes == [2]
+    assert client.updates == []
+
+    cache = db.get_platform_dispatch_cache()
+    result = await scheduler.probe_account_health(client, cache, 1)
+
+    assert result["account_id"] == 1
+    assert client.probes == [2, 1]
+
+
+def test_auto_dispatch_pause_state_supports_expiry_and_site_isolation(tmp_path):
+    db = make_db(tmp_path)
+    site = "https://sub.example"
+    started_at = "2026-08-08T12:00:00+00:00"
+
+    timed = db.set_platform_dispatch_account_auto_dispatch_pause(site, 1, True, 50, now=started_at)
+    db.set_platform_dispatch_account_auto_dispatch_pause("https://other.example", 1, True, now=started_at)
+
+    assert timed["auto_dispatch_pause_until"] == "2026-08-08T12:50:00+00:00"
+    assert db.active_platform_dispatch_auto_dispatch_pause_ids(site, "2026-08-08T12:49:59+00:00") == {1}
+    assert db.active_platform_dispatch_auto_dispatch_pause_ids(site, "2026-08-08T12:50:00+00:00") == set()
+    assert db.active_platform_dispatch_auto_dispatch_pause_ids("https://other.example", "2026-08-08T12:50:00+00:00") == {1}
+
+    resumed = db.set_platform_dispatch_account_auto_dispatch_pause(site, 1, False, now=started_at)
+    assert resumed["auto_dispatch_paused"] == 0
+    assert resumed["auto_dispatch_paused_at"] is None
+    assert resumed["auto_dispatch_pause_until"] is None
+
+
+@pytest.mark.asyncio
 async def test_disabled_group_bulk_refresh_skips_account_but_manual_probe_still_updates_it(tmp_path):
     db = make_db(tmp_path)
     accounts = [
