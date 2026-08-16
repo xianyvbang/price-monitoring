@@ -144,6 +144,11 @@ CONSUMPTION_PERIODS = [
     {"key": "this_month", "label": "本月实际消耗总金额", "count_label": "个 Base URL 有本月记录"},
     {"key": "last_month", "label": "上月实际消耗总金额", "count_label": "个 Base URL 有上月记录"},
 ]
+TODAY_REMAINING_SUMMARY = {
+    "key": "today_remaining",
+    "label": "今日剩余金额",
+    "count_label": "个 Base URL 有今日余额",
+}
 SUB2API_ADMIN_KEY_SETTING = "sub2api_admin_key_enc"
 SUB2API_SITE_URL_SETTING = "sub2api_site_url"
 
@@ -1310,7 +1315,37 @@ def summarize_consumption_period(grouped: dict[str, list[dict[str, Any]]], perio
 
 
 def summarize_consumption_periods(grouped: dict[str, list[dict[str, Any]]], custom_range: dict[str, Any]) -> list[dict[str, Any]]:
-    return [summarize_consumption_period(grouped, period) for period in CONSUMPTION_PERIODS]
+    summaries = []
+    for period in CONSUMPTION_PERIODS:
+        summaries.append(summarize_consumption_period(grouped, period))
+        if period["key"] == "today":
+            summaries.append(summarize_today_remaining(grouped))
+    return summaries
+
+
+def summarize_today_remaining(grouped: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    remaining_by_base_url: dict[str, tuple[int, float, str]] = {}
+    for accounts in grouped.values():
+        for account in accounts:
+            remaining = _optional_number(account.get("last_remaining"))
+            if remaining is None:
+                continue
+            account_id = int(account["id"])
+            base_url_key = _consumption_base_url_key(account)
+            unit = str(account.get("last_unit") or DEFAULT_BALANCE_UNIT).strip() or DEFAULT_BALANCE_UNIT
+            existing = remaining_by_base_url.get(base_url_key)
+            if existing is None or account_id < existing[0]:
+                remaining_by_base_url[base_url_key] = (account_id, remaining, unit)
+
+    totals: dict[str, float] = {}
+    for _, remaining, unit in remaining_by_base_url.values():
+        totals[unit] = round(totals.get(unit, 0.0) + remaining, 6)
+    total_items = [{"amount": amount, "unit": unit} for unit, amount in totals.items()]
+    return {
+        **TODAY_REMAINING_SUMMARY,
+        "totals": total_items,
+        "account_count": len(remaining_by_base_url),
+    }
 
 
 def _consumption_base_url_key(account: dict[str, Any]) -> str:

@@ -623,9 +623,11 @@ def test_dashboard_api_shows_today_consumption_summary(tmp_path, monkeypatch):
     payload = dashboard.json()
     assert "consumption_summaries" not in payload
     summary_by_key = {summary["key"]: summary for summary in consumption.json()["consumption_summaries"]}
-    assert list(summary_by_key) == ["today", "yesterday", "last_24h", "last_7d", "last_14d", "this_month", "last_month"]
+    assert list(summary_by_key) == ["today", "today_remaining", "yesterday", "last_24h", "last_7d", "last_14d", "this_month", "last_month"]
     assert summary_by_key["today"]["totals"] == [{"amount": 6.75, "unit": "USD"}]
     assert summary_by_key["today"]["account_count"] == 2
+    assert summary_by_key["today_remaining"]["totals"] == [{"amount": 56.75, "unit": "USD"}]
+    assert summary_by_key["today_remaining"]["account_count"] == 2
     rows = payload["grouped"]["sub2Api"]
     source_row = next(row for row in rows if row["id"] == account_id)
     assert source_row["today_consumption"] == 5.5
@@ -687,6 +689,8 @@ def test_dashboard_consumption_summary_includes_hidden_accounts(tmp_path, monkey
     summary_by_key = {summary["key"]: summary for summary in consumption.json()["consumption_summaries"]}
     assert summary_by_key["today"]["totals"] == [{"amount": 10.0, "unit": "USD"}]
     assert summary_by_key["today"]["account_count"] == 2
+    assert summary_by_key["today_remaining"]["totals"] == [{"amount": 40.0, "unit": "USD"}]
+    assert summary_by_key["today_remaining"]["account_count"] == 2
 
 
 def test_dashboard_api_shows_actual_consumption_from_recharge_ratio(tmp_path, monkeypatch):

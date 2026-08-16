@@ -392,6 +392,7 @@ async function runQueryAll(trigger = "manual") {
         row.last_checked_at = result.checked_at || result.checkedAt || row.last_checked_at;
       });
     });
+    loadConsumptionSummaries();
     const failedResults = results.filter((result) => result.is_valid === false);
     if (failedResults.length) {
       ElMessage.error(`查询失败 ${failedResults.length}/${results.length || failedResults.length}：${queryFailureMessage(failedResults[0], "查询失败")}`);
@@ -420,6 +421,7 @@ async function queryOne(row) {
       target.actual_today_consumption = result.actual_consumption_stats?.today ?? result.actual_today_consumption ?? target.actual_today_consumption;
       target.last_checked_at = result.checked_at || result.checkedAt || target.last_checked_at;
     });
+    loadConsumptionSummaries();
     if (result.is_valid === false) {
       ElMessage.error(queryFailureMessage(result, "查询失败"));
     } else {
