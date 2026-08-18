@@ -488,6 +488,62 @@ async def test_disabled_group_skips_bulk_policy_but_keeps_multi_group_and_cache_
 
 
 @pytest.mark.asyncio
+async def test_local_group_account_exclusion_removes_only_current_pool_from_policy(tmp_path):
+    db = make_db(tmp_path)
+    accounts = [
+        {"id": 1, "name": "hidden", "status": "active", "schedulable": True, "group_ids": [10]},
+        {"id": 2, "name": "multi", "status": "active", "schedulable": True, "group_ids": [10, 20]},
+        {"id": 3, "name": "ungrouped", "status": "active", "schedulable": True, "group_ids": []},
+    ]
+    groups = [{"id": 10, "name": "ten"}, {"id": 20, "name": "twenty"}]
+    prepare_cache(db, accounts, groups)
+    db.exclude_platform_dispatch_group_account(
+        "https://sub.example", 10, 1, account_name="hidden", group_name="ten"
+    )
+    db.exclude_platform_dispatch_group_account(
+        "https://sub.example", 10, 2, account_name="multi", group_name="ten"
+    )
+    client = PolicyClient(accounts, groups)
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+
+    summary = await scheduler.run_once()
+
+    assert summary["managed_accounts"] == 2
+    assert client.probes == [2, 3]
+    availability = {item["pool_key"]: item for item in summary["group_availability"]}
+    assert "group-10" not in availability
+    assert availability["group-20"]["managed_accounts"] == 1
+    assert [item["id"] for item in db.get_platform_dispatch_cache(apply_local_group_account_exclusions=True)["accounts"]] == [2, 3]
+    raw_accounts = {item["id"]: item for item in db.get_platform_dispatch_cache()["accounts"]}
+    assert list(raw_accounts) == [1, 2, 3]
+    assert raw_accounts[2]["group_ids"] == [10, 20]
+
+
+@pytest.mark.asyncio
+async def test_local_group_account_exclusion_is_applied_during_evidence_refresh_without_rewriting_cache_membership(tmp_path):
+    db = make_db(tmp_path)
+    accounts = [
+        {"id": 1, "name": "hidden", "status": "active", "group_ids": [10]},
+        {"id": 2, "name": "visible", "status": "active", "group_ids": [20]},
+    ]
+    groups = [{"id": 10, "name": "ten"}, {"id": 20, "name": "twenty"}]
+    prepare_cache(db, accounts, groups)
+    db.exclude_platform_dispatch_group_account(
+        "https://sub.example", 10, 1, account_name="hidden", group_name="ten"
+    )
+    client = PolicyClient(accounts, groups)
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+
+    summary = await scheduler.refresh_health_evidence(client, db.get_platform_dispatch_cache())
+
+    assert summary["refreshed_accounts"] == 1
+    assert client.probes == [2]
+    raw_accounts = {item["id"]: item for item in db.get_platform_dispatch_cache()["accounts"]}
+    assert raw_accounts[1]["group_ids"] == [10]
+    assert raw_accounts[2]["group_ids"] == [20]
+
+
+@pytest.mark.asyncio
 async def test_auto_dispatch_pause_skips_bulk_policy_but_not_single_account_probe(tmp_path):
     db = make_db(tmp_path)
     accounts = [

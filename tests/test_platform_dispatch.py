@@ -1854,6 +1854,193 @@ def test_platform_dispatch_excluded_group_api_updates_cache_and_conflicts_with_j
     assert conflict_restore.status_code == 409
 
 
+def test_platform_dispatch_group_account_exclusion_is_local_and_restorable(tmp_path, monkeypatch):
+    test_db = setup_test_db(tmp_path, monkeypatch)
+    test_db.set_setting("sub2api_site_url", "https://sub.example")
+    test_db.replace_platform_dispatch_cache(
+        "https://sub.example",
+        [
+            {"id": 1, "name": "multi", "status": "active", "group_ids": [2, 3]},
+            {"id": 2, "name": "only", "status": "active", "group_ids": [2]},
+            {"id": 3, "name": "ungrouped", "status": "active", "group_ids": []},
+        ],
+        [
+            {"id": 2, "name": "group-two", "platform": "openai"},
+            {"id": 3, "name": "group-three", "platform": "openai"},
+        ],
+        [],
+        {"platform": "", "type": "", "status": "", "include_ungrouped": True},
+    )
+
+    with TestClient(app) as client:
+        login(client)
+        removed = client.post("/api/platform-dispatch/groups/2/accounts/1/exclude")
+        accounts_after_multi = client.get("/api/platform-dispatch/accounts").json()["accounts"]
+        repeated = client.post("/api/platform-dispatch/groups/2/accounts/1/exclude")
+        removed_last = client.post("/api/platform-dispatch/groups/2/accounts/2/exclude")
+        accounts_after_last = client.get("/api/platform-dispatch/accounts").json()["accounts"]
+        restored = client.delete("/api/platform-dispatch/groups/2/accounts/2/exclude")
+        accounts_after_restore = client.get("/api/platform-dispatch/accounts").json()["accounts"]
+        missing_restore = client.delete("/api/platform-dispatch/groups/2/accounts/2/exclude")
+
+    assert removed.status_code == 200
+    assert [item["group_id"] for item in removed.json()["removed_group_accounts"]] == [2]
+    accounts_by_id = {item["id"]: item for item in accounts_after_multi}
+    assert accounts_by_id[1]["group_ids"] == [3]
+    assert accounts_by_id[2]["group_ids"] == [2]
+    assert accounts_by_id[3]["group_ids"] == []
+    assert repeated.status_code == 200
+    assert removed_last.status_code == 200
+    assert {item["id"] for item in accounts_after_last} == {1, 3}
+    assert restored.status_code == 200
+    restored_by_id = {item["id"]: item for item in accounts_after_restore}
+    assert restored_by_id[2]["group_ids"] == [2]
+    assert missing_restore.status_code == 404
+
+    raw_accounts = {item["id"]: item for item in test_db.get_platform_dispatch_cache()["accounts"]}
+    assert raw_accounts[1]["group_ids"] == [2, 3]
+    assert raw_accounts[2]["group_ids"] == [2]
+    test_db.exclude_platform_dispatch_group_account(
+        "https://other.example", 2, 1, account_name="other", group_name="other"
+    )
+    assert [item["account_id"] for item in test_db.list_platform_dispatch_group_account_exclusions("https://sub.example")] == [1]
+    assert [item["account_id"] for item in test_db.list_platform_dispatch_group_account_exclusions("https://other.example")] == [1]
+
+
+def test_platform_dispatch_group_account_exclusion_validates_membership_and_job_conflict(tmp_path, monkeypatch):
+    test_db = setup_test_db(tmp_path, monkeypatch)
+    test_db.set_setting("sub2api_site_url", "https://sub.example")
+    test_db.replace_platform_dispatch_cache(
+        "https://sub.example",
+        [
+            {"id": 1, "name": "one", "status": "active", "group_ids": [2]},
+            {"id": 2, "name": "two", "status": "active", "group_ids": [3]},
+        ],
+        [
+            {"id": 2, "name": "group-two", "platform": "openai"},
+            {"id": 3, "name": "group-three", "platform": "openai"},
+        ],
+        [],
+        {"platform": "", "type": "", "status": ""},
+    )
+
+    with TestClient(app) as client:
+        login(client)
+        invalid_group = client.post("/api/platform-dispatch/groups/3/accounts/1/exclude")
+        invalid_account = client.post("/api/platform-dispatch/groups/2/accounts/99/exclude")
+        invalid_membership = client.post("/api/platform-dispatch/groups/2/accounts/2/exclude")
+        assert invalid_membership.status_code == 404
+        test_db.create_platform_dispatch_job("active-job", "accounts_sync", {}, "https://sub.example")
+        conflict_remove = client.post("/api/platform-dispatch/groups/2/accounts/1/exclude")
+        conflict_restore = client.delete("/api/platform-dispatch/groups/2/accounts/1/exclude")
+
+    assert invalid_group.status_code == 404
+    assert invalid_account.status_code == 404
+    assert conflict_remove.status_code == 409
+    assert conflict_restore.status_code == 409
+
+
+def test_platform_dispatch_group_account_restore_requires_current_cache_membership(tmp_path, monkeypatch):
+    test_db = setup_test_db(tmp_path, monkeypatch)
+    test_db.set_setting("sub2api_site_url", "https://sub.example")
+    test_db.replace_platform_dispatch_cache(
+        "https://sub.example",
+        [{"id": 1, "name": "one", "status": "active", "group_ids": [2]}],
+        [{"id": 2, "name": "group-two", "platform": "openai"}],
+        [],
+        {"platform": "", "type": "", "status": ""},
+    )
+    test_db.exclude_platform_dispatch_group_account(
+        "https://sub.example", 2, 1, account_name="one", group_name="group-two"
+    )
+
+    with TestClient(app) as client:
+        login(client)
+        test_db.clear_platform_dispatch_cache()
+        no_cache = client.delete("/api/platform-dispatch/groups/2/accounts/1/exclude")
+
+        test_db.replace_platform_dispatch_cache(
+            "https://sub.example",
+            [{"id": 1, "name": "one", "status": "active", "group_ids": [3]}],
+            [{"id": 3, "name": "group-three", "platform": "openai"}],
+            [],
+            {"platform": "", "type": "", "status": ""},
+        )
+        no_membership = client.delete("/api/platform-dispatch/groups/2/accounts/1/exclude")
+
+    assert no_cache.status_code == 409
+    assert no_membership.status_code == 404
+    assert [
+        item["account_id"]
+        for item in test_db.list_platform_dispatch_group_account_exclusions("https://sub.example")
+    ] == [1]
+
+
+def test_platform_dispatch_group_account_exclusion_survives_full_sync(tmp_path, monkeypatch):
+    test_db = setup_test_db(tmp_path, monkeypatch)
+    test_db.set_setting("sub2api_site_url", "https://sub.example")
+    test_db.replace_platform_dispatch_cache(
+        "https://sub.example",
+        [{"id": 1, "name": "multi", "status": "active", "group_ids": [2, 3]}],
+        [
+            {"id": 2, "name": "group-two", "platform": "openai"},
+            {"id": 3, "name": "group-three", "platform": "openai"},
+        ],
+        [],
+        {"platform": "", "type": "", "status": "", "include_ungrouped": True},
+    )
+    test_db.exclude_platform_dispatch_group_account(
+        "https://sub.example", 2, 1, account_name="multi", group_name="group-two"
+    )
+
+    class SyncClient:
+        site_url = "https://sub.example"
+
+        async def list_groups(self, platform=None):
+            return [
+                {"id": 2, "name": "group-two", "platform": "openai"},
+                {"id": 3, "name": "group-three", "platform": "openai"},
+            ]
+
+        async def list_accounts_page(self, page, page_size, **filters):
+            group_id = filters["group_id"]
+            if group_id in {2, 3}:
+                accounts = [
+                    {
+                        "id": 1,
+                        "name": "multi",
+                        "status": "active",
+                        "type": "apikey",
+                        "platform": "openai",
+                        "group_ids": [2, 3],
+                    }
+                ]
+            else:
+                accounts = []
+            return {
+                "accounts": accounts,
+                "total": len(accounts),
+                "pages": 1,
+                "page": 1,
+                "page_size": page_size,
+            }
+
+    monkeypatch.setattr("app.main.sub2api_admin_client", lambda: SyncClient())
+    with TestClient(app) as client:
+        login(client)
+        started = client.post("/api/platform-dispatch/sync", json={})
+        job = wait_for_dispatch_job(client)
+        accounts = client.get("/api/platform-dispatch/accounts").json()["accounts"]
+        restored = client.delete("/api/platform-dispatch/groups/2/accounts/1/exclude")
+        restored_accounts = client.get("/api/platform-dispatch/accounts").json()["accounts"]
+
+    assert started.status_code == 202
+    assert job["status"] == "succeeded"
+    assert accounts[0]["group_ids"] == [3]
+    assert restored.status_code == 200
+    assert restored_accounts[0]["group_ids"] == [2, 3]
+
+
 def test_platform_dispatch_ungrouped_exclude_api_updates_cache_and_conflicts_with_job(tmp_path, monkeypatch):
     test_db = setup_test_db(tmp_path, monkeypatch)
     test_db.set_setting("sub2api_site_url", "https://sub.example")

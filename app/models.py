@@ -314,6 +314,21 @@ class Database:
                     PRIMARY KEY (source_site_url, group_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS platform_dispatch_group_account_exclusions (
+                    source_site_url TEXT NOT NULL,
+                    group_id INTEGER NOT NULL,
+                    account_id INTEGER NOT NULL,
+                    account_name TEXT NOT NULL DEFAULT '',
+                    group_name TEXT NOT NULL DEFAULT '',
+                    group_platform TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (source_site_url, group_id, account_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_platform_dispatch_group_account_exclusions_account
+                ON platform_dispatch_group_account_exclusions(source_site_url, account_id);
+
                 CREATE TABLE IF NOT EXISTS platform_dispatch_group_settings (
                     source_site_url TEXT NOT NULL,
                     group_id INTEGER NOT NULL,
@@ -885,12 +900,14 @@ class Database:
                 (key, value),
             )
 
-    def get_platform_dispatch_cache(self) -> dict[str, Any] | None:
+    def get_platform_dispatch_cache(
+        self, *, apply_local_group_account_exclusions: bool = False
+    ) -> dict[str, Any] | None:
         with self.connect() as conn:
             row = conn.execute("SELECT * FROM platform_dispatch_cache WHERE id = 1").fetchone()
         if row is None:
             return None
-        return {
+        cache = {
             "source_site_url": str(row["source_site_url"] or ""),
             "accounts": _json_list(row["accounts_json"]),
             "groups": _json_list(row["groups_json"]),
@@ -905,6 +922,14 @@ class Database:
             "activities_refreshed_at": str(row["activities_refreshed_at"] or ""),
             "refreshed_at": str(row["refreshed_at"] or ""),
         }
+        if apply_local_group_account_exclusions:
+            exclusions = self.list_platform_dispatch_group_account_exclusions(
+                cache["source_site_url"]
+            )
+            cache["accounts"] = filter_platform_dispatch_accounts_by_group_account_exclusions(
+                cache["accounts"], exclusions
+            )
+        return cache
 
     def replace_platform_dispatch_cache(
         self,
@@ -1257,6 +1282,99 @@ class Database:
                 WHERE source_site_url = ? AND dispatch_account_id = ?
                 """,
                 (str(source_site_url or "").strip().rstrip("/"), int(dispatch_account_id)),
+            )
+        return cursor.rowcount == 1
+
+    def list_platform_dispatch_group_account_exclusions(
+        self, source_site_url: str
+    ) -> list[dict[str, Any]]:
+        site_url = str(source_site_url or "").strip().rstrip("/")
+        if not site_url:
+            return []
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT source_site_url, group_id, account_id, account_name,
+                       group_name, group_platform, created_at, updated_at
+                FROM platform_dispatch_group_account_exclusions
+                WHERE source_site_url = ?
+                ORDER BY group_platform COLLATE NOCASE, group_name COLLATE NOCASE,
+                         group_id, account_name COLLATE NOCASE, account_id
+                """,
+                (site_url,),
+            ).fetchall()
+        return [
+            {
+                "source_site_url": str(row["source_site_url"] or ""),
+                "group_id": int(row["group_id"]),
+                "account_id": int(row["account_id"]),
+                "account_name": str(row["account_name"] or ""),
+                "group_name": str(row["group_name"] or f"分组 {row['group_id']}"),
+                "group_platform": str(row["group_platform"] or ""),
+                "created_at": str(row["created_at"] or ""),
+                "updated_at": str(row["updated_at"] or ""),
+            }
+            for row in rows
+        ]
+
+    def exclude_platform_dispatch_group_account(
+        self,
+        source_site_url: str,
+        group_id: int,
+        account_id: int,
+        *,
+        account_name: str = "",
+        group_name: str = "",
+        group_platform: str = "",
+    ) -> dict[str, Any]:
+        site_url = str(source_site_url or "").strip().rstrip("/")
+        group_id = int(group_id)
+        account_id = int(account_id)
+        if not site_url or group_id <= 0 or account_id <= 0:
+            raise ValueError("本地分组账号排除参数不正确")
+        now = utc_now()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO platform_dispatch_group_account_exclusions (
+                    source_site_url, group_id, account_id, account_name,
+                    group_name, group_platform, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_site_url, group_id, account_id) DO UPDATE SET
+                    account_name = excluded.account_name,
+                    group_name = excluded.group_name,
+                    group_platform = excluded.group_platform,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    site_url,
+                    group_id,
+                    account_id,
+                    str(account_name or ""),
+                    str(group_name or f"分组 {group_id}"),
+                    str(group_platform or ""),
+                    now,
+                    now,
+                ),
+            )
+        return next(
+            item
+            for item in self.list_platform_dispatch_group_account_exclusions(site_url)
+            if item["group_id"] == group_id and item["account_id"] == account_id
+        )
+
+    def remove_platform_dispatch_group_account_exclusion(
+        self, source_site_url: str, group_id: int, account_id: int
+    ) -> bool:
+        site_url = str(source_site_url or "").strip().rstrip("/")
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                DELETE FROM platform_dispatch_group_account_exclusions
+                WHERE source_site_url = ? AND group_id = ? AND account_id = ?
+                """,
+                (site_url, int(group_id), int(account_id)),
             )
         return cursor.rowcount == 1
 
@@ -3698,6 +3816,49 @@ def _json_dict(value: Any) -> dict[str, Any]:
     except (TypeError, ValueError, json.JSONDecodeError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def filter_platform_dispatch_accounts_by_group_account_exclusions(
+    accounts: list[Any], exclusions: Iterable[Any]
+) -> list[dict[str, Any]]:
+    excluded_by_account: dict[int, set[int]] = {}
+    for exclusion in exclusions or []:
+        if isinstance(exclusion, dict):
+            account_id = _positive_int_or_none(exclusion.get("account_id"))
+            group_id = _positive_int_or_none(exclusion.get("group_id"))
+        else:
+            try:
+                account_id, group_id = exclusion
+                account_id = _positive_int_or_none(account_id)
+                group_id = _positive_int_or_none(group_id)
+            except (TypeError, ValueError):
+                continue
+        if account_id is None or group_id is None:
+            continue
+        excluded_by_account.setdefault(account_id, set()).add(group_id)
+
+    result: list[dict[str, Any]] = []
+    for account in accounts:
+        if not isinstance(account, dict):
+            continue
+        account_id = _positive_int_or_none(account.get("id"))
+        group_ids = _platform_dispatch_account_group_ids(account)
+        excluded_group_ids = excluded_by_account.get(account_id or 0, set())
+        remaining = sorted(group_ids - excluded_group_ids)
+        if group_ids and not remaining:
+            continue
+        if remaining == sorted(group_ids):
+            result.append(dict(account))
+            continue
+        sanitized = {
+            key: value
+            for key, value in account.items()
+            if key not in {"group_id", "groupId", "group_ids", "groupIds", "groups", "plans"}
+        }
+        sanitized["group_ids"] = remaining
+        sanitized["groupIds"] = remaining
+        result.append(sanitized)
+    return result
 
 
 def filter_platform_dispatch_accounts_by_groups(

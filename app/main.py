@@ -28,6 +28,7 @@ from app.models import (
     actual_consumption_stats,
     format_china_time,
     filter_platform_dispatch_accounts_by_available_groups,
+    filter_platform_dispatch_accounts_by_group_account_exclusions,
     filter_platform_dispatch_accounts_by_groups,
     monitor_group_to_dict,
     reminder_to_dict,
@@ -1772,7 +1773,9 @@ async def api_platform_dispatch_account_evidence(
     if account_id <= 0:
         return JSONResponse({"ok": False, "message": "账号 ID 必须是正整数"}, status_code=400)
     site_url = db.get_setting(SUB2API_SITE_URL_SETTING, "").strip().rstrip("/")
-    cache = db.get_platform_dispatch_cache()
+    cache = db.get_platform_dispatch_cache(
+        apply_local_group_account_exclusions=True
+    )
     if not cache or cache.get("source_site_url") != site_url:
         return JSONResponse({"ok": False, "message": "请先同步当前站点的账号信息"}, status_code=409)
     account = next(
@@ -2333,7 +2336,9 @@ async def api_platform_dispatch_evidence_refresh(request: Request):
     require_user(request)
     if platform_dispatch_policy_scheduler.lock.locked():
         return JSONResponse({"ok": False, "message": "自动调度策略正在执行"}, status_code=409)
-    cache = db.get_platform_dispatch_cache()
+    cache = db.get_platform_dispatch_cache(
+        apply_local_group_account_exclusions=True
+    )
     accounts = cache.get("accounts") if cache else []
     if not accounts:
         return JSONResponse({"ok": False, "message": "请先同步账号信息"}, status_code=409)
@@ -2409,6 +2414,172 @@ async def api_platform_dispatch_ungrouped_exclude(request: Request):
     if not db.exclude_platform_dispatch_ungrouped_accounts(site_url):
         return JSONResponse({"ok": False, "message": "请先同步当前站点的账号信息"}, status_code=409)
     db.add_log("info", "platform-dispatch", "屏蔽 Sub2API 未分组账号")
+    return platform_dispatch_cache_response()
+
+
+@app.post("/api/platform-dispatch/groups/{group_id}/accounts/{account_id}/exclude")
+async def api_platform_dispatch_group_account_exclude(
+    request: Request, group_id: int, account_id: int
+):
+    require_user(request)
+    if group_id <= 0 or account_id <= 0:
+        return JSONResponse(
+            {"ok": False, "message": "分组 ID 和账号 ID 必须是正整数"},
+            status_code=400,
+        )
+    if db.has_active_platform_dispatch_job():
+        return JSONResponse(
+            {"ok": False, "message": "平台调度任务执行期间不能修改分组账号关系"},
+            status_code=409,
+        )
+    if platform_dispatch_policy_scheduler.lock.locked():
+        return JSONResponse(
+            {"ok": False, "message": "自动调度策略执行期间不能修改分组账号关系"},
+            status_code=409,
+        )
+
+    site_url = db.get_setting(SUB2API_SITE_URL_SETTING, "").strip().rstrip("/")
+    cache = db.get_platform_dispatch_cache()
+    if not cache or cache.get("source_site_url") != site_url:
+        return JSONResponse(
+            {"ok": False, "message": "请先同步当前站点的账号信息"},
+            status_code=409,
+        )
+    excluded_group_ids = {
+        int(item["id"])
+        for item in db.list_platform_dispatch_excluded_groups(site_url)
+    }
+    if group_id in excluded_group_ids:
+        return JSONResponse(
+            {"ok": False, "message": "该分组已被排除，无法修改成员关系"},
+            status_code=404,
+        )
+    group = next(
+        (
+            item
+            for item in cache.get("groups") or []
+            if isinstance(item, dict) and _platform_dispatch_account_id(item) == group_id
+        ),
+        None,
+    )
+    account = next(
+        (
+            item
+            for item in cache.get("accounts") or []
+            if isinstance(item, dict) and _platform_dispatch_account_id(item) == account_id
+        ),
+        None,
+    )
+    if group is None:
+        referenced = any(
+            group_id in _cached_platform_dispatch_group_ids(item)
+            for item in cache.get("accounts") or []
+            if isinstance(item, dict)
+        )
+        if referenced:
+            group = {"id": group_id, "name": f"分组 {group_id}", "platform": ""}
+    if group is None or account is None:
+        return JSONResponse(
+            {"ok": False, "message": "分组或账号不存在"},
+            status_code=404,
+        )
+    if group_id not in _cached_platform_dispatch_group_ids(account):
+        return JSONResponse(
+            {"ok": False, "message": "账号不属于当前分组"},
+            status_code=404,
+        )
+
+    db.exclude_platform_dispatch_group_account(
+        site_url,
+        group_id,
+        account_id,
+        account_name=str(account.get("name") or f"账号 {account_id}"),
+        group_name=str(group.get("name") or f"分组 {group_id}"),
+        group_platform=str(group.get("platform") or ""),
+    )
+    db.add_log(
+        "info",
+        "platform-dispatch",
+        f"从 Sub2API 分组 {group.get('name') or group_id} 移除账号 "
+        f"{account.get('name') or account_id} (#{account_id})（仅本项目）",
+    )
+    return platform_dispatch_cache_response()
+
+
+@app.delete("/api/platform-dispatch/groups/{group_id}/accounts/{account_id}/exclude")
+async def api_platform_dispatch_group_account_exclusion_delete(
+    request: Request, group_id: int, account_id: int
+):
+    require_user(request)
+    if group_id <= 0 or account_id <= 0:
+        return JSONResponse(
+            {"ok": False, "message": "分组 ID 和账号 ID 必须是正整数"},
+            status_code=400,
+        )
+    if db.has_active_platform_dispatch_job():
+        return JSONResponse(
+            {"ok": False, "message": "平台调度任务执行期间不能修改分组账号关系"},
+            status_code=409,
+        )
+    if platform_dispatch_policy_scheduler.lock.locked():
+        return JSONResponse(
+            {"ok": False, "message": "自动调度策略执行期间不能修改分组账号关系"},
+            status_code=409,
+        )
+    site_url = db.get_setting(SUB2API_SITE_URL_SETTING, "").strip().rstrip("/")
+    cache = db.get_platform_dispatch_cache()
+    if not cache or cache.get("source_site_url") != site_url:
+        return JSONResponse(
+            {"ok": False, "message": "请先同步当前站点的账号信息"},
+            status_code=409,
+        )
+    account = next(
+        (
+            item
+            for item in cache.get("accounts") or []
+            if isinstance(item, dict)
+            and _platform_dispatch_account_id(item) == account_id
+        ),
+        None,
+    )
+    if account is None:
+        return JSONResponse({"ok": False, "message": "账号不存在"}, status_code=404)
+    group = next(
+        (
+            item
+            for item in cache.get("groups") or []
+            if isinstance(item, dict)
+            and _platform_dispatch_account_id(item) == group_id
+        ),
+        None,
+    )
+    if group is None:
+        referenced = any(
+            group_id in _cached_platform_dispatch_group_ids(item)
+            for item in cache.get("accounts") or []
+            if isinstance(item, dict)
+        )
+        if referenced:
+            group = {"id": group_id, "name": f"分组 {group_id}", "platform": ""}
+    if group is None:
+        return JSONResponse({"ok": False, "message": "分组不存在"}, status_code=404)
+    if group_id not in _cached_platform_dispatch_group_ids(account):
+        return JSONResponse(
+            {"ok": False, "message": "账号不属于当前分组"},
+            status_code=404,
+        )
+    if not db.remove_platform_dispatch_group_account_exclusion(
+        site_url, group_id, account_id
+    ):
+        return JSONResponse(
+            {"ok": False, "message": "该账号未从本分组移除"},
+            status_code=404,
+        )
+    db.add_log(
+        "info",
+        "platform-dispatch",
+        f"恢复 Sub2API 分组 #{group_id} 与账号 #{account_id} 的本地绑定",
+    )
     return platform_dispatch_cache_response()
 
 
@@ -5208,6 +5379,25 @@ def public_platform_dispatch_excluded_group(group: dict[str, Any]) -> dict[str, 
     return dict(group)
 
 
+def public_platform_dispatch_group_account_exclusion(
+    exclusion: dict[str, Any],
+    *,
+    account: dict[str, Any] | None = None,
+    group: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    result = dict(exclusion)
+    if account:
+        result["account_name"] = str(account.get("name") or result.get("account_name") or "")
+    if group:
+        result["group_name"] = str(group.get("name") or result.get("group_name") or "")
+        result["group_platform"] = str(
+            group.get("platform") or result.get("group_platform") or ""
+        )
+    result["group_id"] = int(result.get("group_id") or 0)
+    result["account_id"] = int(result.get("account_id") or 0)
+    return result
+
+
 def _snake_case_platform_dispatch_payload(value: Any) -> Any:
     if isinstance(value, list):
         return [_snake_case_platform_dispatch_payload(item) for item in value]
@@ -5231,6 +5421,7 @@ def platform_dispatch_cache_response(
 ) -> dict[str, Any]:
     cache = db.get_platform_dispatch_cache()
     site_url = db.get_setting(SUB2API_SITE_URL_SETTING, "")
+    local_group_account_exclusions = db.list_platform_dispatch_group_account_exclusions(site_url)
     excluded_group_rows = db.list_platform_dispatch_excluded_groups(site_url)
     excluded_group_ids = {int(group["id"]) for group in excluded_group_rows}
     excluded_groups = [
@@ -5239,6 +5430,7 @@ def platform_dispatch_cache_response(
     ]
     excluded_group_ids = {int(group["id"]) for group in excluded_groups}
     if cache is None:
+        raw_cache_accounts: list[dict[str, Any]] = []
         accounts: list[dict[str, Any]] = []
         groups: list[dict[str, Any]] = []
         warnings: list[str] = []
@@ -5248,8 +5440,14 @@ def platform_dispatch_cache_response(
         refreshed_at = None
         source_site_url = ""
     else:
+        raw_cache_accounts = [
+            account for account in cache["accounts"] if isinstance(account, dict)
+        ]
+        effective_cache_accounts = filter_platform_dispatch_accounts_by_group_account_exclusions(
+            raw_cache_accounts, local_group_account_exclusions
+        )
         accounts = (
-            filter_platform_dispatch_accounts_by_groups(cache["accounts"], excluded_group_ids)
+            filter_platform_dispatch_accounts_by_groups(effective_cache_accounts, excluded_group_ids)
             if include_accounts
             else []
         )
@@ -5265,6 +5463,24 @@ def platform_dispatch_cache_response(
         activities_refreshed_at = cache["activities_refreshed_at"] or None
         refreshed_at = cache["refreshed_at"]
         source_site_url = cache["source_site_url"]
+    account_by_id = {
+        _platform_dispatch_account_id(account): account
+        for account in raw_cache_accounts
+        if _platform_dispatch_account_id(account)
+    }
+    group_by_id = {
+        _platform_dispatch_account_id(group): group
+        for group in (cache.get("groups") if cache else [])
+        if isinstance(group, dict) and _platform_dispatch_account_id(group)
+    }
+    removed_group_accounts = [
+        public_platform_dispatch_group_account_exclusion(
+            exclusion,
+            account=account_by_id.get(int(exclusion["account_id"])),
+            group=group_by_id.get(int(exclusion["group_id"])),
+        )
+        for exclusion in local_group_account_exclusions
+    ]
     groups = [
         group
         for group in groups
@@ -5410,6 +5626,7 @@ def platform_dispatch_cache_response(
         "groups": groups,
         "warnings": warnings,
         "excluded_groups": excluded_groups,
+        "removed_group_accounts": removed_group_accounts,
         "recent_limit": recent_limit,
         "activities_refreshed_at": activities_refreshed_at,
         "refreshed_at": refreshed_at,

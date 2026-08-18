@@ -47,6 +47,7 @@ const hasCache = ref(false);
 const accounts = ref([]);
 const groups = ref([]);
 const excludedGroups = ref([]);
+const removedGroupAccounts = ref([]);
 const warnings = ref([]);
 const siteUrl = ref("");
 const refreshedAt = ref("");
@@ -61,6 +62,7 @@ const updatingPriorityIds = ref(new Set());
 const updatingProbeModelIds = ref(new Set());
 const updatingGroupProbeModelIds = ref(new Set());
 const updatingGroupAutoDispatchIds = ref(new Set());
+const updatingGroupAccountKeys = ref(new Set());
 const excludingUngrouped = ref(false);
 const autoDispatchPauseDialog = ref(false);
 const autoDispatchPauseAccount = ref(null);
@@ -240,6 +242,25 @@ const excludedAccounts = computed(() => {
     .map((id) => accountsById.get(id) || { id, name: `账号 ${id}`, platform: "", type: "" });
 });
 
+const removedGroupAccountsByGroupId = computed(() => {
+  const grouped = new Map();
+  for (const binding of removedGroupAccounts.value) {
+    const groupId = Number(binding?.group_id ?? binding?.groupId);
+    if (!Number.isInteger(groupId) || groupId <= 0) continue;
+    if (!grouped.has(groupId)) grouped.set(groupId, []);
+    grouped.get(groupId).push(binding);
+  }
+  return grouped;
+});
+
+const orphanRemovedGroupAccounts = computed(() => {
+  const knownGroupIds = new Set(groups.value.map((group) => Number(group.id)));
+  return removedGroupAccounts.value.filter((binding) => {
+    const groupId = Number(binding?.group_id ?? binding?.groupId);
+    return !knownGroupIds.has(groupId);
+  });
+});
+
 const filteredAccounts = computed(() => {
   const search = filters.search.trim().toLowerCase();
   return includedAccounts.value.filter((account) => {
@@ -270,7 +291,8 @@ const groupSections = computed(() => {
     sections.push({
       key: `group-${id}`,
       group,
-      accounts: groupAccounts
+      accounts: groupAccounts,
+      removedAccounts: removedGroupAccountsByGroupId.value.get(id) || []
     });
   });
 
@@ -279,7 +301,8 @@ const groupSections = computed(() => {
     sections.push({
       key: "ungrouped",
       group: { id: null, name: "未分组", platform: "", status: "" },
-      accounts: ungrouped
+      accounts: ungrouped,
+      removedAccounts: []
     });
   }
   return sections.sort((left, right) => compareGroups(left.group, right.group));
@@ -560,6 +583,7 @@ function applyDispatchPayload(payload) {
   if (Array.isArray(payload.accounts)) applyDispatchAccountsPayload(payload);
   groups.value = payload.groups || [];
   excludedGroups.value = payload.excluded_groups || payload.excludedGroups || [];
+  removedGroupAccounts.value = payload.removed_group_accounts || payload.removedGroupAccounts || [];
   warnings.value = payload.warnings || [];
   siteUrl.value = payload.site_url || payload.siteUrl || "";
   refreshedAt.value = payload.refreshed_at || payload.refreshedAt || "";
@@ -894,6 +918,80 @@ async function restoreExcludedAccount(account) {
     ElMessage.error(error.message || "恢复账号失败");
   } finally {
     setExcludedAccountUpdating(accountId, false);
+  }
+}
+
+function groupAccountKey(groupId, accountId) {
+  return `${Number(groupId)}:${Number(accountId)}`;
+}
+
+function setGroupAccountUpdating(groupId, accountId, updating) {
+  const key = groupAccountKey(groupId, accountId);
+  const next = new Set(updatingGroupAccountKeys.value);
+  if (updating) next.add(key);
+  else next.delete(key);
+  updatingGroupAccountKeys.value = next;
+}
+
+function isGroupAccountUpdating(group, account) {
+  const groupId = excludedGroupId(group);
+  const accountId = Number(account?.id ?? account?.account_id ?? account?.accountId);
+  return updatingGroupAccountKeys.value.has(
+    groupAccountKey(groupId, accountId)
+  );
+}
+
+async function excludeGroupAccount(group, account) {
+  const groupId = excludedGroupId(group);
+  const accountId = Number(account?.id);
+  if (!groupId || !Number.isInteger(accountId) || accountId <= 0) return;
+  const remainingGroupCount = accountGroupIds(account).filter((id) => id !== groupId).length;
+  const finalGroupWarning = remainingGroupCount
+    ? "该账号在其他分组中的本项目绑定会保留。"
+    : "该账号移除最后一个分组后，将从本项目的平台调度列表隐藏。";
+  try {
+    await ElMessageBox.confirm(
+      `仅移除本项目中“${account.name || `账号 ${accountId}`}”与“${group.name || `分组 ${groupId}`}”的绑定，不会修改远端 Sub2API。${finalGroupWarning}`,
+      "移出本组",
+      { confirmButtonText: "确认移出", cancelButtonText: "取消", type: "warning" }
+    );
+  } catch {
+    return;
+  }
+
+  setGroupAccountUpdating(groupId, accountId, true);
+  try {
+    const payload = await api.excludePlatformDispatchGroupAccount(groupId, accountId);
+    applyDispatchPayload(payload);
+    await refreshDispatchAccounts();
+    ElMessage.success(`已将“${account.name || accountId}”移出本组`);
+  } catch (error) {
+    if (error.status === 409) {
+      await refreshPolicyRuntime().catch(() => {});
+    }
+    ElMessage.error(error.message || "移出本组失败");
+  } finally {
+    setGroupAccountUpdating(groupId, accountId, false);
+  }
+}
+
+async function restoreGroupAccount(binding) {
+  const groupId = Number(binding?.group_id ?? binding?.groupId);
+  const accountId = Number(binding?.account_id ?? binding?.accountId);
+  if (!Number.isInteger(groupId) || groupId <= 0 || !Number.isInteger(accountId) || accountId <= 0) return;
+  setGroupAccountUpdating(groupId, accountId, true);
+  try {
+    const payload = await api.restorePlatformDispatchGroupAccount(groupId, accountId);
+    applyDispatchPayload(payload);
+    await refreshDispatchAccounts();
+    ElMessage.success(`已恢复“${binding.account_name || `账号 ${accountId}`}”的本组绑定`);
+  } catch (error) {
+    if (error.status === 409) {
+      await refreshPolicyRuntime().catch(() => {});
+    }
+    ElMessage.error(error.message || "恢复本组绑定失败");
+  } finally {
+    setGroupAccountUpdating(groupId, accountId, false);
   }
 }
 
@@ -2069,6 +2167,38 @@ onBeforeUnmount(() => {
       </div>
     </section>
 
+    <section v-if="hasCache && orphanRemovedGroupAccounts.length" class="dispatch-excluded-panel">
+      <header>
+        <strong>待恢复的其他分组账号绑定</strong>
+        <el-tag size="small" type="info" effect="plain">{{ orphanRemovedGroupAccounts.length }}</el-tag>
+      </header>
+      <div class="dispatch-excluded-grid">
+        <div
+          v-for="binding in orphanRemovedGroupAccounts"
+          :key="groupAccountKey(binding.group_id ?? binding.groupId, binding.account_id ?? binding.accountId)"
+          class="dispatch-excluded-item"
+        >
+          <div>
+            <strong>{{ binding.account_name || `账号 ${binding.account_id}` }}</strong>
+            <span>#{{ binding.account_id }}</span>
+            <el-tag size="small" effect="plain">{{ binding.group_name || `分组 ${binding.group_id}` }}</el-tag>
+            <span v-if="binding.group_platform">{{ binding.group_platform }}</span>
+          </div>
+          <el-tooltip content="恢复本组绑定">
+            <el-button
+              circle
+              text
+              :icon="CircleClose"
+              :loading="isGroupAccountUpdating(binding, binding)"
+              :disabled="dispatchMutationDisabled || policySaving"
+              :aria-label="`恢复 ${binding.account_name || binding.account_id} 的本组绑定`"
+              @click="restoreGroupAccount(binding)"
+            />
+          </el-tooltip>
+        </div>
+      </div>
+    </section>
+
     <section v-if="hasCache && excludedGroups.length" class="dispatch-excluded-panel">
       <header>
         <strong>已排除分组</strong>
@@ -2195,6 +2325,34 @@ onBeforeUnmount(() => {
           </div>
         </header>
 
+        <div v-if="section.group.id && section.removedAccounts.length" class="dispatch-excluded-groups">
+          <div class="dispatch-excluded-title">
+            <span>本组已移除账号</span>
+            <el-tag size="small" type="info" effect="plain">{{ section.removedAccounts.length }}</el-tag>
+          </div>
+          <div
+            v-for="binding in section.removedAccounts"
+            :key="groupAccountKey(binding.group_id ?? binding.groupId, binding.account_id ?? binding.accountId)"
+            class="dispatch-excluded-row"
+          >
+            <div>
+              <strong>{{ binding.account_name || `账号 ${binding.account_id}` }}</strong>
+              <span>#{{ binding.account_id }}</span>
+            </div>
+            <el-tooltip content="恢复本组绑定">
+              <el-button
+                circle
+                text
+                :icon="CircleClose"
+                :loading="isGroupAccountUpdating(binding, binding)"
+                :disabled="dispatchMutationDisabled || policySaving"
+                :aria-label="`恢复 ${binding.account_name || binding.account_id} 的本组绑定`"
+                @click="restoreGroupAccount(binding)"
+              />
+            </el-tooltip>
+          </div>
+        </div>
+
         <div v-show="!isCollapsed(section.key)" class="dispatch-account-grid">
           <el-empty v-if="section.group.id && section.accounts.length === 0" description="该分组暂无账号" :image-size="72" />
           <article v-for="account in section.accounts" :key="`${section.key}-${account.id}`" class="dispatch-account-card">
@@ -2294,6 +2452,18 @@ onBeforeUnmount(() => {
                     :disabled="dispatchMutationDisabled || policySaving || autoDispatchPauseSaving"
                     :aria-label="`${account.name} ${isAutoDispatchPaused(account) ? '管理自动调度暂停' : '暂停自动调度'}`"
                     @click="openAutoDispatchPauseDialog(account)"
+                  />
+                </el-tooltip>
+                <el-tooltip v-if="section.group.id" content="移出本组">
+                  <el-button
+                    circle
+                    text
+                    type="warning"
+                    :icon="Delete"
+                    :loading="isGroupAccountUpdating(section.group, account)"
+                    :disabled="dispatchMutationDisabled || policySaving || isGroupAccountUpdating(section.group, account)"
+                    :aria-label="`将 ${account.name} 移出本组 ${section.group.name}`"
+                    @click="excludeGroupAccount(section.group, account)"
                   />
                 </el-tooltip>
                 <el-tooltip content="排除账号">
