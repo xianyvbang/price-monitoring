@@ -1370,7 +1370,11 @@ async def test_recovery_prefers_account_covering_more_deficient_groups(tmp_path)
         180,
     )
 
-    assert client.updates == [(1, "schedulable", True)]
+    assert client.updates == [
+        (1, "schedulable", True),
+        (2, "schedulable", True),
+    ]
+    assert action.count("开启调度") == 2
     assert "分组 10、分组 20 低于每组最低保障" in action
 
 
@@ -1505,7 +1509,7 @@ async def test_manual_refresh_and_automatic_scoring_share_evidence_collection(tm
 
 
 @pytest.mark.asyncio
-async def test_schedulable_policy_switches_only_one_account_per_round(tmp_path):
+async def test_schedulable_policy_closes_only_one_account_per_pool_per_round(tmp_path):
     db = make_db(tmp_path)
     accounts = {
         1: {"id": 1, "name": "one", "status": "active"},
@@ -1883,7 +1887,7 @@ async def test_price_protection_does_not_close_rate_expired_account(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_price_safe_recovery_can_override_manual_close_but_only_once(tmp_path):
+async def test_price_safe_recovery_can_override_manual_close_for_all_eligible_accounts(tmp_path):
     db = make_db(tmp_path)
     accounts = {
         1: {"id": 1, "name": "manual", "status": "active", "schedulable": False},
@@ -1916,7 +1920,11 @@ async def test_price_safe_recovery_can_override_manual_close_but_only_once(tmp_p
         cost_profiles=profiles,
     )
 
-    assert client.updates == [(1, "schedulable", True)]
+    assert client.updates == [
+        (1, "schedulable", True),
+        (2, "schedulable", True),
+    ]
+    assert action.count("开启调度") == 2
     assert "成本来源：source / pro" in action
     assert "覆盖人工关闭状态：是" in action
 

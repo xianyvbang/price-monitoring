@@ -1932,9 +1932,9 @@ onBeforeUnmount(() => {
         <span v-if="!policyConfig.auto_scoring_enabled">自动评分和自动调度均关闭；后台不再读取证据或重算健康分。</span>
         <span v-else-if="!policyConfig.enabled">自动评分开启：后台增量读取请求证据、探活并计算健康评分，不修改 Sub2API 账号状态或调度参数。</span>
         <span v-else-if="!policyConfig.return_pool_enabled && !policyConfig.smart_expand_enabled && !policyConfig.load_factor_enabled && !policyConfig.price_protection_enabled">
-          四项可选策略均关闭；健康异常策略每轮每个分组仍最多关闭 1 个账号。任一分组低于每组最低保障 {{ policyConfig.minimum_available_accounts }} 个时，会将符合条件的账号逐个重新开启。
+          四项可选策略均关闭；健康异常策略每轮每个分组仍最多关闭 1 个账号。任一分组低于每组最低保障 {{ policyConfig.minimum_available_accounts }} 个时，会在本轮重新开启全部符合条件的账号。
         </span>
-        <span v-else>每 {{ policyConfig.probe_interval_seconds }} 秒评估托管账号；健康异常策略每轮每个分组最多关闭 1 个账号，全部分组最多开启 1 个。价格保护仍会立即关闭全部价格不安全账号。</span>
+        <span v-else>每 {{ policyConfig.probe_interval_seconds }} 秒评估托管账号；健康异常策略每轮每个分组最多关闭 1 个账号，恢复时会开启全部符合条件的账号。价格保护仍会立即关闭全部价格不安全账号。</span>
       </div>
 
       <div class="policy-strategies">
@@ -1949,7 +1949,7 @@ onBeforeUnmount(() => {
         </label>
         <label class="policy-strategy">
           <el-switch v-model="policyConfig.return_pool_enabled" />
-          <span><strong>健康回池</strong><small>每个分组健康可用账号不足时，逐步重新开启该分组的 Sub2API 账号调度，直至每组达到 {{ policyConfig.healthy_target_accounts }} 个</small></span>
+          <span><strong>健康回池</strong><small>每个分组健康可用账号低于回池目标时，在本轮重新开启该分组中全部符合条件的 Sub2API 账号</small></span>
         </label>
         <label class="policy-strategy">
           <el-switch v-model="policyConfig.smart_expand_enabled" />
@@ -2038,7 +2038,7 @@ onBeforeUnmount(() => {
         <p><strong>数据来源</strong><span>健康分证据来自 Sub2API 最近使用记录、账号错误记录、上游错误记录和系统主动探活，并使用请求是否成功、HTTP 状态码、错误信息、是否超时及首字耗时进行分类。自动调度还会读取远端账号状态与调度开关、实时可用性、并发占用、排队数及账号所属分组倍率；这些数据只用于判断可用池、触发扩容和比较价格，不直接计入健康分。</span></p>
         <p><strong>证据分值</strong><span>请求成功为 100 分；成功但首字耗时超过 {{ Number(policyConfig.slow_first_token_ms) / 1000 }} 秒为 65 分；认证失败（401/403）、余额不足或用量上限异常为 0 分；超时或主动探活失败为 10 分；HTTP 429/502/503 为 25 分；其他上游错误为 40 分。每条分值按“系统计算”的短期和长期占比合成健康分，上游价格不参与健康分计算。</span></p>
         <p><strong>关闭调度</strong><span>自动调度开启后，最新有效证据为认证、余额或用量上限致命异常时进入关闭名单；最近 {{ policyConfig.failure_window }} 条有效证据中，探活失败、超时或 HTTP 429/502/503 达到 {{ policyConfig.failure_threshold }} 次，且健康分低于 {{ policyConfig.failure_health_threshold }} 分时也会关闭；最近 {{ policyConfig.slow_window }} 条有效证据中，慢首字达到 {{ policyConfig.slow_threshold }} 次且健康分低于 {{ policyConfig.failure_health_threshold }} 分时同样关闭。健康异常每轮每个分组最多关闭 1 个，多分组账号会占用其全部所属分组的名额；非致命异常关闭后，每个所属分组仍须至少保留 {{ policyConfig.minimum_available_accounts }} 个 active 且已开启调度的账号，致命异常不受最低保障限制。价格保护不受上述每组限额和最低保障限制，可在同一轮关闭全部价格不安全账号。</span></p>
-        <p><strong>开启调度</strong><span>只考虑远端状态仍为 active、当前调度已关闭、证据有效、健康分达到 {{ policyConfig.health_threshold }} 分且未被价格保护判定为不安全的账号。价格保护开启且成本已明确恢复安全时，系统优先选择健康分最高的账号恢复；否则，当任一分组的健康可用账号少于 {{ policyConfig.minimum_available_accounts }} 个时始终执行最低保障回池，开启健康回池后还会继续恢复到每组 {{ policyConfig.healthy_target_accounts }} 个。正常回池还要求账号在当前证据有效期内探活成功，并优先选择可覆盖最多不足分组、健康分更高的账号；全部分组每轮合计最多开启 1 个，可能覆盖系统或人员手动关闭状态，inactive 或 error 账号不会自动开启。</span></p>
+        <p><strong>开启调度</strong><span>只考虑远端状态仍为 active、当前调度已关闭、证据有效、健康分达到 {{ policyConfig.health_threshold }} 分且未被价格保护判定为不安全的账号。价格保护开启且成本已明确恢复安全时，系统会恢复全部符合条件的账号；当任一分组的健康可用账号少于 {{ policyConfig.minimum_available_accounts }} 个时始终执行最低保障回池，开启健康回池后，分组低于 {{ policyConfig.healthy_target_accounts }} 个时会恢复该分组中全部符合条件的账号。正常回池还要求账号在当前证据有效期内探活成功，并按可覆盖更多不足分组、健康分更高的顺序处理；可能覆盖系统或人员手动关闭状态，inactive 或 error 账号不会自动开启。</span></p>
         <p><strong>上游价格</strong><span>账号需绑定余额监控分组，上游成本倍率 = 有效分组倍率 × 充值实付金额 ÷ 充值到账金额；账号所属本地平台分组中的最小正数倍率作为销售倍率，最低安全倍率 = 上游成本倍率 × (1 + {{ policyConfig.minimum_profit_margin_percent }}% 最低利润率)。开启价格保护后，销售倍率低于安全线会关闭调度，重新安全且健康达标后可恢复。智能扩容和负载因子使用“健康分 ÷ 上游成本倍率 ^ {{ policyConfig.rate_weight_exponent }}”作为分配权重，因此成本越低，获得的扩容并发和负载越多，但不会改变健康分。未绑定、倍率未知、本地销售倍率未知或超过两个自动查询周期的成本数据只告警，不参与成本调权，保持现有并发和负载，也不会仅因成本未知而关闭调度。</span></p>
       </div>
 

@@ -1820,7 +1820,17 @@ class PlatformDispatchPolicyScheduler:
         if attempted_closure:
             return ""
 
-        candidate: tuple[int, bool, str] | None = None
+        recovery_actions: list[str] = []
+        attempted_recovery_ids: set[int] = set()
+
+        async def apply_recovery(account_id: int, reason: str) -> None:
+            if account_id in attempted_recovery_ids:
+                return
+            attempted_recovery_ids.add(account_id)
+            action = await apply_candidate(account_id, True, reason)
+            if action:
+                recovery_actions.append(action)
+
         price_recovery = [
             account_id
             for account_id, account in accounts.items()
@@ -1831,78 +1841,73 @@ class PlatformDispatchPolicyScheduler:
             and health[account_id]["evidence_fresh"]
             and (health[account_id]["health_score"] or 0) >= float(config["health_threshold"])
         ]
-        if config["price_protection_enabled"] and price_recovery:
-            account_id = max(
+        if config["price_protection_enabled"]:
+            for account_id in sorted(
                 price_recovery,
-                key=lambda value: (health[value]["health_score"] or 0, -value),
-            )
-            profile = cost_profiles[account_id]
-            binding = profile.get("cost_binding") or {}
-            source = (
-                f"{binding.get('balance_account_name') or binding.get('balance_account_id') or '余额账号'} / "
-                f"{binding.get('group_name') or binding.get('monitor_group_id') or '监控分组'}"
-            )
-            candidate = (
-                account_id,
-                True,
-                f"价格已安全：本地最低倍率 {profile['local_min_rate_multiplier']:.6g}，"
-                f"最低安全倍率 {profile['minimum_safe_rate_multiplier']:.6g}，"
-                f"上游成本 {profile['upstream_cost_multiplier']:.6g}，成本来源：{source}",
-            )
+                key=lambda value: (-(health[value]["health_score"] or 0), value),
+            ):
+                profile = cost_profiles[account_id]
+                binding = profile.get("cost_binding") or {}
+                source = (
+                    f"{binding.get('balance_account_name') or binding.get('balance_account_id') or '余额账号'} / "
+                    f"{binding.get('group_name') or binding.get('monitor_group_id') or '监控分组'}"
+                )
+                reason = (
+                    f"价格已安全：本地最低倍率 {profile['local_min_rate_multiplier']:.6g}，"
+                    f"最低安全倍率 {profile['minimum_safe_rate_multiplier']:.6g}，"
+                    f"上游成本 {profile['upstream_cost_multiplier']:.6g}，成本来源：{source}"
+                )
+                await apply_recovery(account_id, reason)
 
-        if candidate is None:
-            pools = _group_availability_summary(accounts, available_ids, group_map or {}, config)
+        pools = _group_availability_summary(accounts, available_ids, group_map or {}, config)
+        deficient = {
+            item["pool_key"]: minimum - int(item["available_accounts"])
+            for item in pools
+            if int(item["available_accounts"]) < minimum
+        }
+        reason_suffix = "低于每组最低保障"
+        if not deficient and config["return_pool_enabled"]:
+            healthy_target = int(config["healthy_target_accounts"])
             deficient = {
-                item["pool_key"]: minimum - int(item["available_accounts"])
+                item["pool_key"]: healthy_target - int(item["available_accounts"])
                 for item in pools
-                if int(item["available_accounts"]) < minimum
+                if int(item["available_accounts"]) < healthy_target
             }
-            reason_suffix = "低于每组最低保障"
-            if not deficient and config["return_pool_enabled"]:
-                healthy_target = int(config["healthy_target_accounts"])
-                deficient = {
-                    item["pool_key"]: healthy_target - int(item["available_accounts"])
-                    for item in pools
-                    if int(item["available_accounts"]) < healthy_target
-                }
-                reason_suffix = "低于每组健康回池目标"
-            if deficient:
-                now = datetime.now(timezone.utc)
-                pool_names = {item["pool_key"]: str(item["group_name"]) for item in pools}
-                recovery: list[tuple[int, list[str]]] = []
-                for account_id, account in accounts.items():
-                    item = health[account_id]
-                    probe_at = _parse_datetime(item.get("latest_probe_success_at"))
-                    covered = [
-                        key for key in _account_pool_keys(account) if _pool_key(key) in deficient
-                    ]
-                    if (
-                        str(account.get("status") or "inactive") == "active"
-                        and account.get("schedulable") is False
-                        and account_id not in price_unsafe_ids
-                        and covered
-                        and item["evidence_fresh"]
-                        and (item["health_score"] or 0) >= float(config["health_threshold"])
-                        and probe_at is not None
-                        and probe_at >= now - timedelta(seconds=ttl_seconds)
-                    ):
-                        recovery.append((account_id, [_pool_key(key) for key in covered]))
-                if recovery:
-                    account_id, covered = max(
-                        recovery,
-                        key=lambda value: (
-                            len(value[1]),
-                            health[value[0]]["health_score"] or 0,
-                            -value[0],
-                        ),
-                    )
-                    names = "、".join(pool_names[key] for key in covered)
-                    reason = f"{names} {reason_suffix}"
-                    candidate = (account_id, True, reason)
-        if candidate is None:
-            return ""
-        account_id, schedulable, reason = candidate
-        return await apply_candidate(account_id, schedulable, reason)
+            reason_suffix = "低于每组健康回池目标"
+        if deficient:
+            now = datetime.now(timezone.utc)
+            pool_names = {item["pool_key"]: str(item["group_name"]) for item in pools}
+            recovery: list[tuple[int, list[str]]] = []
+            for account_id, account in accounts.items():
+                item = health[account_id]
+                probe_at = _parse_datetime(item.get("latest_probe_success_at"))
+                covered = [
+                    key for key in _account_pool_keys(account) if _pool_key(key) in deficient
+                ]
+                if (
+                    str(account.get("status") or "inactive") == "active"
+                    and account.get("schedulable") is False
+                    and account_id not in price_unsafe_ids
+                    and covered
+                    and item["evidence_fresh"]
+                    and (item["health_score"] or 0) >= float(config["health_threshold"])
+                    and probe_at is not None
+                    and probe_at >= now - timedelta(seconds=ttl_seconds)
+                ):
+                    recovery.append((account_id, [_pool_key(key) for key in covered]))
+            recovery.sort(
+                key=lambda value: (
+                    -len(value[1]),
+                    -(health[value[0]]["health_score"] or 0),
+                    value[0],
+                )
+            )
+            for account_id, covered in recovery:
+                names = "、".join(pool_names[key] for key in covered)
+                reason = f"{names} {reason_suffix}"
+                await apply_recovery(account_id, reason)
+
+        return "；".join(recovery_actions)
 
     async def _apply_concurrency_policy(
         self,
