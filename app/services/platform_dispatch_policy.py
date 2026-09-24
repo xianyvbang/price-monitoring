@@ -298,7 +298,7 @@ def classify_activity(activity: dict[str, Any], *, probe: bool = False) -> dict[
     elif probe:
         probe_duration_ms = duration_ms if duration_ms is not None else first_token_ms
         if probe_duration_ms is not None and probe_duration_ms >= PROBE_FAST_THRESHOLD_MS:
-            category, score = "slow", 60.0
+            category, score = "slow", 50.0
         else:
             category, score = "healthy", 100.0
     elif not is_error:
