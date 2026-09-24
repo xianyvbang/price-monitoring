@@ -3677,7 +3677,7 @@ onBeforeUnmount(() => {
 }
 
 .probe-timeline-bar.is-warning {
-  background: var(--warning);
+  background: #E3AF26;
 }
 
 .probe-timeline-bar.is-failure {
