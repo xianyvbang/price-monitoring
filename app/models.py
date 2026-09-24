@@ -375,6 +375,7 @@ class Database:
                     score REAL NOT NULL,
                     status_code INTEGER,
                     first_token_ms REAL,
+                    duration_ms REAL,
                     is_timeout INTEGER NOT NULL DEFAULT 0,
                     is_probe_success INTEGER NOT NULL DEFAULT 0,
                     message TEXT NOT NULL DEFAULT '',
@@ -476,6 +477,7 @@ class Database:
             self._migrate_opencode_go_referral(conn)
             self._migrate_group_rate_records_monitor_group(conn)
             self._migrate_platform_dispatch_cache(conn)
+            self._migrate_platform_dispatch_evidence(conn)
             self._migrate_platform_dispatch_account_state(conn)
             conn.execute(
                 """
@@ -769,6 +771,12 @@ class Database:
             conn.execute(
                 "ALTER TABLE platform_dispatch_cache ADD COLUMN refresh_include_ungrouped INTEGER NOT NULL DEFAULT 1"
             )
+
+    @staticmethod
+    def _migrate_platform_dispatch_evidence(conn: sqlite3.Connection) -> None:
+        columns = conn.execute("PRAGMA table_info(platform_dispatch_evidence)").fetchall()
+        if "duration_ms" not in {row["name"] for row in columns}:
+            conn.execute("ALTER TABLE platform_dispatch_evidence ADD COLUMN duration_ms REAL")
 
     @staticmethod
     def _migrate_platform_dispatch_account_state(conn: sqlite3.Connection) -> None:
@@ -1812,9 +1820,9 @@ class Database:
                 """
                 INSERT OR IGNORE INTO platform_dispatch_evidence (
                     source_site_url, account_id, source_kind, source_id, category, score,
-                    status_code, first_token_ms, is_timeout, is_probe_success,
+                    status_code, first_token_ms, duration_ms, is_timeout, is_probe_success,
                     message, occurred_at, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     site_url,
@@ -1825,6 +1833,7 @@ class Database:
                     float(evidence.get("score") or 0),
                     evidence.get("status_code"),
                     evidence.get("first_token_ms"),
+                    evidence.get("duration_ms"),
                     1 if evidence.get("is_timeout") else 0,
                     1 if evidence.get("is_probe_success") else 0,
                     str(evidence.get("message") or ""),
@@ -1899,10 +1908,10 @@ class Database:
                 conn.execute(
                     """
                     INSERT OR IGNORE INTO platform_dispatch_evidence (
-                        source_site_url, account_id, source_kind, source_id, category, score,
-                        status_code, first_token_ms, is_timeout, is_probe_success,
+                    source_site_url, account_id, source_kind, source_id, category, score,
+                        status_code, first_token_ms, duration_ms, is_timeout, is_probe_success,
                         message, occurred_at, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         site_url,
@@ -1913,6 +1922,7 @@ class Database:
                         float(item.get("score") or 0),
                         item.get("status_code"),
                         item.get("first_token_ms"),
+                        item.get("duration_ms"),
                         1 if item.get("is_timeout") else 0,
                         1 if item.get("is_probe_success") else 0,
                         str(item.get("message") or ""),

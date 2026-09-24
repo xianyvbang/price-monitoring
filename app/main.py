@@ -5415,6 +5415,7 @@ def public_platform_dispatch_evidence(record: dict[str, Any]) -> dict[str, Any]:
         "score": record.get("score"),
         "status_code": record.get("status_code"),
         "first_token_ms": record.get("first_token_ms"),
+        "duration_ms": record.get("duration_ms"),
         "is_timeout": bool(record.get("is_timeout")),
         "is_probe_success": bool(record.get("is_probe_success")),
         "message": str(record.get("message") or ""),

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import time
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
@@ -122,6 +123,7 @@ DEFAULT_PROBE_MODELS_BY_GROUP_PLATFORM = {
     "openai": "gpt-5.5",
     "anthropic": "claude-sonnet-4-6",
 }
+PROBE_FAST_THRESHOLD_MS = 10_000
 
 
 def validate_policy_config(payload: Any, current: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -283,12 +285,23 @@ def _validated_probe_model(value: Any, field_name: str) -> str:
 def classify_activity(activity: dict[str, Any], *, probe: bool = False) -> dict[str, Any]:
     status_code = _optional_int(activity.get("status_code", activity.get("statusCode")))
     first_token_ms = _optional_float(activity.get("first_token_ms", activity.get("firstTokenMs")))
+    duration_ms = _optional_float(
+        activity.get("duration_ms", activity.get("durationMs", activity.get("probe_duration_ms")))
+    )
     message = str(activity.get("message") or "")
     lower = message.casefold()
     is_error = bool(activity.get("is_error", activity.get("isError", activity.get("kind") == "error")))
     is_timeout = bool(activity.get("is_timeout")) or any(marker in lower for marker in TIMEOUT_MARKERS)
 
-    if not is_error:
+    if probe and is_error:
+        category, score = "probe_failure", 10.0
+    elif probe:
+        probe_duration_ms = duration_ms if duration_ms is not None else first_token_ms
+        if probe_duration_ms is not None and probe_duration_ms >= PROBE_FAST_THRESHOLD_MS:
+            category, score = "slow", 60.0
+        else:
+            category, score = "healthy", 100.0
+    elif not is_error:
         category = "slow" if first_token_ms is not None and first_token_ms > 15000 else "healthy"
         score = 65.0 if category == "slow" else 100.0
     elif status_code in {401, 403}:
@@ -308,6 +321,7 @@ def classify_activity(activity: dict[str, Any], *, probe: bool = False) -> dict[
         "score": score,
         "status_code": status_code,
         "first_token_ms": first_token_ms,
+        "duration_ms": duration_ms,
         "is_timeout": is_timeout,
         "message": message,
     }
@@ -1594,6 +1608,7 @@ class PlatformDispatchPolicyScheduler:
             probe_model = _resolve_probe_model(
                 account_id, accounts[account_id], config, groups_by_id
             )
+            started = time.perf_counter()
             try:
                 async with semaphore:
                     if account_id in (locked_account_ids or set()):
@@ -1603,15 +1618,20 @@ class PlatformDispatchPolicyScheduler:
                             result = await client.probe_account(account_id, model=probe_model or None)
             except Exception as exc:
                 result = {"success": False, "is_timeout": False, "message": f"账号探活失败: {exc}"}
+            measured_duration_ms = max(0.0, (time.perf_counter() - started) * 1000)
+            duration_ms = _optional_float(result.get("duration_ms"))
+            if duration_ms is None:
+                duration_ms = measured_duration_ms
             results[account_id] = result
             activity = {
                 "kind": "success" if result.get("success") else "error",
                 "is_error": not result.get("success"),
                 "status_code": result.get("status_code"),
                 "is_timeout": result.get("is_timeout"),
+                "duration_ms": duration_ms,
                 "message": result.get("message") or "",
             }
-            classified = classify_activity(activity, probe=not result.get("success"))
+            classified = classify_activity(activity, probe=True)
             occurred_at = utc_now()
             self.db.add_platform_dispatch_evidence(
                 site_url,
