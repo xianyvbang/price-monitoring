@@ -36,6 +36,7 @@ from app.models import (
     monitor_group_to_dict,
     reminder_to_dict,
     row_to_dict,
+    manual_today_consumption_adjustment,
     utc_now,
 )
 from app.security import decrypt_value, encrypt_value
@@ -1293,6 +1294,7 @@ def consumption_grouped_accounts(account_filter: dict[str, Any] | None = None) -
     for account in accounts:
         stats = stats_by_account.get(int(account["id"]), {})
         account["last_used"] = adjusted_used_balance(account.get("last_used"), account)
+        account["today_consumption_adjustment"] = manual_today_consumption_adjustment(account)
         account["consumption_stats"] = adjusted_consumption_stats(stats, account)
         account["actual_consumption_stats"] = actual_consumption_stats(account["consumption_stats"], account)
     return grouped
@@ -1300,7 +1302,8 @@ def consumption_grouped_accounts(account_filter: dict[str, Any] | None = None) -
 
 def summarize_consumption_period(grouped: dict[str, list[dict[str, Any]]], period: dict[str, Any]) -> dict[str, Any]:
     totals: dict[str, float] = {}
-    consumption_by_base_url: dict[str, tuple[int, float, str]] = {}
+    adjustment_totals: dict[str, float] = {}
+    consumption_by_base_url: dict[str, tuple[int, float, str, float]] = {}
     key = period["key"]
     for accounts in grouped.values():
         for account in accounts:
@@ -1315,13 +1318,25 @@ def summarize_consumption_period(grouped: dict[str, list[dict[str, Any]]], perio
                 continue
             base_url_key = _consumption_base_url_key(account)
             unit = str(account.get("last_unit") or DEFAULT_BALANCE_UNIT).strip() or DEFAULT_BALANCE_UNIT
+            adjustment = 0.0
+            if key == "today":
+                adjustment = actual_consumption_amount(account.get("today_consumption_adjustment"), account) or 0.0
             existing = consumption_by_base_url.get(base_url_key)
             if existing is None or account_id < existing[0]:
-                consumption_by_base_url[base_url_key] = (account_id, consumption, unit)
-    for _, consumption, unit in consumption_by_base_url.values():
+                consumption_by_base_url[base_url_key] = (account_id, consumption, unit, adjustment)
+    for _, consumption, unit, adjustment in consumption_by_base_url.values():
         totals[unit] = round(totals.get(unit, 0.0) + consumption, 6)
+        if adjustment:
+            adjustment_totals[unit] = round(adjustment_totals.get(unit, 0.0) + adjustment, 6)
     total_items = [{"amount": amount, "unit": unit} for unit, amount in totals.items()]
-    return {**period, "totals": total_items, "account_count": len(consumption_by_base_url)}
+    adjustment_items = [{"amount": amount, "unit": unit} for unit, amount in adjustment_totals.items()]
+    return {
+        **period,
+        "totals": total_items,
+        "account_count": len(consumption_by_base_url),
+        "adjustment_totals": adjustment_items,
+        "adjustmentTotals": adjustment_items,
+    }
 
 
 def summarize_consumption_periods(grouped: dict[str, list[dict[str, Any]]], custom_range: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1405,6 +1420,19 @@ def public_edit_account(account_id: int | None) -> dict[str, Any] | None:
     if row["platform"] == "newApi":
         data["key_id"] = decrypt_value(row["key_id_enc"], config.app_secret_key) or ""
         data["user_id"] = decrypt_value(row["user_id_enc"], config.app_secret_key) or ""
+    return data
+
+
+def public_adjustment_record(row: Any) -> dict[str, Any]:
+    data = row_to_dict(row)
+    adjustment_type = data.get("adjustment_type")
+    type_label = "核算已用余额" if adjustment_type == "used_balance" else "核算今日消耗"
+    data["type_label"] = type_label
+    data["typeLabel"] = type_label
+    data["accountId"] = data.get("account_id")
+    data["adjustmentType"] = adjustment_type
+    data["adjustmentDate"] = data.get("adjustment_date")
+    data["createdAt"] = data.get("created_at")
     return data
 
 
@@ -2740,6 +2768,20 @@ def api_dashboard_consumption_summary(request: Request):
     }
 
 
+@app.get("/api/dashboard/accounting-history")
+async def api_dashboard_accounting_history(request: Request):
+    require_user(request)
+    adjustment_type = str(request.query_params.get("type") or "today_consumption").strip()
+    if adjustment_type not in {"used_balance", "today_consumption"}:
+        raise HTTPException(status_code=400, detail="核算类型不正确")
+    try:
+        limit = max(1, min(int(request.query_params.get("limit") or 200), 1000))
+    except ValueError:
+        limit = 200
+    records = [public_adjustment_record(row) for row in db.list_adjustment_history(adjustment_type, limit=limit)]
+    return {"ok": True, "items": records, "records": records}
+
+
 @app.post("/api/dashboard/today-consumption-adjustment")
 async def api_dashboard_today_consumption_adjustment(request: Request):
     require_user(request)
@@ -3939,6 +3981,21 @@ async def api_account_used_balance_adjustment(request: Request, account_id: int)
     updated = db.adjust_used_balance(account_id, delta)
     db.add_log("info", "account", f"{account['platform']} / {account['name']} 核算已用余额: {delta:+g}")
     return {"ok": True, "delta": delta, "account": public_account(updated)}
+
+
+@app.get("/api/accounts/{account_id}/accounting-history")
+async def api_account_accounting_history(request: Request, account_id: int):
+    require_user(request)
+    if not db.get_account(account_id):
+        raise HTTPException(status_code=404, detail="账号不存在")
+    adjustment_type = str(request.query_params.get("type") or "used_balance").strip()
+    if adjustment_type not in {"used_balance", "today_consumption"}:
+        raise HTTPException(status_code=400, detail="核算类型不正确")
+    records = [
+        public_adjustment_record(row)
+        for row in db.list_adjustment_history(adjustment_type, account_id=account_id, limit=200)
+    ]
+    return {"ok": True, "items": records, "records": records}
 
 
 @app.post("/api/accounts/{account_id}/visible")

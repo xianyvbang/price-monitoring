@@ -175,6 +175,15 @@ class Database:
                     checked_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS account_adjustment_records (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    adjustment_type TEXT NOT NULL CHECK (adjustment_type IN ('used_balance', 'today_consumption')),
+                    delta REAL NOT NULL,
+                    adjustment_date TEXT,
+                    created_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS group_rate_records (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -447,6 +456,10 @@ class Database:
                 ON account_monitor_groups(account_id, sort_order, id);
                 CREATE INDEX IF NOT EXISTS idx_query_records_account_checked_at
                 ON query_records(account_id, checked_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_account_adjustment_records_account_created
+                ON account_adjustment_records(account_id, created_at DESC, id DESC);
+                CREATE INDEX IF NOT EXISTS idx_account_adjustment_records_type_date
+                ON account_adjustment_records(adjustment_type, adjustment_date, created_at DESC, id DESC);
                 CREATE INDEX IF NOT EXISTS idx_opencode_go_usage_account_checked_at
                 ON opencode_go_usage_records(account_id, checked_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_platform_dispatch_evidence_account_time
@@ -2437,19 +2450,29 @@ class Database:
 
     def adjust_used_balance(self, account_id: int, delta: float) -> Optional[sqlite3.Row]:
         with self.connect() as conn:
+            now = utc_now()
             conn.execute(
                 """
                 UPDATE accounts
                 SET manual_used_adjustment = COALESCE(manual_used_adjustment, 0) + ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (delta, utc_now(), account_id),
+                (delta, now, account_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO account_adjustment_records (
+                    account_id, adjustment_type, delta, adjustment_date, created_at
+                ) VALUES (?, 'used_balance', ?, NULL, ?)
+                """,
+                (account_id, delta, now),
             )
             return conn.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
 
     def adjust_today_consumption(self, account_id: int, delta: float) -> Optional[sqlite3.Row]:
         today = datetime.now(CHINA_TZ).date().isoformat()
         with self.connect() as conn:
+            now = utc_now()
             conn.execute(
                 """
                 UPDATE accounts
@@ -2462,9 +2485,48 @@ class Database:
                     updated_at = ?
                 WHERE id = ?
                 """,
-                (today, delta, delta, today, utc_now(), account_id),
+                (today, delta, delta, today, now, account_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO account_adjustment_records (
+                    account_id, adjustment_type, delta, adjustment_date, created_at
+                ) VALUES (?, 'today_consumption', ?, ?, ?)
+                """,
+                (account_id, delta, today, now),
             )
             return conn.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
+
+    def list_adjustment_history(
+        self,
+        adjustment_type: str | None = None,
+        account_id: int | None = None,
+        limit: int = 200,
+    ) -> list[sqlite3.Row]:
+        conditions: list[str] = []
+        params: list[Any] = []
+        if adjustment_type:
+            conditions.append("records.adjustment_type = ?")
+            params.append(adjustment_type)
+        if account_id is not None:
+            conditions.append("records.account_id = ?")
+            params.append(account_id)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        params.append(max(1, min(int(limit), 1000)))
+        with self.connect() as conn:
+            return conn.execute(
+                f"""
+                SELECT records.id, records.account_id, records.adjustment_type,
+                       records.delta, records.adjustment_date, records.created_at,
+                       accounts.platform, accounts.name, accounts.base_url, accounts.last_unit
+                FROM account_adjustment_records AS records
+                JOIN accounts ON accounts.id = records.account_id
+                {where}
+                ORDER BY records.created_at DESC, records.id DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
 
     def list_monitor_groups(self, account_id: int) -> list[sqlite3.Row]:
         with self.connect() as conn:

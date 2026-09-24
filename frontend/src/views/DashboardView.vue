@@ -46,6 +46,11 @@ const adjustmentKind = ref("today");
 const adjustmentDirection = ref("increase");
 const adjustmentAmount = ref(null);
 const adjustmentAccountId = ref(null);
+const adjustmentHistoryDialogVisible = ref(false);
+const adjustmentHistoryLoading = ref(false);
+const adjustmentHistoryMode = ref("today");
+const adjustmentHistoryAccount = ref(null);
+const adjustmentHistoryItems = ref([]);
 const chartCanvas = ref(null);
 const chartPoints = ref([]);
 const chartBounds = ref(null);
@@ -540,6 +545,40 @@ async function submitAdjustment() {
   }
 }
 
+async function openAdjustmentHistory(kind, row = null) {
+  adjustmentHistoryMode.value = kind;
+  adjustmentHistoryAccount.value = row;
+  adjustmentHistoryItems.value = [];
+  adjustmentHistoryDialogVisible.value = true;
+  adjustmentHistoryLoading.value = true;
+  try {
+    const payload = kind === "used"
+      ? await api.accountAccountingHistory(row.id, "used_balance")
+      : await api.dashboardAccountingHistory("today_consumption");
+    adjustmentHistoryItems.value = payload.items || payload.records || [];
+  } catch (error) {
+    ElMessage.error(error.message || "获取核算历史失败");
+  } finally {
+    adjustmentHistoryLoading.value = false;
+  }
+}
+
+function adjustmentAmountText(item) {
+  const amount = Number(item?.delta);
+  if (!Number.isFinite(amount)) return "-";
+  return `${amount > 0 ? "+" : ""}${amount}${item?.last_unit ? ` ${item.last_unit}` : ""}`;
+}
+
+function summaryAmountsText(items, signed = false) {
+  return (items || [])
+    .map((item) => {
+      const amount = Number(item.amount);
+      const prefix = signed && amount > 0 ? "+" : "";
+      return `${prefix}${item.amount}${item.unit ? ` ${item.unit}` : ""}`;
+    })
+    .join(" / ");
+}
+
 async function resetGroupRate(row) {
   if (row._resettingGroupRate) {
     return;
@@ -877,6 +916,7 @@ onBeforeUnmount(() => {
           {{ monitorPaused ? "恢复监控" : "暂停监控" }}
         </el-button>
         <el-button :icon="Money" @click="openAdjustmentDialog('today')">核算今日消耗金额</el-button>
+        <el-button :icon="Money" @click="openAdjustmentHistory('today')">核算历史</el-button>
       </div>
     </div>
 
@@ -913,6 +953,9 @@ onBeforeUnmount(() => {
           <template v-else>-</template>
         </strong>
         <small>{{ summary.account_count }} {{ summary.count_label }}</small>
+        <small v-if="summary.adjustment_totals?.length" class="stat-adjustment">
+          核算总金额 {{ summaryAmountsText(summary.adjustment_totals, true) }}
+        </small>
       </div>
     </div>
 
@@ -1060,6 +1103,7 @@ onBeforeUnmount(() => {
                 <el-button size="small" :loading="row._editingAccount" @click="openEditAccount(row)">修改</el-button>
                 <el-button size="small" :icon="Money" @click="openBalanceHistory(row)">余额趋势</el-button>
                 <el-button size="small" :icon="Money" @click="openAdjustmentDialog('used', row)">核算已用余额</el-button>
+                <el-button size="small" :icon="Money" @click="openAdjustmentHistory('used', row)">核算历史</el-button>
               </div>
             </template>
           </el-table-column>
@@ -1142,6 +1186,7 @@ onBeforeUnmount(() => {
             <el-button size="small" :loading="row._editingAccount" @click="openEditAccount(row)">修改</el-button>
             <el-button size="small" :icon="Money" @click="openBalanceHistory(row)">余额趋势</el-button>
             <el-button size="small" :icon="Money" @click="openAdjustmentDialog('used', row)">核算已用余额</el-button>
+            <el-button size="small" :icon="Money" @click="openAdjustmentHistory('used', row)">核算历史</el-button>
           </div>
 
           <div v-if="platform === 'newApi' || platform === 'sub2Api'" class="mobile-divider">
@@ -1193,6 +1238,36 @@ onBeforeUnmount(() => {
       <template #footer>
         <el-button :disabled="adjustmentLoading" @click="adjustmentDialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="adjustmentLoading" @click="submitAdjustment">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="adjustmentHistoryDialogVisible"
+      :title="adjustmentHistoryMode === 'used' ? `核算历史 · ${adjustmentHistoryAccount?.name || ''}` : '今日消耗核算历史'"
+      width="760px"
+      destroy-on-close
+    >
+      <div v-loading="adjustmentHistoryLoading" class="adjustment-history-list">
+        <el-table v-if="adjustmentHistoryItems.length" :data="adjustmentHistoryItems" border stripe>
+          <el-table-column v-if="adjustmentHistoryMode === 'today'" label="账号" min-width="180">
+            <template #default="{ row }">{{ row.platform }} / {{ row.name }}</template>
+          </el-table-column>
+          <el-table-column label="调整金额" width="150">
+            <template #default="{ row }">
+              <span :class="row.delta >= 0 ? 'adjustment-positive' : 'adjustment-negative'">{{ adjustmentAmountText(row) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="核算日期" width="150">
+            <template #default="{ row }">{{ row.adjustment_date || "-" }}</template>
+          </el-table-column>
+          <el-table-column label="操作时间" min-width="180">
+            <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
+          </el-table-column>
+        </el-table>
+        <el-empty v-else description="暂无核算记录" :image-size="72" />
+      </div>
+      <template #footer>
+        <el-button @click="adjustmentHistoryDialogVisible = false">关闭</el-button>
       </template>
     </el-dialog>
 

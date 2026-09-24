@@ -442,6 +442,20 @@ a {
   font-weight: 700;
 }
 
+.stat-adjustment {
+  color: var(--muted);
+}
+
+.adjustment-positive {
+  color: var(--success);
+  font-weight: 600;
+}
+
+.adjustment-negative {
+  color: var(--danger);
+  font-weight: 600;
+}
+
 .danger-text {
   color: var(--danger);
 }
