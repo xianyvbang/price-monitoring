@@ -2481,9 +2481,9 @@ class Database:
                 """
                 INSERT INTO account_adjustment_records (
                     account_id, adjustment_type, delta, adjustment_date, created_at
-                ) VALUES (?, 'used_balance', ?, NULL, ?)
+                ) VALUES (?, 'used_balance', ?, ?, ?)
                 """,
-                (account_id, delta, now),
+                (account_id, delta, today, now),
             )
             return conn.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
 
@@ -2546,6 +2546,49 @@ class Database:
                 tuple(params),
             ).fetchall()
 
+    def delete_adjustment_history(self, account_id: int, record_id: int) -> Optional[sqlite3.Row]:
+        today = datetime.now(CHINA_TZ).date().isoformat()
+        with self.connect() as conn:
+            record = conn.execute(
+                """
+                SELECT id, account_id, adjustment_type, delta, adjustment_date, created_at
+                FROM account_adjustment_records
+                WHERE id = ? AND account_id = ?
+                """,
+                (record_id, account_id),
+            ).fetchone()
+            if record is None:
+                return None
+
+            delta = float(record["delta"] or 0)
+            adjustment_type = str(record["adjustment_type"] or "")
+            today_delta = delta if str(record["adjustment_date"] or "") == today else 0.0
+            conn.execute(
+                """
+                UPDATE accounts
+                SET manual_used_adjustment = manual_used_adjustment - ?,
+                    manual_today_consumption_adjustment = CASE
+                        WHEN manual_today_consumption_date = ? THEN
+                            manual_today_consumption_adjustment - ?
+                        ELSE manual_today_consumption_adjustment
+                    END,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    delta if adjustment_type == "used_balance" else 0.0,
+                    today,
+                    today_delta,
+                    utc_now(),
+                    account_id,
+                ),
+            )
+            conn.execute(
+                "DELETE FROM account_adjustment_records WHERE id = ? AND account_id = ?",
+                (record_id, account_id),
+            )
+            return record
+
     def adjust_dashboard_today_consumption(self, delta: float) -> None:
         today = datetime.now(CHINA_TZ).date().isoformat()
         with self.connect() as conn:
@@ -2583,6 +2626,24 @@ class Database:
                 """,
                 (max(1, min(int(limit), 1000)),),
             ).fetchall()
+
+    def delete_dashboard_adjustment_history(self, record_id: int) -> Optional[sqlite3.Row]:
+        with self.connect() as conn:
+            record = conn.execute(
+                """
+                SELECT id, adjustment_type, delta, adjustment_date, created_at
+                FROM dashboard_adjustment_records
+                WHERE id = ? AND adjustment_type = 'today_consumption'
+                """,
+                (record_id,),
+            ).fetchone()
+            if record is None:
+                return None
+            conn.execute(
+                "DELETE FROM dashboard_adjustment_records WHERE id = ?",
+                (record_id,),
+            )
+            return record
 
     def list_monitor_groups(self, account_id: int) -> list[sqlite3.Row]:
         with self.connect() as conn:

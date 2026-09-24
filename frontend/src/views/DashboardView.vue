@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { Money, Operation, Refresh, VideoPause, VideoPlay } from "@element-plus/icons-vue";
+import { Delete, Money, Operation, Refresh, VideoPause, VideoPlay } from "@element-plus/icons-vue";
 import { api } from "../api";
 import AccountDialog from "../components/AccountDialog.vue";
 import GroupPickerDialog from "../components/GroupPickerDialog.vue";
@@ -545,6 +545,36 @@ async function openAdjustmentHistory(kind, row = null) {
     adjustmentHistoryItems.value = payload.items || payload.records || [];
   } catch (error) {
     ElMessage.error(error.message || "获取核算历史失败");
+  } finally {
+    adjustmentHistoryLoading.value = false;
+  }
+}
+
+async function deleteAdjustmentRecord(item) {
+  try {
+    await ElMessageBox.confirm(
+      "删除后会同步恢复余额和实际消耗，是否继续？",
+      "删除核算记录",
+      { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" },
+    );
+  } catch {
+    return;
+  }
+
+  adjustmentHistoryLoading.value = true;
+  try {
+    const response = adjustmentHistoryMode.value === "used"
+      ? await api.deleteAccountAccountingHistory(adjustmentHistoryAccount.value.id, item.id)
+      : await api.deleteDashboardAccountingHistory(item.id);
+    adjustmentHistoryItems.value = adjustmentHistoryItems.value.filter((record) => record.id !== item.id);
+    if (response.account) {
+      replaceAccountRows(response.account);
+    }
+    await loadDashboard({ showLoading: false });
+    await loadConsumptionSummaries();
+    ElMessage.success("核算记录已删除");
+  } catch (error) {
+    ElMessage.error(error.message || "删除核算记录失败");
   } finally {
     adjustmentHistoryLoading.value = false;
   }
@@ -1246,6 +1276,11 @@ onBeforeUnmount(() => {
           </el-table-column>
           <el-table-column label="操作时间" min-width="180">
             <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="90" fixed="right">
+            <template #default="{ row }">
+              <el-button link type="danger" :icon="Delete" @click="deleteAdjustmentRecord(row)">删除</el-button>
+            </template>
           </el-table-column>
         </el-table>
         <el-empty v-else description="暂无核算记录" :image-size="72" />

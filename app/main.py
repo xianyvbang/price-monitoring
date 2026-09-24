@@ -2792,6 +2792,20 @@ async def api_dashboard_accounting_history(request: Request):
     return {"ok": True, "items": records, "records": records}
 
 
+@app.delete("/api/dashboard/accounting-history/{record_id}")
+async def api_delete_dashboard_accounting_history(request: Request, record_id: int):
+    require_user(request)
+    deleted = db.delete_dashboard_adjustment_history(record_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="核算记录不存在")
+    db.add_log("info", "account", f"删除仪表盘今日消耗核算记录: {deleted['delta']:+g}")
+    return {
+        "ok": True,
+        "record": public_adjustment_record(deleted),
+        "today_adjustment": db.get_dashboard_today_consumption_adjustment(),
+    }
+
+
 @app.post("/api/dashboard/today-consumption-adjustment")
 async def api_dashboard_today_consumption_adjustment(request: Request):
     require_user(request)
@@ -3999,6 +4013,20 @@ async def api_account_accounting_history(request: Request, account_id: int):
         for row in db.list_adjustment_history(adjustment_type, account_id=account_id, limit=200)
     ]
     return {"ok": True, "items": records, "records": records}
+
+
+@app.delete("/api/accounts/{account_id}/accounting-history/{record_id}")
+async def api_delete_account_accounting_history(request: Request, account_id: int, record_id: int):
+    require_user(request)
+    account = db.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    deleted = db.delete_adjustment_history(account_id, record_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="核算记录不存在")
+    updated = db.get_account(account_id)
+    db.add_log("info", "account", f"{account['platform']} / {account['name']} 删除核算记录: {deleted['delta']:+g}")
+    return {"ok": True, "record": public_adjustment_record(deleted), "account": public_account(updated)}
 
 
 @app.post("/api/accounts/{account_id}/visible")
