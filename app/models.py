@@ -2459,15 +2459,23 @@ class Database:
             return conn.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
 
     def adjust_used_balance(self, account_id: int, delta: float) -> Optional[sqlite3.Row]:
+        today = datetime.now(CHINA_TZ).date().isoformat()
         with self.connect() as conn:
             now = utc_now()
             conn.execute(
                 """
                 UPDATE accounts
-                SET manual_used_adjustment = COALESCE(manual_used_adjustment, 0) + ?, updated_at = ?
+                SET manual_used_adjustment = COALESCE(manual_used_adjustment, 0) + ?,
+                    manual_today_consumption_adjustment = CASE
+                        WHEN manual_today_consumption_date = ?
+                            THEN COALESCE(manual_today_consumption_adjustment, 0) + ?
+                        ELSE ?
+                    END,
+                    manual_today_consumption_date = ?,
+                    updated_at = ?
                 WHERE id = ?
                 """,
-                (delta, now, account_id),
+                (delta, today, delta, delta, today, now, account_id),
             )
             conn.execute(
                 """
