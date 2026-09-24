@@ -124,6 +124,7 @@ DEFAULT_PROBE_MODELS_BY_GROUP_PLATFORM = {
     "anthropic": "claude-sonnet-4-6",
 }
 PROBE_FAST_THRESHOLD_MS = 10_000
+PROBE_TIMEOUT_THRESHOLD_MS = 30_000
 
 
 def validate_policy_config(payload: Any, current: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -293,11 +294,14 @@ def classify_activity(activity: dict[str, Any], *, probe: bool = False) -> dict[
     is_error = bool(activity.get("is_error", activity.get("isError", activity.get("kind") == "error")))
     is_timeout = bool(activity.get("is_timeout")) or any(marker in lower for marker in TIMEOUT_MARKERS)
 
-    if probe and is_error:
-        category, score = "probe_failure", 10.0
-    elif probe:
+    if probe:
         probe_duration_ms = duration_ms if duration_ms is not None else first_token_ms
-        if probe_duration_ms is not None and probe_duration_ms >= PROBE_FAST_THRESHOLD_MS:
+        if is_error:
+            category, score = "probe_failure", 10.0
+        elif probe_duration_ms is not None and probe_duration_ms >= PROBE_TIMEOUT_THRESHOLD_MS:
+            category, score = "timeout", 10.0
+            is_timeout = True
+        elif probe_duration_ms is not None and probe_duration_ms >= PROBE_FAST_THRESHOLD_MS:
             category, score = "slow", 60.0
         else:
             category, score = "healthy", 100.0
@@ -1622,7 +1626,6 @@ class PlatformDispatchPolicyScheduler:
             duration_ms = _optional_float(result.get("duration_ms"))
             if duration_ms is None:
                 duration_ms = measured_duration_ms
-            results[account_id] = result
             activity = {
                 "kind": "success" if result.get("success") else "error",
                 "is_error": not result.get("success"),
@@ -1632,6 +1635,15 @@ class PlatformDispatchPolicyScheduler:
                 "message": result.get("message") or "",
             }
             classified = classify_activity(activity, probe=True)
+            probe_timed_out = bool(classified.get("is_timeout"))
+            if probe_timed_out and result.get("success"):
+                result = {
+                    **result,
+                    "success": False,
+                    "is_timeout": True,
+                    "message": "账号探活超时",
+                }
+            results[account_id] = result
             occurred_at = utc_now()
             self.db.add_platform_dispatch_evidence(
                 site_url,
@@ -1640,7 +1652,7 @@ class PlatformDispatchPolicyScheduler:
                     "source_kind": "probe",
                     "source_id": uuid4().hex,
                     "occurred_at": occurred_at,
-                    "is_probe_success": bool(result.get("success")),
+                    "is_probe_success": bool(result.get("success")) and not probe_timed_out,
                     **classified,
                 },
             )
