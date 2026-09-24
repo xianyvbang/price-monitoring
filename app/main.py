@@ -1436,6 +1436,10 @@ def public_adjustment_record(row: Any) -> dict[str, Any]:
     data = row_to_dict(row)
     adjustment_type = data.get("adjustment_type")
     type_label = "核算已用余额" if adjustment_type == "used_balance" else "核算今日消耗"
+    if not data.get("adjustment_date") and data.get("created_at"):
+        created_date = format_china_time(data["created_at"])
+        if created_date != "-":
+            data["adjustment_date"] = created_date[:10]
     data["type_label"] = type_label
     data["typeLabel"] = type_label
     data["accountId"] = data.get("account_id")
