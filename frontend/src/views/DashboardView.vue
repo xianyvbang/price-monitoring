@@ -82,17 +82,6 @@ const columnDefs = [
 
 const platformEntries = computed(() => Object.entries(grouped.value).filter(([, rows]) => Array.isArray(rows)));
 const monitorPaused = computed(() => boolValue(settings.value.monitor_paused));
-const adjustmentAccounts = computed(() => {
-  const seen = new Set();
-  return Object.values(grouped.value)
-    .flatMap((rows) => (Array.isArray(rows) ? rows : []))
-    .filter((row) => {
-      if (seen.has(String(row.id))) return false;
-      seen.add(String(row.id));
-      return true;
-    })
-    .map((row) => ({ id: row.id, label: `${row.platform} / ${row.name}` }));
-});
 const groupRateChangedRows = computed(() =>
   Object.values(grouped.value)
     .flatMap((rows) => (Array.isArray(rows) ? rows : []))
@@ -506,14 +495,10 @@ async function toggleMonitor() {
 }
 
 function openAdjustmentDialog(kind, row = null) {
-  if (kind === "today" && !adjustmentAccounts.value.length) {
-    ElMessage.warning("暂无可核算的账号");
-    return;
-  }
   adjustmentKind.value = kind;
   adjustmentDirection.value = "increase";
   adjustmentAmount.value = null;
-  adjustmentAccountId.value = row?.id ?? adjustmentAccounts.value[0]?.id ?? null;
+  adjustmentAccountId.value = row?.id ?? null;
   adjustmentDialogVisible.value = true;
 }
 
@@ -523,7 +508,7 @@ async function submitAdjustment() {
     ElMessage.warning("请输入大于 0 的金额");
     return;
   }
-  if (!adjustmentAccountId.value) {
+  if (adjustmentKind.value === "used" && !adjustmentAccountId.value) {
     ElMessage.warning("请选择账号");
     return;
   }
@@ -532,8 +517,10 @@ async function submitAdjustment() {
     const payload = { amount, direction: adjustmentDirection.value };
     const response = adjustmentKind.value === "used"
       ? await api.adjustUsedBalance(adjustmentAccountId.value, payload)
-      : await api.adjustTodayConsumption({ ...payload, account_id: adjustmentAccountId.value });
-    replaceAccountRows(response.account);
+      : await api.adjustTodayConsumption(payload);
+    if (response.account) {
+      replaceAccountRows(response.account);
+    }
     adjustmentDialogVisible.value = false;
     await loadDashboard({ showLoading: false });
     loadConsumptionSummaries();
@@ -566,7 +553,8 @@ async function openAdjustmentHistory(kind, row = null) {
 function adjustmentAmountText(item) {
   const amount = Number(item?.delta);
   if (!Number.isFinite(amount)) return "-";
-  return `${amount > 0 ? "+" : ""}${amount}${item?.last_unit ? ` ${item.last_unit}` : ""}`;
+  const unit = item?.last_unit || item?.unit || "";
+  return `${amount > 0 ? "+" : ""}${amount}${unit ? ` ${unit}` : ""}`;
 }
 
 function summaryAmountsText(items, signed = false) {
@@ -1220,11 +1208,7 @@ onBeforeUnmount(() => {
       destroy-on-close
     >
       <el-form label-position="top">
-        <el-form-item v-if="adjustmentKind === 'today'" label="账号">
-          <el-select v-model="adjustmentAccountId" filterable style="width: 100%" placeholder="选择账号">
-            <el-option v-for="account in adjustmentAccounts" :key="account.id" :label="account.label" :value="account.id" />
-          </el-select>
-        </el-form-item>
+        <p v-if="adjustmentKind === 'today'" class="muted">本次调整直接作用于仪表盘今日实际消耗总金额。</p>
         <el-form-item label="调整方向">
           <el-radio-group v-model="adjustmentDirection">
             <el-radio-button label="increase">增加</el-radio-button>
@@ -1249,8 +1233,8 @@ onBeforeUnmount(() => {
     >
       <div v-loading="adjustmentHistoryLoading" class="adjustment-history-list">
         <el-table v-if="adjustmentHistoryItems.length" :data="adjustmentHistoryItems" border stripe>
-          <el-table-column v-if="adjustmentHistoryMode === 'today'" label="账号" min-width="180">
-            <template #default="{ row }">{{ row.platform }} / {{ row.name }}</template>
+          <el-table-column v-if="adjustmentHistoryMode === 'today'" label="核算范围" min-width="180">
+            <template #default>仪表盘今日总金额</template>
           </el-table-column>
           <el-table-column label="调整金额" width="150">
             <template #default="{ row }">

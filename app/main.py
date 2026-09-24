@@ -1328,6 +1328,15 @@ def summarize_consumption_period(grouped: dict[str, list[dict[str, Any]]], perio
         totals[unit] = round(totals.get(unit, 0.0) + consumption, 6)
         if adjustment:
             adjustment_totals[unit] = round(adjustment_totals.get(unit, 0.0) + adjustment, 6)
+    if key == "today":
+        dashboard_adjustment = db.get_dashboard_today_consumption_adjustment()
+        if dashboard_adjustment:
+            adjustment_unit = next(iter(totals), DEFAULT_BALANCE_UNIT)
+            totals[adjustment_unit] = round(totals.get(adjustment_unit, 0.0) + dashboard_adjustment, 6)
+            adjustment_totals[adjustment_unit] = round(
+                adjustment_totals.get(adjustment_unit, 0.0) + dashboard_adjustment,
+                6,
+            )
     total_items = [{"amount": amount, "unit": unit} for unit, amount in totals.items()]
     adjustment_items = [{"amount": amount, "unit": unit} for unit, amount in adjustment_totals.items()]
     return {
@@ -1433,6 +1442,7 @@ def public_adjustment_record(row: Any) -> dict[str, Any]:
     data["adjustmentType"] = adjustment_type
     data["adjustmentDate"] = data.get("adjustment_date")
     data["createdAt"] = data.get("created_at")
+    data["unit"] = data.get("last_unit") or DEFAULT_BALANCE_UNIT
     return data
 
 
@@ -2772,13 +2782,13 @@ def api_dashboard_consumption_summary(request: Request):
 async def api_dashboard_accounting_history(request: Request):
     require_user(request)
     adjustment_type = str(request.query_params.get("type") or "today_consumption").strip()
-    if adjustment_type not in {"used_balance", "today_consumption"}:
+    if adjustment_type != "today_consumption":
         raise HTTPException(status_code=400, detail="核算类型不正确")
     try:
         limit = max(1, min(int(request.query_params.get("limit") or 200), 1000))
     except ValueError:
         limit = 200
-    records = [public_adjustment_record(row) for row in db.list_adjustment_history(adjustment_type, limit=limit)]
+    records = [public_adjustment_record(row) for row in db.list_dashboard_adjustment_history(limit=limit)]
     return {"ok": True, "items": records, "records": records}
 
 
@@ -2789,19 +2799,12 @@ async def api_dashboard_today_consumption_adjustment(request: Request):
     if not isinstance(payload, dict):
         return JSONResponse({"ok": False, "message": "请求内容格式不正确"}, status_code=400)
     try:
-        account_id = int(payload.get("account_id", payload.get("accountId")))
-    except (TypeError, ValueError):
-        return JSONResponse({"ok": False, "message": "请选择账号"}, status_code=400)
-    account = db.get_account(account_id)
-    if not account:
-        raise HTTPException(status_code=404, detail="账号不存在")
-    try:
         delta = _adjustment_delta(payload)
     except ValueError as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
-    updated = db.adjust_today_consumption(account_id, delta)
-    db.add_log("info", "account", f"{account['platform']} / {account['name']} 核算今日消耗: {delta:+g}")
-    return {"ok": True, "delta": delta, "account": public_account(updated)}
+    db.adjust_dashboard_today_consumption(delta)
+    db.add_log("info", "account", f"核算仪表盘今日消耗总金额: {delta:+g}")
+    return {"ok": True, "delta": delta, "today_adjustment": db.get_dashboard_today_consumption_adjustment()}
 
 
 @app.post("/api/group-rate-change-status/bulk-reset")

@@ -184,6 +184,14 @@ class Database:
                     created_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS dashboard_adjustment_records (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    adjustment_type TEXT NOT NULL CHECK (adjustment_type IN ('today_consumption')),
+                    delta REAL NOT NULL,
+                    adjustment_date TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS group_rate_records (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -460,6 +468,8 @@ class Database:
                 ON account_adjustment_records(account_id, created_at DESC, id DESC);
                 CREATE INDEX IF NOT EXISTS idx_account_adjustment_records_type_date
                 ON account_adjustment_records(adjustment_type, adjustment_date, created_at DESC, id DESC);
+                CREATE INDEX IF NOT EXISTS idx_dashboard_adjustment_records_type_date
+                ON dashboard_adjustment_records(adjustment_type, adjustment_date, created_at DESC, id DESC);
                 CREATE INDEX IF NOT EXISTS idx_opencode_go_usage_account_checked_at
                 ON opencode_go_usage_records(account_id, checked_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_platform_dispatch_evidence_account_time
@@ -2526,6 +2536,44 @@ class Database:
                 LIMIT ?
                 """,
                 tuple(params),
+            ).fetchall()
+
+    def adjust_dashboard_today_consumption(self, delta: float) -> None:
+        today = datetime.now(CHINA_TZ).date().isoformat()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO dashboard_adjustment_records (
+                    adjustment_type, delta, adjustment_date, created_at
+                ) VALUES ('today_consumption', ?, ?, ?)
+                """,
+                (delta, today, utc_now()),
+            )
+
+    def get_dashboard_today_consumption_adjustment(self) -> float:
+        today = datetime.now(CHINA_TZ).date().isoformat()
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COALESCE(SUM(delta), 0) AS total
+                FROM dashboard_adjustment_records
+                WHERE adjustment_type = 'today_consumption' AND adjustment_date = ?
+                """,
+                (today,),
+            ).fetchone()
+        return round(float(row["total"] or 0), 6)
+
+    def list_dashboard_adjustment_history(self, limit: int = 200) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            return conn.execute(
+                """
+                SELECT id, adjustment_type, delta, adjustment_date, created_at
+                FROM dashboard_adjustment_records
+                WHERE adjustment_type = 'today_consumption'
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (max(1, min(int(limit), 1000)),),
             ).fetchall()
 
     def list_monitor_groups(self, account_id: int) -> list[sqlite3.Row]:
