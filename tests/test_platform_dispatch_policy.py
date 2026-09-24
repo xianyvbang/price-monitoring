@@ -47,8 +47,8 @@ def test_health_classification_and_formula():
 
 def test_probe_classification_uses_duration_thresholds():
     assert classify_activity({"is_error": False, "duration_ms": 9999}, probe=True)["score"] == 100
-    assert classify_activity({"is_error": False, "duration_ms": 10000}, probe=True)["score"] == 50
-    assert classify_activity({"is_error": False, "duration_ms": 29999}, probe=True)["score"] == 50
+    assert classify_activity({"is_error": False, "duration_ms": 10000}, probe=True)["score"] == 60
+    assert classify_activity({"is_error": False, "duration_ms": 29999}, probe=True)["score"] == 60
     assert classify_activity({"is_error": True, "status_code": 401}, probe=True)["score"] == 10
 
     now = datetime(2026, 7, 26, 8, tzinfo=timezone.utc)
