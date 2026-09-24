@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import re
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
@@ -24,6 +25,8 @@ from app.models import (
     GROUP_RATE_QUERY_INTERVAL_SECONDS,
     Database,
     REQUEST_TIMEOUT_SECONDS,
+    adjusted_consumption_stats,
+    adjusted_used_balance,
     actual_consumption_amount,
     actual_consumption_stats,
     format_china_time,
@@ -571,7 +574,10 @@ def public_account(row: Any) -> dict[str, Any]:
     data["recharge_received_amount"] = float(data.get("recharge_received_amount") or 1)
     data["rechargePaidAmount"] = data["recharge_paid_amount"]
     data["rechargeReceivedAmount"] = data["recharge_received_amount"]
+    data["last_used"] = adjusted_used_balance(data.get("last_used"), data)
+    data["lastUsed"] = data["last_used"]
     data["consumption_stats"] = db.get_consumption_stats(int(data["id"]))
+    data["consumption_stats"] = adjusted_consumption_stats(data["consumption_stats"], data)
     data["consumptionStats"] = data["consumption_stats"]
     data["actual_consumption_stats"] = actual_consumption_stats(data["consumption_stats"], data)
     data["actualConsumptionStats"] = data["actual_consumption_stats"]
@@ -1159,8 +1165,10 @@ def public_dashboard_source_account(row: Any) -> dict[str, Any]:
     data["recharge_paid_amount"] = float(data.get("recharge_paid_amount") or 1)
     data["recharge_received_amount"] = float(data.get("recharge_received_amount") or 1)
     today_consumption = db.get_today_consumption(int(data["id"]))
+    data["last_used"] = adjusted_used_balance(data.get("last_used"), data)
     data["consumption_stats"] = {"today": today_consumption}
-    data["actual_consumption_stats"] = {"today": actual_consumption_amount(today_consumption, data)}
+    data["consumption_stats"] = adjusted_consumption_stats(data["consumption_stats"], data)
+    data["actual_consumption_stats"] = actual_consumption_stats(data["consumption_stats"], data)
     monitor_groups = [public_monitor_group(group) for group in db.list_dashboard_monitor_groups(int(data["id"]))]
     data["monitor_groups"] = monitor_groups
     data["group_rates"] = monitor_group_rates(monitor_groups) or group_rates_from_extra(data.get("last_extra"))
@@ -1284,8 +1292,9 @@ def consumption_grouped_accounts(account_filter: dict[str, Any] | None = None) -
     stats_by_account = db.get_consumption_stats_for_accounts(int(account["id"]) for account in accounts)
     for account in accounts:
         stats = stats_by_account.get(int(account["id"]), {})
-        account["consumption_stats"] = stats
-        account["actual_consumption_stats"] = actual_consumption_stats(stats, account)
+        account["last_used"] = adjusted_used_balance(account.get("last_used"), account)
+        account["consumption_stats"] = adjusted_consumption_stats(stats, account)
+        account["actual_consumption_stats"] = actual_consumption_stats(account["consumption_stats"], account)
     return grouped
 
 
@@ -2731,6 +2740,28 @@ def api_dashboard_consumption_summary(request: Request):
     }
 
 
+@app.post("/api/dashboard/today-consumption-adjustment")
+async def api_dashboard_today_consumption_adjustment(request: Request):
+    require_user(request)
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        return JSONResponse({"ok": False, "message": "请求内容格式不正确"}, status_code=400)
+    try:
+        account_id = int(payload.get("account_id", payload.get("accountId")))
+    except (TypeError, ValueError):
+        return JSONResponse({"ok": False, "message": "请选择账号"}, status_code=400)
+    account = db.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    try:
+        delta = _adjustment_delta(payload)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+    updated = db.adjust_today_consumption(account_id, delta)
+    db.add_log("info", "account", f"{account['platform']} / {account['name']} 核算今日消耗: {delta:+g}")
+    return {"ok": True, "delta": delta, "account": public_account(updated)}
+
+
 @app.post("/api/group-rate-change-status/bulk-reset")
 async def api_bulk_reset_group_rate_change_status(request: Request):
     require_user(request)
@@ -3892,6 +3923,22 @@ async def api_account_enabled(request: Request, account_id: int):
     effective_enabled = bool(updated and updated["is_enabled"])
     db.add_log("info", "account", f"{account['platform']} / {account['name']} 自动查询: {'启用' if effective_enabled else '不启用'}")
     return {"ok": True, "account": public_account(updated)}
+
+
+@app.post("/api/accounts/{account_id}/used-balance-adjustment")
+async def api_account_used_balance_adjustment(request: Request, account_id: int):
+    require_user(request)
+    account = db.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    payload = await request.json()
+    try:
+        delta = _adjustment_delta(payload)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+    updated = db.adjust_used_balance(account_id, delta)
+    db.add_log("info", "account", f"{account['platform']} / {account['name']} 核算已用余额: {delta:+g}")
+    return {"ok": True, "delta": delta, "account": public_account(updated)}
 
 
 @app.post("/api/accounts/{account_id}/visible")
@@ -5860,6 +5907,26 @@ def _optional_number(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _adjustment_delta(payload: Any) -> float:
+    if not isinstance(payload, dict):
+        raise ValueError("请求内容格式不正确")
+    raw_delta = payload.get("delta")
+    if raw_delta is None or raw_delta == "":
+        amount = _optional_number(payload.get("amount"))
+        if amount is None or not math.isfinite(amount) or amount <= 0:
+            raise ValueError("请输入大于 0 的金额")
+        direction = str(payload.get("direction") or "increase").strip().lower()
+        if direction in {"decrease", "minus", "subtract", "減少", "减少"}:
+            amount = -amount
+        elif direction not in {"increase", "plus", "add", "增加"}:
+            raise ValueError("调整方向不正确")
+        return amount
+    delta = _optional_number(raw_delta)
+    if delta is None or not math.isfinite(delta) or delta == 0:
+        raise ValueError("调整金额不能为 0")
+    return delta
 
 
 def _split_group_ids(value: Any) -> list[str]:

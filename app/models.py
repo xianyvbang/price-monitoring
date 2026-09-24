@@ -153,6 +153,9 @@ class Database:
                     last_checked_at TEXT,
                     low_balance_active INTEGER NOT NULL DEFAULT 0,
                     last_alert_sent_at TEXT,
+                    manual_used_adjustment REAL NOT NULL DEFAULT 0,
+                    manual_today_consumption_adjustment REAL NOT NULL DEFAULT 0,
+                    manual_today_consumption_date TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     UNIQUE(platform, name)
@@ -467,6 +470,7 @@ class Database:
             self._migrate_account_monitor_groups_query_status(conn)
             self._migrate_accounts_visible(conn)
             self._migrate_accounts_eliminated(conn)
+            self._migrate_accounts_manual_adjustments(conn)
             self._migrate_opencode_go_recovery_email(conn)
             self._migrate_opencode_go_cpa_state(conn)
             self._migrate_opencode_go_referral(conn)
@@ -678,6 +682,17 @@ class Database:
         column_names = {row["name"] for row in columns}
         if "is_eliminated" not in column_names:
             conn.execute("ALTER TABLE accounts ADD COLUMN is_eliminated INTEGER NOT NULL DEFAULT 0")
+
+    @staticmethod
+    def _migrate_accounts_manual_adjustments(conn: sqlite3.Connection) -> None:
+        columns = conn.execute("PRAGMA table_info(accounts)").fetchall()
+        column_names = {row["name"] for row in columns}
+        if "manual_used_adjustment" not in column_names:
+            conn.execute("ALTER TABLE accounts ADD COLUMN manual_used_adjustment REAL NOT NULL DEFAULT 0")
+        if "manual_today_consumption_adjustment" not in column_names:
+            conn.execute("ALTER TABLE accounts ADD COLUMN manual_today_consumption_adjustment REAL NOT NULL DEFAULT 0")
+        if "manual_today_consumption_date" not in column_names:
+            conn.execute("ALTER TABLE accounts ADD COLUMN manual_today_consumption_date TEXT")
 
     def _migrate_opencode_go_recovery_email(self, conn: sqlite3.Connection) -> None:
         columns = conn.execute("PRAGMA table_info(opencode_go_accounts)").fetchall()
@@ -2386,7 +2401,8 @@ class Database:
                 recharge_paid_amount, recharge_received_amount, key_id_enc,
                 threshold, is_enabled, is_visible, is_eliminated,
                 last_status, last_remaining, last_unit, last_total, last_used,
-                last_extra, last_group_rate_changed, last_group_query_status, last_checked_at
+                last_extra, last_group_rate_changed, last_group_query_status, last_checked_at,
+                manual_used_adjustment, manual_today_consumption_adjustment, manual_today_consumption_date
             FROM accounts
         """
         conditions = []
@@ -2407,6 +2423,37 @@ class Database:
 
     def get_account(self, account_id: int) -> Optional[sqlite3.Row]:
         with self.connect() as conn:
+            return conn.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
+
+    def adjust_used_balance(self, account_id: int, delta: float) -> Optional[sqlite3.Row]:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE accounts
+                SET manual_used_adjustment = COALESCE(manual_used_adjustment, 0) + ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (delta, utc_now(), account_id),
+            )
+            return conn.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
+
+    def adjust_today_consumption(self, account_id: int, delta: float) -> Optional[sqlite3.Row]:
+        today = datetime.now(CHINA_TZ).date().isoformat()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE accounts
+                SET manual_today_consumption_adjustment = CASE
+                        WHEN manual_today_consumption_date = ?
+                            THEN COALESCE(manual_today_consumption_adjustment, 0) + ?
+                        ELSE ?
+                    END,
+                    manual_today_consumption_date = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (today, delta, delta, today, utc_now(), account_id),
+            )
             return conn.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
 
     def list_monitor_groups(self, account_id: int) -> list[sqlite3.Row]:
@@ -4124,6 +4171,30 @@ def actual_consumption_amount(value: Any, account: Any) -> Optional[float]:
     paid_amount = _positive_float_or_default(_account_value(account, "recharge_paid_amount"), 1.0)
     received_amount = _positive_float_or_default(_account_value(account, "recharge_received_amount"), 1.0)
     return round(amount * paid_amount / received_amount, 6)
+
+
+def manual_today_consumption_adjustment(account: Any) -> float:
+    today = datetime.now(CHINA_TZ).date().isoformat()
+    if str(_account_value(account, "manual_today_consumption_date") or "") != today:
+        return 0.0
+    return _optional_float_or_none(_account_value(account, "manual_today_consumption_adjustment")) or 0.0
+
+
+def adjusted_used_balance(value: Any, account: Any) -> Optional[float]:
+    raw = _optional_float_or_none(value)
+    adjustment = _optional_float_or_none(_account_value(account, "manual_used_adjustment")) or 0.0
+    if raw is None and not adjustment:
+        return None
+    return round((raw or 0.0) + adjustment, 6)
+
+
+def adjusted_consumption_stats(stats: dict[str, Any], account: Any) -> dict[str, Optional[float]]:
+    adjusted = dict(stats or {})
+    today = _optional_float_or_none(adjusted.get("today"))
+    adjustment = manual_today_consumption_adjustment(account)
+    if today is not None or adjustment:
+        adjusted["today"] = round((today or 0.0) + adjustment, 6)
+    return adjusted
 
 
 def actual_consumption_stats(stats: dict[str, Any], account: Any) -> dict[str, Optional[float]]:

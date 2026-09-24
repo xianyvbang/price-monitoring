@@ -40,6 +40,12 @@ const balanceDialogVisible = ref(false);
 const balanceLoading = ref(false);
 const balanceAccount = ref(null);
 const balanceRecords = ref([]);
+const adjustmentDialogVisible = ref(false);
+const adjustmentLoading = ref(false);
+const adjustmentKind = ref("today");
+const adjustmentDirection = ref("increase");
+const adjustmentAmount = ref(null);
+const adjustmentAccountId = ref(null);
 const chartCanvas = ref(null);
 const chartPoints = ref([]);
 const chartBounds = ref(null);
@@ -71,6 +77,17 @@ const columnDefs = [
 
 const platformEntries = computed(() => Object.entries(grouped.value).filter(([, rows]) => Array.isArray(rows)));
 const monitorPaused = computed(() => boolValue(settings.value.monitor_paused));
+const adjustmentAccounts = computed(() => {
+  const seen = new Set();
+  return Object.values(grouped.value)
+    .flatMap((rows) => (Array.isArray(rows) ? rows : []))
+    .filter((row) => {
+      if (seen.has(String(row.id))) return false;
+      seen.add(String(row.id));
+      return true;
+    })
+    .map((row) => ({ id: row.id, label: `${row.platform} / ${row.name}` }));
+});
 const groupRateChangedRows = computed(() =>
   Object.values(grouped.value)
     .flatMap((rows) => (Array.isArray(rows) ? rows : []))
@@ -483,6 +500,46 @@ async function toggleMonitor() {
   }
 }
 
+function openAdjustmentDialog(kind, row = null) {
+  if (kind === "today" && !adjustmentAccounts.value.length) {
+    ElMessage.warning("暂无可核算的账号");
+    return;
+  }
+  adjustmentKind.value = kind;
+  adjustmentDirection.value = "increase";
+  adjustmentAmount.value = null;
+  adjustmentAccountId.value = row?.id ?? adjustmentAccounts.value[0]?.id ?? null;
+  adjustmentDialogVisible.value = true;
+}
+
+async function submitAdjustment() {
+  const amount = Number(adjustmentAmount.value);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    ElMessage.warning("请输入大于 0 的金额");
+    return;
+  }
+  if (!adjustmentAccountId.value) {
+    ElMessage.warning("请选择账号");
+    return;
+  }
+  adjustmentLoading.value = true;
+  try {
+    const payload = { amount, direction: adjustmentDirection.value };
+    const response = adjustmentKind.value === "used"
+      ? await api.adjustUsedBalance(adjustmentAccountId.value, payload)
+      : await api.adjustTodayConsumption({ ...payload, account_id: adjustmentAccountId.value });
+    replaceAccountRows(response.account);
+    adjustmentDialogVisible.value = false;
+    await loadDashboard({ showLoading: false });
+    loadConsumptionSummaries();
+    ElMessage.success("核算金额已保存");
+  } catch (error) {
+    ElMessage.error(error.message || "保存核算金额失败");
+  } finally {
+    adjustmentLoading.value = false;
+  }
+}
+
 async function resetGroupRate(row) {
   if (row._resettingGroupRate) {
     return;
@@ -819,6 +876,7 @@ onBeforeUnmount(() => {
         <el-button :type="monitorPaused ? 'warning' : 'default'" :icon="monitorPaused ? VideoPlay : VideoPause" @click="toggleMonitor">
           {{ monitorPaused ? "恢复监控" : "暂停监控" }}
         </el-button>
+        <el-button :icon="Money" @click="openAdjustmentDialog('today')">核算今日消耗金额</el-button>
       </div>
     </div>
 
@@ -1001,6 +1059,7 @@ onBeforeUnmount(() => {
                 </el-button>
                 <el-button size="small" :loading="row._editingAccount" @click="openEditAccount(row)">修改</el-button>
                 <el-button size="small" :icon="Money" @click="openBalanceHistory(row)">余额趋势</el-button>
+                <el-button size="small" :icon="Money" @click="openAdjustmentDialog('used', row)">核算已用余额</el-button>
               </div>
             </template>
           </el-table-column>
@@ -1082,6 +1141,7 @@ onBeforeUnmount(() => {
             <el-button size="small" :loading="row._querying" @click="queryOne(row)">查询</el-button>
             <el-button size="small" :loading="row._editingAccount" @click="openEditAccount(row)">修改</el-button>
             <el-button size="small" :icon="Money" @click="openBalanceHistory(row)">余额趋势</el-button>
+            <el-button size="small" :icon="Money" @click="openAdjustmentDialog('used', row)">核算已用余额</el-button>
           </div>
 
           <div v-if="platform === 'newApi' || platform === 'sub2Api'" class="mobile-divider">
@@ -1107,6 +1167,34 @@ onBeforeUnmount(() => {
       @pick-groups="groupPicker.open($event)"
     />
     <GroupPickerDialog ref="groupPicker" @saved="refreshDashboardQuietly" />
+
+    <el-dialog
+      v-model="adjustmentDialogVisible"
+      :title="adjustmentKind === 'used' ? '核算已用余额' : '核算今日消耗金额'"
+      width="420px"
+      destroy-on-close
+    >
+      <el-form label-position="top">
+        <el-form-item v-if="adjustmentKind === 'today'" label="账号">
+          <el-select v-model="adjustmentAccountId" filterable style="width: 100%" placeholder="选择账号">
+            <el-option v-for="account in adjustmentAccounts" :key="account.id" :label="account.label" :value="account.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="调整方向">
+          <el-radio-group v-model="adjustmentDirection">
+            <el-radio-button label="increase">增加</el-radio-button>
+            <el-radio-button label="decrease">减少</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="金额">
+          <el-input-number v-model="adjustmentAmount" :min="0.000001" :precision="6" :step="1" controls-position="right" style="width: 100%" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button :disabled="adjustmentLoading" @click="adjustmentDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="adjustmentLoading" @click="submitAdjustment">保存</el-button>
+      </template>
+    </el-dialog>
 
     <el-dialog v-model="balanceDialogVisible" title="余额趋势" width="860px" @opened="drawChart">
       <p class="muted">{{ balanceAccount?.platform }} / {{ balanceAccount?.name }} · 最近 3 天</p>

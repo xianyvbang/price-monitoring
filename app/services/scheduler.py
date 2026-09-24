@@ -4,7 +4,14 @@ import asyncio
 import json
 from contextlib import suppress
 
-from app.models import DEFAULT_BALANCE_UNIT, Database, actual_consumption_stats, monitor_group_to_dict
+from app.models import (
+    DEFAULT_BALANCE_UNIT,
+    Database,
+    adjusted_consumption_stats,
+    adjusted_used_balance,
+    actual_consumption_stats,
+    monitor_group_to_dict,
+)
 from app.models import utc_now
 from app.services.alerts import handle_alert_state
 from app.services.balance import query_account, query_newapi_group, query_sub2api_group
@@ -156,6 +163,8 @@ async def query_one_account(db: Database, account_id: int) -> dict:
     if result.get("is_valid") and not str(result.get("unit") or "").strip():
         result["unit"] = DEFAULT_BALANCE_UNIT
     db.update_account_result(account_id, result)
+    updated_account = db.get_account(account_id)
+    result["used"] = adjusted_used_balance(result.get("used"), updated_account)
     if result.get("is_valid"):
         db.add_log(
             "info",
@@ -174,8 +183,8 @@ async def query_one_account(db: Database, account_id: int) -> dict:
         result["extra"] = f"告警发送失败: {exc}"
         db.update_account_result(account_id, result)
         db.add_log("error", "alert", f"{account['platform']} / {account['name']} 告警发送失败: {exc}")
-    consumption_stats = db.get_consumption_stats(account_id)
-    actual_stats = actual_consumption_stats(consumption_stats, db.get_account(account_id))
+    consumption_stats = adjusted_consumption_stats(db.get_consumption_stats(account_id), updated_account)
+    actual_stats = actual_consumption_stats(consumption_stats, updated_account)
     result["consumption_stats"] = consumption_stats
     result["consumptionStats"] = consumption_stats
     result["actual_consumption_stats"] = actual_stats
