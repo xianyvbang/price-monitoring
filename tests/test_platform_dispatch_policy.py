@@ -47,8 +47,8 @@ def test_health_classification_and_formula():
 
 def test_probe_classification_uses_duration_thresholds():
     assert classify_activity({"is_error": False, "duration_ms": 9999}, probe=True)["score"] == 100
-    assert classify_activity({"is_error": False, "duration_ms": 10000}, probe=True)["score"] == 60
-    assert classify_activity({"is_error": False, "duration_ms": 29999}, probe=True)["score"] == 60
+    assert classify_activity({"is_error": False, "duration_ms": 10000}, probe=True)["score"] == 65
+    assert classify_activity({"is_error": False, "duration_ms": 29999}, probe=True)["score"] == 65
     timed_out = classify_activity({"is_error": False, "duration_ms": 30000}, probe=True)
     assert timed_out["category"] == "timeout"
     assert timed_out["score"] == 10

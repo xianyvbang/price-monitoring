@@ -302,7 +302,7 @@ def classify_activity(activity: dict[str, Any], *, probe: bool = False) -> dict[
             category, score = "timeout", 10.0
             is_timeout = True
         elif probe_duration_ms is not None and probe_duration_ms >= PROBE_FAST_THRESHOLD_MS:
-            category, score = "slow", 60.0
+            category, score = "slow", 65.0
         else:
             category, score = "healthy", 100.0
     elif not is_error:
