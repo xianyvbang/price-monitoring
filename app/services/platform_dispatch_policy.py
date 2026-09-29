@@ -1612,17 +1612,23 @@ class PlatformDispatchPolicyScheduler:
             probe_model = _resolve_probe_model(
                 account_id, accounts[account_id], config, groups_by_id
             )
-            started = time.perf_counter()
+            started: float | None = None
             try:
                 async with semaphore:
                     if account_id in (locked_account_ids or set()):
+                        started = time.perf_counter()
                         result = await client.probe_account(account_id, model=probe_model or None)
                     else:
                         async with self.account_lock(account_id):
+                            started = time.perf_counter()
                             result = await client.probe_account(account_id, model=probe_model or None)
             except Exception as exc:
                 result = {"success": False, "is_timeout": False, "message": f"账号探活失败: {exc}"}
-            measured_duration_ms = max(0.0, (time.perf_counter() - started) * 1000)
+            measured_duration_ms = (
+                max(0.0, (time.perf_counter() - started) * 1000)
+                if started is not None
+                else 0.0
+            )
             duration_ms = _optional_float(result.get("duration_ms"))
             if duration_ms is None:
                 duration_ms = measured_duration_ms
