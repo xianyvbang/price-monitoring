@@ -638,7 +638,7 @@ def test_dashboard_api_shows_today_consumption_summary(tmp_path, monkeypatch):
     assert "consumption_stats" not in duplicate_row
 
 
-def test_dashboard_consumption_summary_includes_hidden_accounts(tmp_path, monkeypatch):
+def test_dashboard_consumption_summary_excludes_hidden_accounts(tmp_path, monkeypatch):
     test_db = Database(str(tmp_path / "app.db"), "test-key")
     test_db.init()
     test_db.ensure_admin("admin", "password123")
@@ -689,8 +689,8 @@ def test_dashboard_consumption_summary_includes_hidden_accounts(tmp_path, monkey
     summary_by_key = {summary["key"]: summary for summary in consumption.json()["consumption_summaries"]}
     assert summary_by_key["today"]["totals"] == [{"amount": 10.0, "unit": "USD"}]
     assert summary_by_key["today"]["account_count"] == 2
-    assert summary_by_key["today_remaining"]["totals"] == [{"amount": 40.0, "unit": "USD"}]
-    assert summary_by_key["today_remaining"]["account_count"] == 2
+    assert summary_by_key["today_remaining"]["totals"] == [{"amount": 16.0, "unit": "USD"}]
+    assert summary_by_key["today_remaining"]["account_count"] == 1
 
 
 def test_dashboard_api_shows_actual_consumption_from_recharge_ratio(tmp_path, monkeypatch):

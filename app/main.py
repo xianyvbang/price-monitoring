@@ -1361,6 +1361,8 @@ def summarize_today_remaining(grouped: dict[str, list[dict[str, Any]]]) -> dict[
     remaining_by_base_url: dict[str, tuple[int, float, str]] = {}
     for accounts in grouped.values():
         for account in accounts:
+            if not bool(account.get("is_visible", True)):
+                continue
             remaining = _optional_number(account.get("last_remaining"))
             if remaining is None:
                 continue
