@@ -999,6 +999,32 @@ async def test_slow_first_token_does_not_disable_account_above_failure_health_th
 
 
 @pytest.mark.asyncio
+async def test_health_score_below_60_closes_without_failure_evidence(tmp_path):
+    db = make_db(tmp_path)
+    accounts = {
+        1: {"id": 1, "name": "low-score", "status": "active", "schedulable": True, "group_ids": [10]},
+        2: {"id": 2, "name": "peer", "status": "active", "schedulable": True, "group_ids": [10]},
+    }
+    client = PolicyClient(list(accounts.values()))
+    scheduler = PlatformDispatchPolicyScheduler(db, lambda: client)
+    low_health = healthy_state(59.9)
+    low_health["evidence"] = []
+
+    action = await scheduler._apply_schedulable_policy(
+        client,
+        client.site_url,
+        accounts,
+        {1: low_health, 2: healthy_state()},
+        [2],
+        {**POLICY_DEFAULTS, "enabled": True},
+        180,
+    )
+
+    assert client.updates == [(1, "schedulable", False)]
+    assert action.startswith("关闭调度 low-score")
+
+
+@pytest.mark.asyncio
 async def test_generic_probe_failures_count_toward_scheduling_threshold(tmp_path):
     db = make_db(tmp_path)
     accounts = {
@@ -1023,7 +1049,7 @@ async def test_generic_probe_failures_count_toward_scheduling_threshold(tmp_path
 
     assert client.updates == [(1, "schedulable", False)]
     assert action.startswith("关闭调度 generic-failure")
-    assert "最近 5 次异常达到 3 次" in action
+    assert "健康分低于 60 分" in action
 
 
 @pytest.mark.asyncio
@@ -1063,7 +1089,7 @@ async def test_threshold_policy_closes_one_account_per_pool(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_threshold_policy_closes_only_lowest_score_in_same_pool(tmp_path):
+async def test_threshold_policy_closes_all_candidates_while_preserving_pool_minimum(tmp_path):
     db = make_db(tmp_path)
     accounts = {
         1: {"id": 1, "name": "lower", "status": "active", "schedulable": True, "group_ids": [10]},
@@ -1083,12 +1109,12 @@ async def test_threshold_policy_closes_only_lowest_score_in_same_pool(tmp_path):
         180,
     )
 
-    assert client.updates == [(1, "schedulable", False)]
+    assert client.updates == [(1, "schedulable", False), (2, "schedulable", False)]
     assert action.startswith("关闭调度 lower")
 
 
 @pytest.mark.asyncio
-async def test_threshold_policy_multi_group_closure_uses_all_pool_quotas(tmp_path):
+async def test_threshold_policy_closure_has_no_per_pool_round_limit(tmp_path):
     db = make_db(tmp_path)
     accounts = {
         1: {"id": 1, "name": "multi", "status": "active", "schedulable": True, "group_ids": [10, 20]},
@@ -1116,7 +1142,11 @@ async def test_threshold_policy_multi_group_closure_uses_all_pool_quotas(tmp_pat
         180,
     )
 
-    assert client.updates == [(1, "schedulable", False)]
+    assert client.updates == [
+        (1, "schedulable", False),
+        (2, "schedulable", False),
+        (3, "schedulable", False),
+    ]
     assert action.startswith("关闭调度 multi")
 
 
@@ -1161,7 +1191,7 @@ async def test_threshold_policy_keeps_last_schedulable_account_in_each_pool(tmp_
 
 
 @pytest.mark.asyncio
-async def test_threshold_policy_keeps_multi_group_account_needed_by_any_pool(tmp_path):
+async def test_threshold_policy_can_close_last_multi_group_account(tmp_path):
     db = make_db(tmp_path)
     accounts = {
         1: {"id": 1, "name": "multi", "status": "active", "schedulable": True, "group_ids": [10, 20]},
@@ -1180,8 +1210,8 @@ async def test_threshold_policy_keeps_multi_group_account_needed_by_any_pool(tmp
         180,
     )
 
-    assert action == ""
-    assert client.updates == []
+    assert action.startswith("关闭调度 multi")
+    assert client.updates == [(1, "schedulable", False)]
 
 
 @pytest.mark.asyncio
@@ -1520,7 +1550,7 @@ async def test_manual_refresh_and_automatic_scoring_share_evidence_collection(tm
 
 
 @pytest.mark.asyncio
-async def test_schedulable_policy_closes_only_one_account_per_pool_per_round(tmp_path):
+async def test_schedulable_policy_closes_all_fatal_accounts_per_pool_per_round(tmp_path):
     db = make_db(tmp_path)
     accounts = {
         1: {"id": 1, "name": "one", "status": "active"},
@@ -1540,7 +1570,7 @@ async def test_schedulable_policy_closes_only_one_account_per_pool_per_round(tmp
         client, client.site_url, accounts, health, [1, 2], {**POLICY_DEFAULTS, "enabled": True}, 180
     )
 
-    assert len(client.updates) == 1
+    assert len(client.updates) == 2
     assert client.updates[0][1:] == ("schedulable", False)
 
 

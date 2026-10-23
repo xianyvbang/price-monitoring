@@ -1752,33 +1752,14 @@ class PlatformDispatchPolicyScheduler:
             if str(account.get("status") or "inactive") != "active" or account.get("schedulable") is False:
                 continue
             item = health[account_id]
+            health_score = item["health_score"] or 0
             evidence = item["evidence"]
             latest_category = str(evidence[0].get("category") or "") if evidence else ""
             if latest_category.startswith("fatal_"):
                 fatal.append((account_id, f"致命异常: {latest_category}"))
                 continue
-            recent_failures = evidence[: int(config["failure_window"])]
-            failure_count = sum(
-                1
-                for event in recent_failures
-                if event.get("category") == "probe_failure"
-                or event.get("is_timeout")
-                or _optional_int(event.get("status_code")) in {429, 502, 503}
-            )
-            recent_slow = evidence[: int(config["slow_window"])]
-            slow_count = sum(
-                1
-                for event in recent_slow
-                if (_optional_float(event.get("first_token_ms")) or 0) > float(config["slow_first_token_ms"])
-            )
-            if failure_count >= int(config["failure_threshold"]) and (item["health_score"] or 0) < float(config["failure_health_threshold"]):
-                threshold.append((account_id, f"最近 {config['failure_window']} 次异常达到 {failure_count} 次"))
-            elif (
-                slow_count >= int(config["slow_threshold"])
-                and (item["health_score"] or 0)
-                < float(config["failure_health_threshold"])
-            ):
-                threshold.append((account_id, f"最近 {config['slow_window']} 次慢首字达到 {slow_count} 次"))
+            if health_score < float(config["failure_health_threshold"]):
+                threshold.append((account_id, f"健康分低于 {float(config['failure_health_threshold']):g} 分: {health_score:.1f} 分"))
 
         minimum = int(config["minimum_available_accounts"])
 
@@ -1837,21 +1818,17 @@ class PlatformDispatchPolicyScheduler:
                 item[0],
             )
         )
-        closed_pool_keys: set[int | str] = set()
         closure_actions: list[str] = []
         attempted_closure = False
         for account_id, reason, is_fatal in closure_candidates:
             pool_keys = set(_account_pool_keys(accounts[account_id]))
-            if pool_keys & closed_pool_keys:
-                continue
-            if not is_fatal and not _preserves_schedulable_pool_minimum(
+            if not is_fatal and len(pool_keys) == 1 and not _preserves_schedulable_pool_minimum(
                 accounts, account_id, minimum
             ):
                 continue
             attempted_closure = True
             action = await apply_candidate(account_id, False, reason)
             if action:
-                closed_pool_keys.update(pool_keys)
                 closure_actions.append(action)
         if closure_actions:
             return "；".join(closure_actions)
