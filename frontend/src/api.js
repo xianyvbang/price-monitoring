@@ -95,10 +95,6 @@ export const api = {
   saveSub2ApiSettings: (payload) => request("/api/settings/sub2api", { method: "POST", body: JSON.stringify(payload) }),
   saveSmtpSettings: (payload) => request("/api/settings/smtp", { method: "POST", body: JSON.stringify(payload) }),
   testSmtp: () => request("/api/settings/smtp/test", { method: "POST" }),
-  reminders: () => request("/api/settings/reminders"),
-  createReminder: (payload) => request("/api/settings/reminders", { method: "POST", body: JSON.stringify(payload) }),
-  updateReminder: (id, payload) => request(`/api/settings/reminders/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
-  deleteReminder: (id) => request(`/api/settings/reminders/${id}`, { method: "DELETE" }),
   changePassword: (payload) => request("/api/settings/password", { method: "POST", body: JSON.stringify(payload) }),
   logs: (params = {}) => request(`/api/logs${queryString(params)}`),
   clearLogs: () => request("/api/logs", { method: "DELETE" })

@@ -230,19 +230,6 @@ class Database:
                     created_at TEXT NOT NULL
                 );
 
-                CREATE TABLE IF NOT EXISTS reminders (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    title TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    remind_at TEXT NOT NULL,
-                    is_sent INTEGER NOT NULL DEFAULT 0,
-                    sent_at TEXT,
-                    last_error TEXT,
-                    last_attempt_at TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-
                 CREATE TABLE IF NOT EXISTS platform_dispatch_cache (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
                     source_site_url TEXT NOT NULL,
@@ -411,8 +398,6 @@ class Database:
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_app_logs_created_at ON app_logs(created_at);
-                CREATE INDEX IF NOT EXISTS idx_reminders_due
-                ON reminders(is_sent, remind_at);
                 CREATE INDEX IF NOT EXISTS idx_group_rate_records_account_checked_at
                 ON group_rate_records(account_id, checked_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_account_monitor_groups_account_sort
@@ -3370,92 +3355,6 @@ class Database:
                 (1 if active else 0, 1 if sent else 0, utc_now(), account_id),
             )
 
-    def create_reminder(self, title: str, content: str, remind_at: str) -> int:
-        now = utc_now()
-        with self.connect() as conn:
-            cursor = conn.execute(
-                """
-                INSERT INTO reminders (
-                    title, content, remind_at, is_sent, created_at, updated_at
-                )
-                VALUES (?, ?, ?, 0, ?, ?)
-                """,
-                (title, content, remind_at, now, now),
-            )
-            return int(cursor.lastrowid)
-
-    def get_reminder(self, reminder_id: int) -> Optional[sqlite3.Row]:
-        with self.connect() as conn:
-            return conn.execute("SELECT * FROM reminders WHERE id = ?", (reminder_id,)).fetchone()
-
-    def list_reminders(self) -> list[sqlite3.Row]:
-        with self.connect() as conn:
-            return conn.execute(
-                """
-                SELECT *
-                FROM reminders
-                ORDER BY remind_at ASC, id ASC
-                """
-            ).fetchall()
-
-    def list_due_reminders(self, now: str | None = None, retry_seconds: int = 5 * 60) -> list[sqlite3.Row]:
-        now_text = now or utc_now()
-        retry_cutoff = _iso_minus(now_text, retry_seconds)
-        with self.connect() as conn:
-            return conn.execute(
-                """
-                SELECT *
-                FROM reminders
-                WHERE is_sent = 0
-                    AND remind_at <= ?
-                    AND (last_attempt_at IS NULL OR last_attempt_at <= ?)
-                ORDER BY remind_at ASC, id ASC
-                """,
-                (now_text, retry_cutoff),
-            ).fetchall()
-
-    def update_reminder(self, reminder_id: int, title: str, content: str, remind_at: str) -> Optional[sqlite3.Row]:
-        with self.connect() as conn:
-            conn.execute(
-                """
-                UPDATE reminders
-                SET title = ?, content = ?, remind_at = ?, is_sent = 0, sent_at = NULL,
-                    last_error = NULL, last_attempt_at = NULL, updated_at = ?
-                WHERE id = ?
-                """,
-                (title, content, remind_at, utc_now(), reminder_id),
-            )
-        return self.get_reminder(reminder_id)
-
-    def delete_reminder(self, reminder_id: int) -> bool:
-        with self.connect() as conn:
-            cursor = conn.execute("DELETE FROM reminders WHERE id = ?", (reminder_id,))
-            return cursor.rowcount > 0
-
-    def mark_reminder_sent(self, reminder_id: int, sent_at: str | None = None) -> None:
-        sent_time = sent_at or utc_now()
-        with self.connect() as conn:
-            conn.execute(
-                """
-                UPDATE reminders
-                SET is_sent = 1, sent_at = ?, last_error = NULL, last_attempt_at = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (sent_time, sent_time, sent_time, reminder_id),
-            )
-
-    def mark_reminder_failed(self, reminder_id: int, error: str, attempted_at: str | None = None) -> None:
-        attempt_time = attempted_at or utc_now()
-        with self.connect() as conn:
-            conn.execute(
-                """
-                UPDATE reminders
-                SET last_error = ?, last_attempt_at = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (str(error), attempt_time, attempt_time, reminder_id),
-            )
-
     def add_log(self, level: str, category: str, message: str) -> None:
         now = utc_now()
         with self.connect() as conn:
@@ -3687,21 +3586,6 @@ def _positive_int_or_none(value: Any) -> int | None:
     return number if number > 0 else None
 
 
-def reminder_to_dict(row: sqlite3.Row) -> dict[str, Any]:
-    data = row_to_dict(row)
-    data["is_sent"] = bool(data.get("is_sent"))
-    data["isSent"] = data["is_sent"]
-    data["remind_at_formatted"] = format_china_time(data.get("remind_at"))
-    data["remindAtFormatted"] = data["remind_at_formatted"]
-    data["sent_at_formatted"] = format_china_time(data.get("sent_at"))
-    data["sentAtFormatted"] = data["sent_at_formatted"]
-    data["last_attempt_at_formatted"] = format_china_time(data.get("last_attempt_at"))
-    data["lastAttemptAtFormatted"] = data["last_attempt_at_formatted"]
-    data["remind_at_china"] = _china_datetime_input(data.get("remind_at"))
-    data["remindAtChina"] = data["remind_at_china"]
-    return data
-
-
 def monitor_group_to_dict(row: sqlite3.Row, secret_key: str) -> dict[str, Any]:
     data = row_to_dict(row)
     group_id_enc = data.pop("group_id_enc", None)
@@ -3916,24 +3800,6 @@ def _parse_iso_datetime(value: Any) -> datetime:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
-
-
-def _iso_minus(value: Any, seconds: int) -> str:
-    try:
-        dt = _parse_iso_datetime(value)
-    except (TypeError, ValueError):
-        dt = datetime.now(timezone.utc)
-    return (dt - timedelta(seconds=max(0, int(seconds)))).isoformat(timespec="seconds")
-
-
-def _china_datetime_input(value: Any) -> str:
-    if not value:
-        return ""
-    try:
-        dt = _parse_iso_datetime(value)
-    except (TypeError, ValueError):
-        return ""
-    return dt.astimezone(CHINA_TZ).strftime("%Y-%m-%dT%H:%M:%S")
 
 
 def _days_ago(days: int) -> str:

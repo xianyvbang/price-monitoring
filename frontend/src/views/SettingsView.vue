@@ -1,8 +1,8 @@
 <script setup>
 import { inject, onMounted, reactive, ref } from "vue";
 import { useRouter } from "vue-router";
-import { ElMessage, ElMessageBox } from "element-plus";
-import { Bell, Check, Connection, Delete, Edit, Lock, Menu, Message, Plus, Refresh, Setting } from "@element-plus/icons-vue";
+import { ElMessage } from "element-plus";
+import { Check, Connection, Lock, Menu, Message, Setting } from "@element-plus/icons-vue";
 import { api } from "../api";
 
 const router = useRouter();
@@ -15,18 +15,12 @@ const savingSub2Api = ref(false);
 const savingSmtp = ref(false);
 const testingSmtp = ref(false);
 const changingPassword = ref(false);
-const reminderLoading = ref(false);
-const savingReminder = ref(false);
-const deletingReminderId = ref(null);
 
 const queryDialog = ref(false);
 const topMenuDialog = ref(false);
 const sub2ApiDialog = ref(false);
 const smtpDialog = ref(false);
 const passwordDialog = ref(false);
-const remindersDialog = ref(false);
-const reminderFormDialog = ref(false);
-const editingReminderId = ref(null);
 
 const general = reactive({
   request_timeout: 10,
@@ -64,13 +58,6 @@ const password = reactive({
   new_password: "",
   confirm_password: ""
 });
-const reminders = ref([]);
-const reminderForm = reactive({
-  title: "",
-  content: "",
-  remind_at: ""
-});
-
 async function loadSettings() {
   loading.value = true;
   try {
@@ -80,7 +67,6 @@ async function loadSettings() {
     assignSub2Api(payload.sub2api || {});
     Object.assign(smtp, payload.smtp || {});
     smtp.password = "";
-    reminders.value = payload.reminders || [];
   } catch (error) {
     ElMessage.error(error.message || "加载设置失败");
   } finally {
@@ -124,18 +110,6 @@ function assignSub2Api(value) {
   sub2api.admin_key_masked = value.admin_key_masked || value.adminKeyMasked || "";
   sub2api.has_admin_key = Boolean(value.has_admin_key || value.hasAdminKey);
   sub2api.site_url = value.site_url || value.siteUrl || "";
-}
-
-async function loadReminders() {
-  reminderLoading.value = true;
-  try {
-    const payload = await api.reminders();
-    reminders.value = payload.reminders || [];
-  } catch (error) {
-    ElMessage.error(error.message || "加载提醒失败");
-  } finally {
-    reminderLoading.value = false;
-  }
 }
 
 async function saveGeneral() {
@@ -225,94 +199,6 @@ async function changePassword() {
   }
 }
 
-function openReminders() {
-  remindersDialog.value = true;
-  loadReminders();
-}
-
-function resetReminderForm() {
-  editingReminderId.value = null;
-  Object.assign(reminderForm, {
-    title: "",
-    content: "",
-    remind_at: ""
-  });
-}
-
-function createReminder() {
-  resetReminderForm();
-  reminderFormDialog.value = true;
-}
-
-function editReminder(row) {
-  editingReminderId.value = row.id;
-  Object.assign(reminderForm, {
-    title: row.title || "",
-    content: row.content || "",
-    remind_at: row.remind_at_china || row.remindAtChina || ""
-  });
-  reminderFormDialog.value = true;
-}
-
-async function saveReminder() {
-  savingReminder.value = true;
-  try {
-    const payload = { ...reminderForm };
-    if (editingReminderId.value) {
-      await api.updateReminder(editingReminderId.value, payload);
-      ElMessage.success("提醒已更新");
-    } else {
-      await api.createReminder(payload);
-      ElMessage.success("提醒已新增");
-    }
-    reminderFormDialog.value = false;
-    resetReminderForm();
-    await loadReminders();
-  } catch (error) {
-    ElMessage.error(error.message || "保存提醒失败");
-  } finally {
-    savingReminder.value = false;
-  }
-}
-
-async function deleteReminder(row) {
-  try {
-    await ElMessageBox.confirm(`确定删除“${row.title}”？`, "删除提醒", { type: "warning" });
-  } catch {
-    return;
-  }
-  deletingReminderId.value = row.id;
-  try {
-    await api.deleteReminder(row.id);
-    reminders.value = reminders.value.filter((item) => item.id !== row.id);
-    ElMessage.success("提醒已删除");
-  } catch (error) {
-    ElMessage.error(error.message || "删除提醒失败");
-  } finally {
-    deletingReminderId.value = null;
-  }
-}
-
-function reminderStatusType(row) {
-  if (row.is_sent || row.isSent) {
-    return "success";
-  }
-  if (row.last_error) {
-    return "danger";
-  }
-  return "warning";
-}
-
-function reminderStatusText(row) {
-  if (row.is_sent || row.isSent) {
-    return "已发送";
-  }
-  if (row.last_error) {
-    return "发送失败";
-  }
-  return "待发送";
-}
-
 onMounted(loadSettings);
 </script>
 
@@ -321,7 +207,7 @@ onMounted(loadSettings);
     <div class="page-head">
       <div>
         <h1>通用设置</h1>
-        <p>配置查询节奏、顶部菜单、SMTP 邮件、登录密码和定时提醒。</p>
+        <p>配置查询节奏、顶部菜单、SMTP 邮件和登录密码。</p>
       </div>
     </div>
 
@@ -340,9 +226,6 @@ onMounted(loadSettings);
       </el-button>
       <el-button class="settings-launch-button" :icon="Lock" @click="passwordDialog = true">
         修改登录密码
-      </el-button>
-      <el-button class="settings-launch-button" :icon="Bell" @click="openReminders">
-        定时提醒事项
       </el-button>
     </div>
 
@@ -463,68 +346,6 @@ onMounted(loadSettings);
       </template>
     </el-dialog>
 
-    <el-dialog v-model="remindersDialog" title="定时提醒事项" width="900px">
-      <div class="settings-dialog-toolbar">
-        <el-button type="primary" :icon="Plus" @click="createReminder">新增提醒</el-button>
-        <el-button :icon="Refresh" :loading="reminderLoading" @click="loadReminders">刷新</el-button>
-      </div>
-      <div class="reminder-list">
-        <el-table v-loading="reminderLoading" :data="reminders" border stripe row-key="id" style="width: 100%">
-          <el-table-column label="标题" min-width="180">
-            <template #default="{ row }">
-              <strong class="reminder-title-cell">{{ row.title }}</strong>
-            </template>
-          </el-table-column>
-          <el-table-column label="内容" min-width="240">
-            <template #default="{ row }">
-              <span class="reminder-content-cell">{{ row.content }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="提醒时间" min-width="170">
-            <template #default="{ row }">{{ row.remind_at_formatted || row.remindAtFormatted }}</template>
-          </el-table-column>
-          <el-table-column label="状态" width="110">
-            <template #default="{ row }">
-              <el-tag :type="reminderStatusType(row)">{{ reminderStatusText(row) }}</el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="操作" width="150" fixed="right">
-            <template #default="{ row }">
-              <div class="table-actions">
-                <el-button size="small" :icon="Edit" @click="editReminder(row)">编辑</el-button>
-                <el-button size="small" type="danger" :icon="Delete" :loading="deletingReminderId === row.id" @click="deleteReminder(row)">删除</el-button>
-              </div>
-            </template>
-          </el-table-column>
-        </el-table>
-      </div>
-    </el-dialog>
-
-    <el-dialog v-model="reminderFormDialog" :title="editingReminderId ? '编辑提醒' : '新增提醒'" width="540px" append-to-body>
-      <el-form :model="reminderForm" label-position="top" @submit.prevent="saveReminder">
-        <el-form-item label="标题">
-          <el-input v-model="reminderForm.title" maxlength="120" show-word-limit />
-        </el-form-item>
-        <el-form-item label="提醒时间">
-          <el-date-picker
-            v-model="reminderForm.remind_at"
-            type="datetime"
-            format="YYYY-MM-DD HH:mm:ss"
-            value-format="YYYY-MM-DDTHH:mm:ss"
-            style="width: 100%"
-          />
-        </el-form-item>
-        <el-form-item label="内容">
-          <el-input v-model="reminderForm.content" type="textarea" :rows="6" maxlength="2000" show-word-limit />
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <div class="dialog-footer">
-          <el-button @click="reminderFormDialog = false">取消</el-button>
-          <el-button type="primary" :loading="savingReminder" @click="saveReminder">保存提醒</el-button>
-        </div>
-      </template>
-    </el-dialog>
   </section>
 </template>
 
@@ -560,16 +381,6 @@ onMounted(loadSettings);
 
 .sub2api-helper {
   margin: -8px 0 18px;
-}
-
-.reminder-list {
-  overflow: auto;
-}
-
-.reminder-title-cell,
-.reminder-content-cell {
-  overflow-wrap: anywhere;
-  white-space: normal;
 }
 
 @media (max-width: 900px) {
