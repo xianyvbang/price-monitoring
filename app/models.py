@@ -21,6 +21,7 @@ CHINA_TZ = timezone(timedelta(hours=8))
 DEFAULT_BALANCE_UNIT = "USD"
 BALANCE_HISTORY_MONTHS = 9
 BALANCE_TREND_DAYS = 3
+APP_LOG_RETENTION_DAYS = 3
 CONSUMPTION_QUERY_BATCH_SIZE = 500
 REQUEST_TIMEOUT_SECONDS = 60
 BALANCE_QUERY_INTERVAL_SECONDS = 5 * 60
@@ -3462,7 +3463,7 @@ class Database:
                 "INSERT INTO app_logs (level, category, message, created_at) VALUES (?, ?, ?, ?)",
                 (level, category, message, now),
             )
-            cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat(timespec="seconds")
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=APP_LOG_RETENTION_DAYS)).isoformat(timespec="seconds")
             conn.execute("DELETE FROM app_logs WHERE created_at < ?", (cutoff,))
 
     def list_logs(
@@ -3516,7 +3517,7 @@ class Database:
             conn.execute("DELETE FROM app_logs")
 
     def cleanup_logs(self) -> None:
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat(timespec="seconds")
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=APP_LOG_RETENTION_DAYS)).isoformat(timespec="seconds")
         with self.connect() as conn:
             conn.execute("DELETE FROM app_logs WHERE created_at < ?", (cutoff,))
 

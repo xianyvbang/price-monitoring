@@ -62,4 +62,4 @@ Five-layer flow, all server-rendered (Jinja2 templates in `app/templates/`, no S
 
 ## Data retention
 
-`app_logs` are pruned to the last 7 days on every write/read; `query_records` (balance history) are pruned to `BALANCE_HISTORY_MONTHS` (9 months); the balance trend endpoint only returns the last `BALANCE_TREND_DAYS` (3 days).
+`app_logs` are pruned to the last `APP_LOG_RETENTION_DAYS` (3 days) on every write/read; `query_records` (balance history) are pruned to `BALANCE_HISTORY_MONTHS` (9 months); the balance trend endpoint only returns the last `BALANCE_TREND_DAYS` (3 days).

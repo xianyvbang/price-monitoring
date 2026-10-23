@@ -49,7 +49,7 @@ onMounted(() => loadLogs(1));
     <div class="page-head">
       <div>
         <h1>日志</h1>
-        <p>显示最近 7 天日志。</p>
+        <p>显示最近 3 天日志。</p>
       </div>
       <div class="page-actions">
         <el-button :icon="Refresh" @click="loadLogs()">刷新</el-button>
