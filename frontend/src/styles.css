@@ -337,17 +337,7 @@ a {
   -webkit-overflow-scrolling: touch;
 }
 
-.opencode-overall-strip {
-  align-items: stretch;
-  background: #fff;
-  border: 1px solid #d9e2ec;
-  border-radius: 8px;
-  display: grid;
-  gap: 12px;
-  grid-template-columns: repeat(3, minmax(150px, 1fr)) auto;
-  margin-bottom: 16px;
-  padding: 12px 14px;
-}
+
 
 .overall-usage-card {
   display: grid;
@@ -383,36 +373,13 @@ a {
   white-space: nowrap;
 }
 
-.opencode-config-strip {
-  align-items: stretch;
-  background: #fff;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  display: grid;
-  gap: 12px;
-  grid-template-columns: minmax(0, 2fr) minmax(180px, 0.7fr) minmax(0, 1.5fr);
-  margin-bottom: 16px;
-  padding: 12px 14px;
-}
 
-.opencode-config-strip div {
-  display: grid;
-  gap: 4px;
-  min-width: 0;
-}
 
-.opencode-config-strip span {
-  color: var(--muted);
-  font-size: 12px;
-}
 
-.opencode-config-strip strong {
-  color: var(--text);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  font-size: 12px;
-  font-weight: 600;
-  overflow-wrap: anywhere;
-}
+
+
+
+
 
 .table-actions {
   align-items: center;
@@ -964,9 +931,7 @@ a {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .opencode-overall-strip {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
+
 
   .overall-usage-note {
     grid-column: 1 / -1;
@@ -1018,13 +983,9 @@ a {
     flex: 1;
   }
 
-  .opencode-config-strip {
-    grid-template-columns: 1fr;
-  }
 
-  .opencode-overall-strip {
-    grid-template-columns: 1fr;
-  }
+
+
 
   .overall-usage-note {
     justify-self: start;

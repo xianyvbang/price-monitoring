@@ -14,7 +14,6 @@ from typing import Any
 from urllib.parse import urlparse
 
 EXTENSION_ROOT = Path(__file__).resolve().parent.parent.parent / "extension"
-OPENCODE_GO_TEMPLATE_DIR = EXTENSION_ROOT / "opencode-go-grabber"
 ACCOUNT_GRABBER_TEMPLATE_DIR = EXTENSION_ROOT / "account-grabber"
 
 ORIGIN_MATCH_PLACEHOLDER = "__APP_ORIGIN_MATCH__"
@@ -34,11 +33,6 @@ def _origin_match_from_base_url(base_url: str) -> str:
         port = None
     origin = f"{scheme}://{host}" + (f":{port}" if port else "")
     return f"{origin}/*"
-
-
-def build_extension_zip(base_url: str) -> tuple[bytes, str]:
-    """生成 OpenCode Go Grabber 定制 zip。"""
-    return build_extension_zip_from_template(base_url, OPENCODE_GO_TEMPLATE_DIR, "opencode-go-grabber.zip")
 
 
 def build_account_grabber_extension_zip(base_url: str) -> tuple[bytes, str]:

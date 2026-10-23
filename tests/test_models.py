@@ -28,6 +28,31 @@ def test_accounts_group_query_status_migration(tmp_path):
     assert status == "never"
 
 
+def test_retired_opencode_go_data_is_removed_on_init(tmp_path):
+    database_path = tmp_path / "legacy-opencode.db"
+    db = Database(str(database_path), "test-key")
+    db.init()
+    with sqlite3.connect(database_path) as conn:
+        conn.execute("CREATE TABLE opencode_go_accounts (id INTEGER PRIMARY KEY)")
+        conn.execute("CREATE TABLE opencode_go_usage_records (id INTEGER PRIMARY KEY)")
+        conn.execute("INSERT OR REPLACE INTO settings VALUES ('opencode_go_cpa_auto_delete_enabled', '1')")
+        conn.execute("UPDATE settings SET value = ? WHERE key = 'top_menu_visibility'", ('{"dashboard": true, "opencode_go": true}',))
+        conn.execute("INSERT INTO app_logs (level, category, message, created_at) VALUES ('info', 'opencode-go', 'old', '2026-01-01')")
+
+    db.init()
+
+    with sqlite3.connect(database_path) as conn:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        settings = {row[0]: row[1] for row in conn.execute("SELECT key, value FROM settings")}
+        logs = conn.execute("SELECT COUNT(*) FROM app_logs WHERE category = 'opencode-go'").fetchone()[0]
+
+    assert "opencode_go_accounts" not in tables
+    assert "opencode_go_usage_records" not in tables
+    assert not any(key.startswith("opencode_go") for key in settings)
+    assert "opencode_go" not in settings["top_menu_visibility"]
+    assert logs == 0
+
+
 def test_monitor_groups_query_status_migration(tmp_path):
     database_path = tmp_path / "legacy.db"
     with sqlite3.connect(database_path) as conn:
@@ -981,7 +1006,6 @@ def test_top_menu_visibility_defaults_and_partial_updates(tmp_path):
         "dashboard": False,
         "accounts": False,
         "platform_dispatch": True,
-        "opencode_go": True,
         "logs": False,
     }
 

@@ -30,7 +30,6 @@ TOP_MENU_VISIBILITY_DEFAULTS = {
     "dashboard": True,
     "accounts": True,
     "platform_dispatch": True,
-    "opencode_go": True,
     "logs": True,
 }
 
@@ -243,51 +242,6 @@ class Database:
                     updated_at TEXT NOT NULL
                 );
 
-                CREATE TABLE IF NOT EXISTS opencode_go_accounts (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL UNIQUE,
-                    email_enc TEXT NOT NULL,
-                    password_enc TEXT,
-                    recovery_email_enc TEXT,
-                    storage_state_enc TEXT,
-                    workspace_id TEXT,
-                    api_key_enc TEXT,
-                    api_key_masked TEXT,
-                    last_status TEXT NOT NULL DEFAULT 'never',
-                    last_error TEXT,
-                    last_rolling_usage TEXT,
-                    last_weekly_usage TEXT,
-                    last_monthly_usage TEXT,
-                    last_raw_json TEXT,
-                    last_checked_at TEXT,
-                    is_enabled INTEGER NOT NULL DEFAULT 0,
-                    cpa_provider_disabled INTEGER,
-                    cpa_provider_deleted INTEGER NOT NULL DEFAULT 0,
-                    cpa_deleted_at TEXT,
-                    cpa_reenable_pending INTEGER NOT NULL DEFAULT 0,
-                    cpa_last_action_at TEXT,
-                    cpa_last_action_error TEXT,
-                    referral_has_reward INTEGER,
-                    referral_claimed INTEGER,
-                    referral_reward_json TEXT,
-                    referral_rewards_json TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS opencode_go_usage_records (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    account_id INTEGER NOT NULL REFERENCES opencode_go_accounts(id) ON DELETE CASCADE,
-                    is_valid INTEGER NOT NULL,
-                    rolling_usage TEXT,
-                    weekly_usage TEXT,
-                    monthly_usage TEXT,
-                    api_key_masked TEXT,
-                    raw_json TEXT,
-                    error TEXT,
-                    checked_at TEXT NOT NULL
-                );
-
                 CREATE TABLE IF NOT EXISTS platform_dispatch_cache (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
                     source_site_url TEXT NOT NULL,
@@ -470,8 +424,6 @@ class Database:
                 ON account_adjustment_records(adjustment_type, adjustment_date, created_at DESC, id DESC);
                 CREATE INDEX IF NOT EXISTS idx_dashboard_adjustment_records_type_date
                 ON dashboard_adjustment_records(adjustment_type, adjustment_date, created_at DESC, id DESC);
-                CREATE INDEX IF NOT EXISTS idx_opencode_go_usage_account_checked_at
-                ON opencode_go_usage_records(account_id, checked_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_platform_dispatch_evidence_account_time
                 ON platform_dispatch_evidence(source_site_url, account_id, occurred_at DESC, id DESC);
                 CREATE INDEX IF NOT EXISTS idx_platform_dispatch_actions_created
@@ -495,9 +447,7 @@ class Database:
             self._migrate_accounts_visible(conn)
             self._migrate_accounts_eliminated(conn)
             self._migrate_accounts_manual_adjustments(conn)
-            self._migrate_opencode_go_recovery_email(conn)
-            self._migrate_opencode_go_cpa_state(conn)
-            self._migrate_opencode_go_referral(conn)
+            self._remove_opencode_go_data(conn)
             self._migrate_group_rate_records_monitor_group(conn)
             self._migrate_platform_dispatch_cache(conn)
             self._migrate_platform_dispatch_evidence(conn)
@@ -516,7 +466,6 @@ class Database:
             self._set_default(conn, "default_threshold", "5")
             self._set_default(conn, "monitor_paused", "0")
             self._set_default(conn, TOP_MENU_VISIBILITY_SETTING, json.dumps(TOP_MENU_VISIBILITY_DEFAULTS, sort_keys=True))
-            self._set_default(conn, "opencode_go_cpa_auto_delete_enabled", "0")
             conn.execute(
                 """
                 INSERT OR IGNORE INTO smtp_settings (id, updated_at)
@@ -528,6 +477,26 @@ class Database:
                 self._seed_default_accounts(conn)
         self.cleanup_logs()
         self.cleanup_balance_history()
+
+    @staticmethod
+    def _remove_opencode_go_data(conn: sqlite3.Connection) -> None:
+        """Remove data and settings belonging to the retired OpenCode Go feature."""
+        conn.execute("DROP TABLE IF EXISTS opencode_go_usage_records")
+        conn.execute("DROP TABLE IF EXISTS opencode_go_accounts")
+        conn.execute("DELETE FROM settings WHERE key LIKE 'opencode_go%'")
+        conn.execute("DELETE FROM app_logs WHERE category = 'opencode-go'")
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (TOP_MENU_VISIBILITY_SETTING,)).fetchone()
+        if row:
+            try:
+                visibility = json.loads(row["value"])
+            except (TypeError, ValueError):
+                visibility = {}
+            if isinstance(visibility, dict) and "opencode_go" in visibility:
+                visibility.pop("opencode_go", None)
+                conn.execute(
+                    "UPDATE settings SET value = ? WHERE key = ?",
+                    (json.dumps(visibility, ensure_ascii=False, sort_keys=True), TOP_MENU_VISIBILITY_SETTING),
+                )
 
     def ensure_admin(self, username: str, password: str) -> None:
         with self.connect() as conn:
@@ -718,64 +687,6 @@ class Database:
             conn.execute("ALTER TABLE accounts ADD COLUMN manual_today_consumption_adjustment REAL NOT NULL DEFAULT 0")
         if "manual_today_consumption_date" not in column_names:
             conn.execute("ALTER TABLE accounts ADD COLUMN manual_today_consumption_date TEXT")
-
-    def _migrate_opencode_go_recovery_email(self, conn: sqlite3.Connection) -> None:
-        columns = conn.execute("PRAGMA table_info(opencode_go_accounts)").fetchall()
-        column_names = {row["name"] for row in columns}
-        if "recovery_email_enc" not in column_names:
-            conn.execute("ALTER TABLE opencode_go_accounts ADD COLUMN recovery_email_enc TEXT")
-        rows = conn.execute("SELECT id, name, email_enc FROM opencode_go_accounts ORDER BY id").fetchall()
-        seen_emails: set[str] = set()
-        for row in rows:
-            try:
-                email = str(decrypt_value(row["email_enc"], self.secret_key) or "").strip()
-            except Exception:
-                continue
-            if not email or email in seen_emails or email == row["name"]:
-                continue
-            seen_emails.add(email)
-            conn.execute(
-                """
-                UPDATE opencode_go_accounts
-                SET name = ?, updated_at = ?
-                WHERE id = ?
-                  AND NOT EXISTS (
-                    SELECT 1 FROM opencode_go_accounts AS existing
-                    WHERE existing.name = ? AND existing.id != ?
-                  )
-                """,
-                (email, utc_now(), row["id"], email, row["id"]),
-            )
-
-    @staticmethod
-    def _migrate_opencode_go_cpa_state(conn: sqlite3.Connection) -> None:
-        columns = conn.execute("PRAGMA table_info(opencode_go_accounts)").fetchall()
-        column_names = {row["name"] for row in columns}
-        if "cpa_provider_disabled" not in column_names:
-            conn.execute("ALTER TABLE opencode_go_accounts ADD COLUMN cpa_provider_disabled INTEGER")
-        if "cpa_provider_deleted" not in column_names:
-            conn.execute("ALTER TABLE opencode_go_accounts ADD COLUMN cpa_provider_deleted INTEGER NOT NULL DEFAULT 0")
-        if "cpa_deleted_at" not in column_names:
-            conn.execute("ALTER TABLE opencode_go_accounts ADD COLUMN cpa_deleted_at TEXT")
-        if "cpa_reenable_pending" not in column_names:
-            conn.execute("ALTER TABLE opencode_go_accounts ADD COLUMN cpa_reenable_pending INTEGER NOT NULL DEFAULT 0")
-        if "cpa_last_action_at" not in column_names:
-            conn.execute("ALTER TABLE opencode_go_accounts ADD COLUMN cpa_last_action_at TEXT")
-        if "cpa_last_action_error" not in column_names:
-            conn.execute("ALTER TABLE opencode_go_accounts ADD COLUMN cpa_last_action_error TEXT")
-
-    @staticmethod
-    def _migrate_opencode_go_referral(conn: sqlite3.Connection) -> None:
-        columns = conn.execute("PRAGMA table_info(opencode_go_accounts)").fetchall()
-        column_names = {row["name"] for row in columns}
-        if "referral_has_reward" not in column_names:
-            conn.execute("ALTER TABLE opencode_go_accounts ADD COLUMN referral_has_reward INTEGER")
-        if "referral_claimed" not in column_names:
-            conn.execute("ALTER TABLE opencode_go_accounts ADD COLUMN referral_claimed INTEGER")
-        if "referral_reward_json" not in column_names:
-            conn.execute("ALTER TABLE opencode_go_accounts ADD COLUMN referral_reward_json TEXT")
-        if "referral_rewards_json" not in column_names:
-            conn.execute("ALTER TABLE opencode_go_accounts ADD COLUMN referral_rewards_json TEXT")
 
     @staticmethod
     def _migrate_group_rate_records_monitor_group(conn: sqlite3.Connection) -> None:
@@ -3032,411 +2943,6 @@ class Database:
         with self.connect() as conn:
             conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
 
-    def list_opencode_go_accounts(
-        self,
-        enabled_only: bool = False,
-        email: str = "",
-        weekly_usage_gte_99: bool = False,
-        monthly_usage_gte_99: bool = False,
-        limit: int | None = None,
-        offset: int = 0,
-        sort_by: str = "name",
-        sort_order: str = "asc",
-        status: str = "",
-        referral_status: str = "",
-    ) -> list[sqlite3.Row]:
-        query = "SELECT * FROM opencode_go_accounts"
-        params: list[Any] = []
-        conditions: list[str] = []
-        if enabled_only:
-            conditions.append("is_enabled = 1")
-        if email:
-            escaped_email = email.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            conditions.append("name LIKE ? ESCAPE '\\' COLLATE NOCASE")
-            params.append(f"%{escaped_email}%")
-        _append_opencode_go_status_filter(conditions, params, status)
-        _append_opencode_go_referral_filter(conditions, params, referral_status)
-        if weekly_usage_gte_99:
-            conditions.append(_opencode_go_usage_filter("last_weekly_usage"))
-        if monthly_usage_gte_99:
-            conditions.append(_opencode_go_usage_filter("last_monthly_usage"))
-        if conditions:
-            query += " WHERE " + " AND ".join(conditions)
-        sort_columns = {
-            "name": "name",
-            "created_at": "created_at",
-            "updated_at": "updated_at",
-            "last_checked_at": "last_checked_at",
-        }
-        column = sort_columns.get(str(sort_by or "").strip(), "name")
-        direction = "DESC" if str(sort_order or "").strip().lower() == "desc" else "ASC"
-        if column == "created_at":
-            query += f" ORDER BY created_at {direction}, id {direction}"
-        elif column == "last_checked_at":
-            query += f" ORDER BY last_checked_at {direction}, id {direction}"
-        else:
-            query += f" ORDER BY {column} {direction}, id {direction}"
-        if limit is not None:
-            query += " LIMIT ? OFFSET ?"
-            params.extend([max(1, int(limit)), max(0, int(offset))])
-        with self.connect() as conn:
-            return conn.execute(query, tuple(params)).fetchall()
-
-    def count_opencode_go_accounts(
-        self,
-        enabled_only: bool = False,
-        email: str = "",
-        weekly_usage_gte_99: bool = False,
-        monthly_usage_gte_99: bool = False,
-        status: str = "",
-        referral_status: str = "",
-    ) -> int:
-        query = "SELECT COUNT(*) AS count FROM opencode_go_accounts"
-        params: list[Any] = []
-        conditions: list[str] = []
-        if enabled_only:
-            conditions.append("is_enabled = 1")
-        if email:
-            escaped_email = email.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            conditions.append("name LIKE ? ESCAPE '\\' COLLATE NOCASE")
-            params.append(f"%{escaped_email}%")
-        _append_opencode_go_status_filter(conditions, params, status)
-        _append_opencode_go_referral_filter(conditions, params, referral_status)
-        if weekly_usage_gte_99:
-            conditions.append(_opencode_go_usage_filter("last_weekly_usage"))
-        if monthly_usage_gte_99:
-            conditions.append(_opencode_go_usage_filter("last_monthly_usage"))
-        if conditions:
-            query += " WHERE " + " AND ".join(conditions)
-        with self.connect() as conn:
-            row = conn.execute(query, tuple(params)).fetchone()
-            return int(row["count"] if row else 0)
-
-    def latest_successful_opencode_go_checked_at(self) -> str | None:
-        with self.connect() as conn:
-            row = conn.execute(
-                """
-                SELECT last_checked_at
-                FROM opencode_go_accounts
-                WHERE last_status = 'valid' AND last_checked_at IS NOT NULL
-                ORDER BY last_checked_at DESC, id DESC
-                LIMIT 1
-                """
-            ).fetchone()
-            return str(row["last_checked_at"]) if row and row["last_checked_at"] else None
-
-    def get_opencode_go_account(self, account_id: int) -> Optional[sqlite3.Row]:
-        with self.connect() as conn:
-            return conn.execute("SELECT * FROM opencode_go_accounts WHERE id = ?", (account_id,)).fetchone()
-
-    def get_opencode_go_account_by_email(self, email: str) -> Optional[sqlite3.Row]:
-        """按 Google 邮箱（即 name 列，大小写不敏感）查账号，用于批量导入判重。"""
-        normalized = str(email or "").strip().lower()
-        if not normalized:
-            return None
-        with self.connect() as conn:
-            return conn.execute(
-                "SELECT * FROM opencode_go_accounts WHERE LOWER(name) = ? LIMIT 1",
-                (normalized,),
-            ).fetchone()
-
-    def upsert_opencode_go_account(self, data: dict[str, Any]) -> int:
-        now = utc_now()
-        email = str(data.get("email") or "").strip()
-        if not email:
-            raise ValueError("Google 邮箱不能为空")
-        name = email
-        recovery_email_enc = encrypt_value(str(data.get("recovery_email") or data.get("recoveryEmail") or "").strip(), self.secret_key)
-        password_enc = encrypt_value(data.get("password"), self.secret_key)
-        storage_state_enc = encrypt_value(_json_dumps(data.get("storage_state")), self.secret_key) if data.get("storage_state") else None
-        api_key = str(data.get("api_key") or "").strip()
-        api_key_enc = encrypt_value(api_key, self.secret_key)
-        api_key_masked = _mask_opencode_api_key(api_key) if api_key else data.get("api_key_masked")
-        is_enabled = 1 if data.get("is_enabled", False) else 0
-        with self.connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO opencode_go_accounts (
-                    name, email_enc, password_enc, recovery_email_enc, storage_state_enc, workspace_id,
-                    api_key_enc, api_key_masked, is_enabled, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(name) DO UPDATE SET
-                    email_enc = excluded.email_enc,
-                    password_enc = COALESCE(excluded.password_enc, opencode_go_accounts.password_enc),
-                    recovery_email_enc = excluded.recovery_email_enc,
-                    storage_state_enc = COALESCE(excluded.storage_state_enc, opencode_go_accounts.storage_state_enc),
-                    workspace_id = COALESCE(excluded.workspace_id, opencode_go_accounts.workspace_id),
-                    api_key_enc = COALESCE(excluded.api_key_enc, opencode_go_accounts.api_key_enc),
-                    api_key_masked = COALESCE(excluded.api_key_masked, opencode_go_accounts.api_key_masked),
-                    is_enabled = excluded.is_enabled,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    name,
-                    encrypt_value(email, self.secret_key),
-                    password_enc,
-                    recovery_email_enc,
-                    storage_state_enc,
-                    data.get("workspace_id") or data.get("workspaceId"),
-                    api_key_enc,
-                    api_key_masked,
-                    is_enabled,
-                    now,
-                    now,
-                ),
-            )
-            row = conn.execute("SELECT id FROM opencode_go_accounts WHERE name = ?", (name,)).fetchone()
-            return int(row["id"])
-
-    def update_opencode_go_account(self, account_id: int, data: dict[str, Any]) -> int:
-        current = self.get_opencode_go_account(account_id)
-        if not current:
-            raise ValueError("OpenCode Go 账号不存在")
-        email = str(data.get("email") or decrypt_value(current["email_enc"], self.secret_key) or "").strip()
-        if not email:
-            raise ValueError("Google 邮箱不能为空")
-        name = email
-        recovery_email_enc = encrypt_value(str(data.get("recovery_email") or data.get("recoveryEmail") or "").strip(), self.secret_key)
-        password_enc = encrypt_value(data.get("password"), self.secret_key)
-        storage_state_enc = None
-        if "storage_state" in data:
-            storage_state_enc = encrypt_value(_json_dumps(data.get("storage_state")), self.secret_key) if data.get("storage_state") else None
-        api_key = str(data.get("api_key") or "").strip()
-        api_key_enc = encrypt_value(api_key, self.secret_key)
-        api_key_masked = _mask_opencode_api_key(api_key) if api_key else data.get("api_key_masked")
-        is_enabled = 1 if data.get("is_enabled", current["is_enabled"]) else 0
-        with self.connect() as conn:
-            conn.execute(
-                """
-                UPDATE opencode_go_accounts
-                SET name = ?, email_enc = ?,
-                    password_enc = COALESCE(?, password_enc),
-                    recovery_email_enc = ?,
-                    storage_state_enc = CASE WHEN ? THEN ? ELSE storage_state_enc END,
-                    workspace_id = COALESCE(?, workspace_id),
-                    api_key_enc = COALESCE(?, api_key_enc),
-                    api_key_masked = COALESCE(?, api_key_masked),
-                    is_enabled = ?,
-                    updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    name,
-                    encrypt_value(email, self.secret_key),
-                    password_enc,
-                    recovery_email_enc,
-                    1 if "storage_state" in data else 0,
-                    storage_state_enc,
-                    data.get("workspace_id") or data.get("workspaceId"),
-                    api_key_enc,
-                    api_key_masked,
-                    is_enabled,
-                    utc_now(),
-                    account_id,
-                ),
-            )
-        return account_id
-
-    def delete_opencode_go_account(self, account_id: int) -> None:
-        with self.connect() as conn:
-            conn.execute("DELETE FROM opencode_go_accounts WHERE id = ?", (account_id,))
-
-    def delete_opencode_go_accounts(self, account_ids: list[int]) -> list[int]:
-        deleted_ids = []
-        with self.connect() as conn:
-            for account_id in dict.fromkeys(account_ids):
-                cursor = conn.execute("DELETE FROM opencode_go_accounts WHERE id = ?", (account_id,))
-                if cursor.rowcount > 0:
-                    deleted_ids.append(account_id)
-        return deleted_ids
-
-    def update_opencode_go_session(
-        self,
-        account_id: int,
-        storage_state: Any,
-        workspace_id: str | None = None,
-        status: str = "logged_in",
-        error: str | None = None,
-    ) -> None:
-        with self.connect() as conn:
-            conn.execute(
-                """
-                UPDATE opencode_go_accounts
-                SET storage_state_enc = ?,
-                    workspace_id = COALESCE(?, workspace_id),
-                    last_status = ?,
-                    last_error = ?,
-                    updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    encrypt_value(_json_dumps(storage_state), self.secret_key),
-                    workspace_id,
-                    status,
-                    error,
-                    utc_now(),
-                    account_id,
-                ),
-            )
-
-    def update_opencode_go_enabled(self, account_id: int, is_enabled: bool) -> None:
-        with self.connect() as conn:
-            conn.execute(
-                "UPDATE opencode_go_accounts SET is_enabled = ?, updated_at = ? WHERE id = ?",
-                (1 if is_enabled else 0, utc_now(), account_id),
-            )
-
-    def update_opencode_go_result(self, account_id: int, result: dict[str, Any]) -> None:
-        checked_at = result.get("checked_at") or utc_now()
-        is_valid = bool(result.get("is_valid"))
-        rolling_usage = _json_dumps(result.get("rolling_usage") or result.get("rollingUsage") or {})
-        weekly_usage = _json_dumps(result.get("weekly_usage") or result.get("weeklyUsage") or {})
-        monthly_usage = _json_dumps(result.get("monthly_usage") or result.get("monthlyUsage") or {})
-        raw_json = _json_dumps(_safe_opencode_raw(result.get("raw") or result.get("raw_json") or result))
-        api_key = str(result.get("api_key") or result.get("apiKey") or "").strip()
-        api_key_masked = result.get("api_key_masked") or result.get("apiKeyMasked") or (_mask_opencode_api_key(api_key) if api_key else None)
-        with self.connect() as conn:
-            conn.execute(
-                """
-                UPDATE opencode_go_accounts
-                SET last_status = ?, last_error = ?, workspace_id = COALESCE(?, workspace_id),
-                    api_key_enc = COALESCE(?, api_key_enc),
-                    api_key_masked = COALESCE(?, api_key_masked),
-                    last_rolling_usage = ?, last_weekly_usage = ?, last_monthly_usage = ?,
-                    last_raw_json = ?, last_checked_at = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    "valid" if is_valid else "invalid",
-                    result.get("invalid_message") or result.get("error"),
-                    result.get("workspace_id") or result.get("workspaceId"),
-                    encrypt_value(api_key, self.secret_key),
-                    api_key_masked,
-                    rolling_usage,
-                    weekly_usage,
-                    monthly_usage,
-                    raw_json,
-                    checked_at,
-                    utc_now(),
-                    account_id,
-                ),
-            )
-            conn.execute(
-                """
-                INSERT INTO opencode_go_usage_records (
-                    account_id, is_valid, rolling_usage, weekly_usage, monthly_usage,
-                    api_key_masked, raw_json, error, checked_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    account_id,
-                    1 if is_valid else 0,
-                    rolling_usage,
-                    weekly_usage,
-                    monthly_usage,
-                    api_key_masked,
-                    raw_json,
-                    result.get("invalid_message") or result.get("error"),
-                    checked_at,
-                ),
-            )
-
-    def update_opencode_go_referral(
-        self,
-        account_id: int,
-        has_reward: bool | None,
-        claimed: bool | None,
-        reward: Any = None,
-        error: str | None = None,
-        referral_json: Any = None,
-    ) -> None:
-        """更新邀请奖励查询结果列（referral_has_reward / referral_claimed / referral_reward_json / referral_rewards_json）。
-
-        has_reward/claimed 为 None 时不改动对应列（保留未知状态），仅在明确得知时覆盖。
-        reward 为概要 dict；referral_json 为 rewards[] 完整列表，可单独刷新。
-        """
-        reward_json = encrypt_value(_json_dumps(reward), self.secret_key) if reward else None
-        referral_list_json = encrypt_value(_json_dumps(referral_json), self.secret_key) if referral_json else None
-        with self.connect() as conn:
-            conn.execute(
-                """
-                UPDATE opencode_go_accounts
-                SET referral_has_reward = CASE WHEN ? IS NOT NULL THEN ? ELSE referral_has_reward END,
-                    referral_claimed = CASE WHEN ? IS NOT NULL THEN ? ELSE referral_claimed END,
-                    referral_reward_json = ?,
-                    referral_rewards_json = COALESCE(?, referral_rewards_json),
-                    last_error = ?,
-                    updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    1 if has_reward else (0 if has_reward is False else None),
-                    1 if has_reward else (0 if has_reward is False else None),
-                    1 if claimed else (0 if claimed is False else None),
-                    1 if claimed else (0 if claimed is False else None),
-                    reward_json,
-                    referral_list_json,
-                    error,
-                    utc_now(),
-                    account_id,
-                ),
-            )
-
-    def update_opencode_go_cpa_state(
-        self,
-        account_id: int,
-        *,
-        provider_disabled: bool | None = None,
-        provider_deleted: bool | None = None,
-        deleted_at: str | None = None,
-        clear_deleted_at: bool = False,
-        reenable_pending: bool | None = None,
-        action_at: str | None = None,
-        error: str | None = None,
-        clear_error: bool = False,
-    ) -> None:
-        assignments = ["updated_at = ?"]
-        params: list[Any] = [utc_now()]
-        if provider_disabled is not None:
-            assignments.append("cpa_provider_disabled = ?")
-            params.append(1 if provider_disabled else 0)
-        if provider_deleted is not None:
-            assignments.append("cpa_provider_deleted = ?")
-            params.append(1 if provider_deleted else 0)
-        if deleted_at is not None or clear_deleted_at:
-            assignments.append("cpa_deleted_at = ?")
-            params.append(deleted_at)
-        if reenable_pending is not None:
-            assignments.append("cpa_reenable_pending = ?")
-            params.append(1 if reenable_pending else 0)
-        if action_at is not None:
-            assignments.append("cpa_last_action_at = ?")
-            params.append(action_at)
-        if error is not None or clear_error:
-            assignments.append("cpa_last_action_error = ?")
-            params.append(error)
-        params.append(account_id)
-        with self.connect() as conn:
-            conn.execute(
-                f"UPDATE opencode_go_accounts SET {', '.join(assignments)} WHERE id = ?",
-                tuple(params),
-            )
-
-    def list_opencode_go_history(self, account_id: int, limit: int = 100) -> list[sqlite3.Row]:
-        with self.connect() as conn:
-            return conn.execute(
-                """
-                SELECT *
-                FROM opencode_go_usage_records
-                WHERE account_id = ?
-                ORDER BY checked_at DESC, id DESC
-                LIMIT ?
-                """,
-                (account_id, max(1, int(limit))),
-            ).fetchall()
-
     def update_account_result(self, account_id: int, result: dict[str, Any]) -> None:
         status = "valid" if result.get("is_valid") else "invalid"
         checked_at = result.get("checked_at") or utc_now()
@@ -4402,76 +3908,6 @@ def _json_dumps(value: Any) -> str:
     import json
 
     return json.dumps(value, ensure_ascii=False, default=str)
-
-
-def _opencode_go_usage_filter(column: str) -> str:
-    if column not in {"last_weekly_usage", "last_monthly_usage"}:
-        raise ValueError("不支持的 OpenCode Go 用量筛选字段")
-    return (
-        f"CASE WHEN json_valid({column}) THEN CAST(COALESCE("
-        f"json_extract({column}, '$.usage_percent'), "
-        f"json_extract({column}, '$.usagePercent')) AS REAL) END >= 99"
-    )
-
-
-def _append_opencode_go_status_filter(conditions: list[str], params: list[Any], status: str) -> None:
-    value = str(status or "").strip().lower()
-    if value == "deleted":
-        conditions.append("cpa_provider_deleted = 1")
-        return
-    if value in {"valid", "invalid", "logged_in"}:
-        conditions.append("COALESCE(cpa_provider_deleted, 0) = 0")
-        conditions.append("last_status = ?")
-        params.append(value)
-        return
-    if value == "never":
-        conditions.append("COALESCE(cpa_provider_deleted, 0) = 0")
-        conditions.append("last_status NOT IN ('valid', 'invalid', 'logged_in')")
-
-
-def _append_opencode_go_referral_filter(conditions: list[str], params: list[Any], referral_status: str) -> None:
-    """邀请奖励状态筛选：
-    - unclaimed: 有可领（referral_has_reward=1 且 referral_claimed=0）
-    - claimed:   已领（referral_claimed=1）
-    - none:      无可领（referral_has_reward=0）
-    - has:       有奖励（referral_has_reward=1，含已领未领）
-    """
-    value = str(referral_status or "").strip().lower()
-    if value == "unclaimed":
-        conditions.append("referral_has_reward = 1")
-        conditions.append("COALESCE(referral_claimed, 0) = 0")
-    elif value == "claimed":
-        conditions.append("referral_claimed = 1")
-    elif value == "none":
-        conditions.append("referral_has_reward = 0")
-    elif value == "has":
-        conditions.append("referral_has_reward = 1")
-
-
-def _mask_opencode_api_key(value: str) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    if len(text) <= 12:
-        return text[:3] + "*" * max(0, len(text) - 6) + text[-3:]
-    return text[:8] + "*" * (len(text) - 12) + text[-4:]
-
-
-def _safe_opencode_raw(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {
-            key: ("***" if _is_opencode_sensitive_key(str(key)) else _safe_opencode_raw(item))
-            for key, item in value.items()
-            if str(key) not in {"storage_state", "storageState"}
-        }
-    if isinstance(value, list):
-        return [_safe_opencode_raw(item) for item in value]
-    return value
-
-
-def _is_opencode_sensitive_key(key: str) -> bool:
-    normalized = key.replace("-", "_").lower()
-    return normalized in {"api_key", "apikey", "key", "token", "secret"} or "password" in normalized or "token" in normalized or "secret" in normalized
 
 
 def _parse_iso_datetime(value: Any) -> datetime:

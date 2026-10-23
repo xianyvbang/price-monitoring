@@ -11,7 +11,6 @@ const defaultTopMenuVisibility = {
   dashboard: true,
   accounts: true,
   platform_dispatch: true,
-  opencode_go: true,
   logs: true
 };
 const session = ref({ loading: true, authenticated: false, user: null, topMenuVisibility: { ...defaultTopMenuVisibility } });
@@ -108,10 +107,6 @@ onMounted(refreshSession);
         <el-menu-item v-if="session.topMenuVisibility.platform_dispatch" index="/platform-dispatch">
           <el-icon><Grid /></el-icon>
           <span>平台调度</span>
-        </el-menu-item>
-        <el-menu-item v-if="session.topMenuVisibility.opencode_go" index="/opencode-go">
-          <el-icon><Connection /></el-icon>
-          <span>OpenCode Go</span>
         </el-menu-item>
         <el-menu-item index="/settings">
           <el-icon><Setting /></el-icon>

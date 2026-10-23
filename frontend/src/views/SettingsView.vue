@@ -12,7 +12,6 @@ const loading = ref(false);
 const savingGeneral = ref(false);
 const savingTopMenu = ref(false);
 const savingSub2Api = ref(false);
-const savingCpa = ref(false);
 const savingSmtp = ref(false);
 const testingSmtp = ref(false);
 const changingPassword = ref(false);
@@ -23,7 +22,6 @@ const deletingReminderId = ref(null);
 const queryDialog = ref(false);
 const topMenuDialog = ref(false);
 const sub2ApiDialog = ref(false);
-const cpaDialog = ref(false);
 const smtpDialog = ref(false);
 const passwordDialog = ref(false);
 const remindersDialog = ref(false);
@@ -41,7 +39,6 @@ const topMenuVisibility = reactive({
   dashboard: true,
   accounts: true,
   platform_dispatch: true,
-  opencode_go: true,
   logs: true
 });
 const savedTopMenuVisibility = ref({ ...topMenuVisibility });
@@ -49,12 +46,6 @@ const sub2api = reactive({
   admin_key: "",
   admin_key_masked: "",
   has_admin_key: false,
-  site_url: ""
-});
-const cpa = reactive({
-  authorization: "",
-  authorization_masked: "",
-  has_authorization: false,
   site_url: ""
 });
 const smtp = reactive({
@@ -87,7 +78,6 @@ async function loadSettings() {
     assignGeneralSettings(payload.settings || {});
     setTopMenuVisibility(payload.settings?.top_menu_visibility || payload.settings?.topMenuVisibility);
     assignSub2Api(payload.sub2api || {});
-    assignCpa(payload.cpa || {});
     Object.assign(smtp, payload.smtp || {});
     smtp.password = "";
     reminders.value = payload.reminders || [];
@@ -134,13 +124,6 @@ function assignSub2Api(value) {
   sub2api.admin_key_masked = value.admin_key_masked || value.adminKeyMasked || "";
   sub2api.has_admin_key = Boolean(value.has_admin_key || value.hasAdminKey);
   sub2api.site_url = value.site_url || value.siteUrl || "";
-}
-
-function assignCpa(value) {
-  cpa.authorization = "";
-  cpa.authorization_masked = value.authorization_masked || value.authorizationMasked || "";
-  cpa.has_authorization = Boolean(value.has_authorization || value.hasAuthorization);
-  cpa.site_url = value.site_url || value.siteUrl || "";
 }
 
 async function loadReminders() {
@@ -198,20 +181,6 @@ async function saveSub2Api() {
     ElMessage.error(error.message || "保存失败");
   } finally {
     savingSub2Api.value = false;
-  }
-}
-
-async function saveCpa() {
-  savingCpa.value = true;
-  try {
-    const payload = await api.saveCpaSettings(cpa);
-    assignCpa(payload.cpa || {});
-    cpaDialog.value = false;
-    ElMessage.success("CPA 配置已保存");
-  } catch (error) {
-    ElMessage.error(error.message || "保存失败");
-  } finally {
-    savingCpa.value = false;
   }
 }
 
@@ -366,9 +335,6 @@ onMounted(loadSettings);
       <el-button class="settings-launch-button" :icon="Connection" @click="sub2ApiDialog = true">
         Sub2API 配置
       </el-button>
-      <el-button class="settings-launch-button" :icon="Connection" @click="cpaDialog = true">
-        CPA 配置
-      </el-button>
       <el-button class="settings-launch-button" :icon="Message" @click="smtpDialog = true">
         SMTP 邮件
       </el-button>
@@ -385,7 +351,6 @@ onMounted(loadSettings);
         <el-form-item label="仪表盘"><el-switch v-model="topMenuVisibility.dashboard" active-text="显示" inactive-text="隐藏" /></el-form-item>
         <el-form-item label="平台配置"><el-switch v-model="topMenuVisibility.accounts" active-text="显示" inactive-text="隐藏" /></el-form-item>
         <el-form-item label="平台调度"><el-switch v-model="topMenuVisibility.platform_dispatch" active-text="显示" inactive-text="隐藏" /></el-form-item>
-        <el-form-item label="OpenCode Go"><el-switch v-model="topMenuVisibility.opencode_go" active-text="显示" inactive-text="隐藏" /></el-form-item>
         <el-form-item label="日志"><el-switch v-model="topMenuVisibility.logs" active-text="显示" inactive-text="隐藏" /></el-form-item>
       </el-form>
       <template #footer>
@@ -444,32 +409,6 @@ onMounted(loadSettings);
         <div class="dialog-footer">
           <el-button @click="sub2ApiDialog = false">取消</el-button>
           <el-button type="primary" :loading="savingSub2Api" @click="saveSub2Api">保存 Sub2API</el-button>
-        </div>
-      </template>
-    </el-dialog>
-
-    <el-dialog v-model="cpaDialog" title="CPA 配置" width="620px">
-      <el-form :model="cpa" label-position="top" @submit.prevent="saveCpa">
-        <el-form-item label="Authorization">
-          <el-input
-            v-model="cpa.authorization"
-            type="password"
-            show-password
-            :placeholder="cpa.has_authorization ? `已配置：${cpa.authorization_masked}，留空不修改` : 'Bearer xxxx'"
-            autocomplete="off"
-          />
-        </el-form-item>
-        <div class="import-helper sub2api-helper">
-          <span>可填写 Bearer xxxx 或纯管理密钥，请使用 CLI Proxy API 的 Management API 管理密钥。</span>
-        </div>
-        <el-form-item label="站点地址">
-          <el-input v-model="cpa.site_url" placeholder="https://your-cpa.example.com 或 https://your-cpa.example.com/v0/management" autocomplete="off" />
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <div class="dialog-footer">
-          <el-button @click="cpaDialog = false">取消</el-button>
-          <el-button type="primary" :loading="savingCpa" @click="saveCpa">保存 CPA</el-button>
         </div>
       </template>
     </el-dialog>

@@ -4,7 +4,7 @@
   if (window.__accountGrabberContent) return;
   window.__accountGrabberContent = true;
 
-  if (!/^https?:$/.test(location.protocol) || location.hostname === "opencode.ai") return;
+  if (!/^https?:$/.test(location.protocol)) return;
 
   const DEFAULT_APP_BASE = "http://localhost:8000";
   const APP_TITLE = "余额监控";

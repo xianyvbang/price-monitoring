@@ -50,7 +50,6 @@ def test_spa_pages_and_dashboard_api_expose_monitor_data(tmp_path, monkeypatch):
         login(client)
         dashboard_page = client.get("/")
         accounts_page = client.get("/accounts")
-        opencode_go_page = client.get("/opencode-go")
         settings_page = client.get("/settings")
         dashboard = client.get("/api/dashboard")
         accounts = client.get("/api/accounts")
@@ -58,7 +57,6 @@ def test_spa_pages_and_dashboard_api_expose_monitor_data(tmp_path, monkeypatch):
 
     assert_spa_page(dashboard_page)
     assert_spa_page(accounts_page)
-    assert_spa_page(opencode_go_page)
     assert_spa_page(settings_page)
     assert dashboard.status_code == 200
     assert accounts.status_code == 200
@@ -156,7 +154,6 @@ def test_top_menu_visibility_settings_api_and_session(tmp_path, monkeypatch):
         "dashboard": True,
         "accounts": False,
         "platform_dispatch": True,
-        "opencode_go": True,
         "logs": False,
     }
     assert legacy.json()["settings"]["top_menu_visibility"] == saved.json()["settings"]["top_menu_visibility"]
@@ -195,38 +192,6 @@ def test_sub2api_settings_api_encrypts_admin_key(tmp_path, monkeypatch):
     encrypted = test_db.get_setting("sub2api_admin_key_enc")
     assert encrypted != "adm-secret-key"
     assert decrypt_value(encrypted, "test-key") == "adm-secret-key"
-
-
-def test_cpa_settings_api_encrypts_authorization(tmp_path, monkeypatch):
-    test_db = Database(str(tmp_path / "app.db"), "test-key")
-    test_db.init()
-    test_db.ensure_admin("admin", "password123")
-    monkeypatch.setattr("app.main.db", test_db)
-    monkeypatch.setattr("app.main.scheduler.db", test_db)
-    monkeypatch.setattr("app.main.scheduler.start", lambda: None)
-
-    async def stop_scheduler():
-        return None
-
-    monkeypatch.setattr("app.main.scheduler.stop", stop_scheduler)
-
-    with TestClient(app) as client:
-        login(client)
-        saved = client.post(
-            "/api/settings/cpa",
-            json={"authorization": "Bearer cpa-secret-token", "site_url": "https://cpa.example/"},
-        )
-        loaded = client.get("/api/settings")
-
-    assert saved.status_code == 200
-    assert saved.json()["cpa"]["site_url"] == "https://cpa.example/v0/management"
-    assert saved.json()["cpa"]["has_authorization"] is True
-    assert "cpa-secret-token" not in saved.text
-    assert loaded.json()["cpa"]["site_url"] == "https://cpa.example/v0/management"
-    assert "cpa-secret-token" not in loaded.text
-    encrypted = test_db.get_setting("cpa_authorization_enc")
-    assert encrypted != "cpa-secret-token"
-    assert decrypt_value(encrypted, "test-key") == "cpa-secret-token"
 
 
 def test_newapi_group_picker_data_and_api_routes(tmp_path, monkeypatch):

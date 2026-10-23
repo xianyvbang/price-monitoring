@@ -8,7 +8,6 @@ from typing import Any
 
 import httpx
 
-OPENCODE_GO_SUB2API_BASE_URL = "https://opencode.ai/zen/go"
 SUB2API_OPENAI_PLATFORM = "openai"
 SUB2API_APIKEY_TYPE = "apikey"
 
@@ -439,75 +438,6 @@ class Sub2ApiAdminClient:
             page += 1
         return result
 
-    async def existing_openai_account_names_in_groups(self, group_ids: list[int]) -> set[str]:
-        names: set[str] = set()
-        seen_group_ids: set[int] = set()
-        for group_id in group_ids:
-            group_id = int(group_id)
-            if group_id in seen_group_ids:
-                continue
-            seen_group_ids.add(group_id)
-            for account in await self.list_openai_accounts(group_id):
-                if not _account_belongs_to_group_or_unknown(account, group_id):
-                    continue
-                name = _normalize_account_name(account.get("name"))
-                if name:
-                    names.add(name)
-        return names
-
-    async def import_opencode_go_account(self, email: str, api_key: str, group_ids: list[int]) -> dict[str, Any]:
-        email = str(email or "").strip()
-        api_key = str(api_key or "").strip()
-        if not email:
-            raise Sub2ApiAdminError("OpenCode Go 账号缺少邮箱")
-        if not api_key:
-            raise Sub2ApiAdminError("OpenCode Go 账号尚未获取 API key，请先刷新账号")
-
-        models = await self.sync_openai_models_preview(api_key)
-        credentials: dict[str, Any] = {
-            "base_url": OPENCODE_GO_SUB2API_BASE_URL,
-            "api_key": api_key,
-            "pool_mode": True,
-        }
-        if models:
-            credentials["model_mapping"] = {model: model for model in models}
-        payload = {
-            "name": f"opencode-{email}",
-            "platform": SUB2API_OPENAI_PLATFORM,
-            "type": SUB2API_APIKEY_TYPE,
-            "concurrency": 10,
-            "credentials": credentials,
-            "extra": {"codex_image_generation_bridge": False},
-            "group_ids": group_ids,
-        }
-        account_payload = await self._request("POST", "/api/v1/admin/accounts", json=payload)
-        return {
-            "account": _redact_account_payload(_unwrap_sub2api_data(account_payload)),
-            "models": models,
-            "model_count": len(models),
-            "modelCount": len(models),
-            "group_ids": group_ids,
-            "groupIds": group_ids,
-            "name": payload["name"],
-        }
-
-    async def sync_openai_models_preview(self, api_key: str) -> list[str]:
-        payload = await self._request(
-            "POST",
-            "/api/v1/admin/accounts/models/sync-upstream-preview",
-            json={
-                "platform": SUB2API_OPENAI_PLATFORM,
-                "type": SUB2API_APIKEY_TYPE,
-                "base_url": OPENCODE_GO_SUB2API_BASE_URL,
-                "api_key": api_key,
-            },
-        )
-        data = _unwrap_sub2api_data(payload)
-        models = data.get("models") if isinstance(data, dict) else None
-        if not isinstance(models, list):
-            raise Sub2ApiAdminError("Sub2API 模型同步响应格式不正确", status_code=502)
-        return _normalize_model_ids(models)
-
     async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
         headers = {"x-api-key": self.admin_key, "Accept": "application/json"}
         if "json" in kwargs:
@@ -601,11 +531,6 @@ def _extract_sub2api_list(payload: Any, keys: tuple[str, ...]) -> list[Any] | No
     return None
 
 
-def _account_belongs_to_group_or_unknown(account: dict[str, Any], group_id: int) -> bool:
-    group_ids = _account_group_ids(account)
-    return not group_ids or int(group_id) in group_ids
-
-
 def _account_group_ids(account: dict[str, Any]) -> set[int]:
     values: list[Any] = []
     for key in ("group_id", "groupId", "group_ids", "groupIds", "groups", "plans"):
@@ -636,10 +561,6 @@ def _collect_group_ids(target: set[int], value: Any) -> None:
         target.add(group_id)
 
 
-def _normalize_account_name(value: Any) -> str:
-    return str(value or "").strip().lower()
-
-
 def _account_group_query_value(value: int | str) -> int | str:
     if isinstance(value, str) and value.strip().lower() == "ungrouped":
         return "ungrouped"
@@ -650,18 +571,6 @@ def _account_group_query_value(value: int | str) -> int | str:
     if group_id <= 0:
         raise Sub2ApiAdminError("Sub2API 账号分组 ID 必须是正整数")
     return group_id
-
-
-def _normalize_model_ids(models: list[Any]) -> list[str]:
-    seen = set()
-    result = []
-    for model in models:
-        text = str(model or "").strip()
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        result.append(text)
-    return result
 
 
 def public_dispatch_account(account: dict[str, Any], recent_activity: list[dict[str, Any]]) -> dict[str, Any]:

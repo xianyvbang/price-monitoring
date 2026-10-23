@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from app.main import app, config
 from app.models import Database
 from app.security import decrypt_value
-from app.services.extension_pack import build_account_grabber_extension_zip, build_extension_zip
+from app.services.extension_pack import build_account_grabber_extension_zip
 
 
 def setup_test_db(tmp_path, monkeypatch) -> Database:
@@ -49,17 +49,6 @@ def test_account_grabber_zip_patches_app_origin():
     assert 'data.appBase || "https://price.example.com"' in options_js
     assert "background.js" in names
     assert "content.js" in names
-
-
-def test_opencode_grabber_zip_still_uses_original_template():
-    body, filename = build_extension_zip("https://price.example.com/")
-
-    assert filename == "opencode-go-grabber.zip"
-    with zipfile.ZipFile(BytesIO(body)) as zf:
-        manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
-
-    assert manifest["name"] == "OpenCode Go Grabber"
-    assert any(cs.get("matches") == ["https://opencode.ai/*"] for cs in manifest["content_scripts"])
 
 
 def test_account_grabber_download_endpoint_requires_login_and_returns_zip(tmp_path, monkeypatch):
