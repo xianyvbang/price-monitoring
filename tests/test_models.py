@@ -1014,6 +1014,32 @@ def test_top_menu_visibility_defaults_and_partial_updates(tmp_path):
     assert db.get_general_settings()["top_menu_visibility"] == TOP_MENU_VISIBILITY_DEFAULTS
 
 
+def test_init_drops_legacy_reminder_table_and_data(tmp_path):
+    db_path = str(tmp_path / "app.db")
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE reminders (id INTEGER PRIMARY KEY, title TEXT);
+            CREATE INDEX idx_reminders_due ON reminders(id);
+            INSERT INTO reminders (title) VALUES ('legacy reminder');
+            """
+        )
+
+    db = Database(db_path, "test-key")
+    db.init()
+
+    with sqlite3.connect(db_path) as conn:
+        table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'reminders'"
+        ).fetchone()
+        reminder_index = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_reminders_due'"
+        ).fetchone()
+
+    assert table is None
+    assert reminder_index is None
+
+
 def test_default_accounts_only_seed_on_first_init(tmp_path):
     db = Database(str(tmp_path / "app.db"), "test-key")
     db.init()

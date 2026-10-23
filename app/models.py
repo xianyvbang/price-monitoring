@@ -418,6 +418,7 @@ class Database:
                 ON platform_dispatch_cost_bindings(monitor_group_id);
                 """
             )
+            conn.execute("DROP TABLE IF EXISTS reminders")
             self._migrate_smtp_nullable(conn)
             self._migrate_users_session_version(conn)
             self._migrate_accounts_key_id(conn)
