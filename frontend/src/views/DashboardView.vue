@@ -64,6 +64,8 @@ const columnDefs = [
   { key: "note", label: "备注", defaultVisible: true, defaultVisibleByPlatform: { newApi: false, sub2Api: false } },
   { key: "status", label: "状态", defaultVisible: true, defaultVisibleByPlatform: { newApi: false, sub2Api: false } },
   { key: "group_rates", label: "分组倍率", defaultVisible: true },
+  { key: "recharge_ratio", label: "充值比例", defaultVisible: false },
+  { key: "actual_rate", label: "实际倍率", defaultVisible: true },
   { key: "group_rate_changed", label: "倍率变化", defaultVisible: true },
   { key: "group_query_status", label: "最近查组", defaultVisible: true },
   { key: "remaining", label: "剩余", defaultVisible: true },
@@ -299,6 +301,33 @@ function groupRateText(row) {
   return rates.map((rate) => `${rate.plan_name || rate.group_id || "-"}: ${displayValue(rate.rate_multiplier)}`);
 }
 
+function positiveNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function rechargeRatioText(row) {
+  const paid = positiveNumber(row.recharge_paid_amount ?? row.rechargePaidAmount) ?? 1;
+  const received = positiveNumber(row.recharge_received_amount ?? row.rechargeReceivedAmount) ?? 1;
+  return `${paid}:${received}`;
+}
+
+function actualRateTexts(row) {
+  const rates = row.group_rates || [];
+  if (!rates.length) {
+    return ["-"];
+  }
+  const paid = positiveNumber(row.recharge_paid_amount ?? row.rechargePaidAmount) ?? 1;
+  const received = positiveNumber(row.recharge_received_amount ?? row.rechargeReceivedAmount) ?? 1;
+  return rates.map((rate) => {
+    const multiplier = Number(rate.rate_multiplier);
+    if (!Number.isFinite(multiplier)) {
+      return "-";
+    }
+    return String(Number((multiplier * paid / received).toFixed(6)));
+  });
+}
+
 function lowBalanceText(row) {
   if (row.is_eliminated) {
     return "不提醒";
@@ -333,6 +362,7 @@ const accountMergedColumns = new Set([
   "note",
   "status",
   "group_query_status",
+  "recharge_ratio",
   "remaining",
   "today_consumption",
   "actual_today_consumption",
@@ -1035,6 +1065,18 @@ onBeforeUnmount(() => {
             <template #default="{ row }">
               <div class="group-rate-list">
                 <span v-for="text in groupRateText(row)" :key="text">{{ text }}</span>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column v-if="showColumn(platform, 'recharge_ratio')" prop="recharge_ratio" label="充值比例" width="120">
+            <template #default="{ row }">
+              <span>{{ rechargeRatioText(row) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column v-if="showColumn(platform, 'actual_rate')" label="实际倍率" min-width="130">
+            <template #default="{ row }">
+              <div class="group-rate-list">
+                <span v-for="(text, index) in actualRateTexts(row)" :key="index">{{ text }}</span>
               </div>
             </template>
           </el-table-column>
