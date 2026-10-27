@@ -1,5 +1,16 @@
 const JSON_HEADERS = { "Content-Type": "application/json" };
 
+let authExpiredHandler = null;
+
+export function setAuthExpiredHandler(handler) {
+  authExpiredHandler = handler;
+}
+
+function shouldNotifyAuthExpired(url) {
+  // 登录接口的 401 表示账号密码错误，不需要跳转登录页
+  return !url.startsWith("/login") && !url.startsWith("/api/session");
+}
+
 export async function request(url, options = {}) {
   const response = await fetch(url, {
     credentials: "same-origin",
@@ -23,6 +34,9 @@ export async function request(url, options = {}) {
     const error = new Error(payload?.detail || payload?.message || "请求失败");
     error.status = response.status;
     error.payload = payload;
+    if (response.status === 401 && authExpiredHandler && shouldNotifyAuthExpired(url)) {
+      authExpiredHandler(error);
+    }
     throw error;
   }
   return payload;

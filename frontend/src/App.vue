@@ -3,7 +3,7 @@ import { computed, onMounted, provide, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { Connection, Grid, HomeFilled, List, Setting, SwitchButton, Tickets } from "@element-plus/icons-vue";
-import { api } from "./api";
+import { api, setAuthExpiredHandler } from "./api";
 
 const router = useRouter();
 const route = useRoute();
@@ -62,6 +62,24 @@ async function logout() {
   ElMessage.success("已退出登录");
   await router.replace("/login");
 }
+
+let redirectingToLogin = false;
+
+function handleAuthExpired() {
+  session.value = { loading: false, authenticated: false, user: null, topMenuVisibility: { ...defaultTopMenuVisibility } };
+  if (route.name === "login" || redirectingToLogin) {
+    return;
+  }
+  redirectingToLogin = true;
+  ElMessage.warning("登录已失效，请重新登录");
+  router
+    .replace({ name: "login", query: { redirect: route.fullPath } })
+    .finally(() => {
+      redirectingToLogin = false;
+    });
+}
+
+setAuthExpiredHandler(handleAuthExpired);
 
 provide("session", session);
 provide("refreshSession", refreshSession);
