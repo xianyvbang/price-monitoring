@@ -1345,5 +1345,7 @@ onBeforeUnmount(() => {
         </div>
       </template>
     </el-dialog>
+
+    <el-backtop :right="24" :bottom="24" :visibility-height="300" />
   </section>
 </template>
